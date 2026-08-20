@@ -275,6 +275,8 @@ enable = False
 [pytdx]
 enable = False
 use_tdx_number = 10
+; 分时线(HDF5)并发连接数，上限不超过 use_tdx_number 与实际可达服务器数
+time_workers = 10
 
 [hdf5]
 enable = True

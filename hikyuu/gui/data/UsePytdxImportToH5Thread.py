@@ -228,8 +228,7 @@ class UsePytdxImportToH5Thread(QThread):
                     ImportPytdxTimeToH5(self.log_queue, self.queue,
                                         self.config, market,
                                         self.quotations,
-                                        use_hosts[cur_host][0],
-                                        use_hosts[cur_host][1], dest_dir,
+                                        use_hosts, dest_dir,
                                         time_max_days))
                 cur_host += 1
 

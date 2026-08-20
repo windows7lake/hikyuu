@@ -27,7 +27,7 @@ import os
 import math
 import datetime
 import sqlite3
-from pytdx.hq import TDXParams
+from pytdx.hq import TDXParams, TdxHq_API
 from configparser import ConfigParser
 
 from hikyuu.util.mylog import get_default_logger, hku_error, hku_debug
@@ -725,82 +725,145 @@ def fetch_time_records(api, pytdx_market, code, date_list):
     return records
 
 
-def import_on_stock_time(connect, api, h5file, market, stock_record, max_days):
-    market = market.upper()
-    pytdx_market = to_pytdx_market(market)
+class APIPool:
+    """通达信行情连接池：每条连接独立，供多线程并发抓取。"""
+    def __init__(self, hosts, n):
+        import queue
+        self._q = queue.Queue()
+        n = max(1, min(n, len(hosts)))
+        for i in range(n):
+            ip, port = hosts[i % len(hosts)]          # 轮询多个服务器，分散压力
+            api = TdxHq_API()
+            if not api.connect(ip, port):
+                raise RuntimeError("failed connect pytdx {}:{}".format(ip, port))
+            self._q.put(api)
+        self.size = n
 
-    stockid, marketid, code, valid, stktype = stock_record[0], stock_record[1], stock_record[2], stock_record[3], \
-        stock_record[4]
-    hku_debug("{}{}".format(market, code))
+    def get(self):
+        return self._q.get()
+
+    def put(self, api):
+        self._q.put(api)
+
+    def close_all(self):
+        while not self._q.empty():
+            try:
+                self._q.get_nowait().close()
+            except Exception:
+                pass
+
+
+def plan_stock_time_dates(h5file, market, code, max_days):
+    """写者串行调用：读表区间，返回 (backfill_dates, append_dates)。表损坏返回 None。"""
     table = get_time_table(h5file, market, code)
     if table is None:
-        hku_error("Can't get table({}{})!".format(market, code))
-        return 0
-
-    today = datetime.date.today()
-
-    # 候选交易日完全由 max_days 决定，不再受表内已有数据裁剪，
-    # 这样把起始日期往前调之后，更早的历史可以被回补。
-    date_list = gen_trading_date_list(today, max_days)
-
+        return [], gen_trading_date_list(datetime.date.today(), max_days)   # 新表→全追加
     try:
         first_date, last_date = get_h5table_date_range(table, 10000)
     except Exception as e:
-        hku_error("Failed get date range from hdf5({}{}), remove this table! {}".format(market, code, e))
+        hku_error("Failed get date range from hdf5({}{}), remove this table! {}",
+                  market, code, e)
         table.remove()
-        return 0
-
+        return None
+    dl = gen_trading_date_list(datetime.date.today(), max_days)
     if first_date is None:
-        backfill_dates, append_dates = [], date_list
-    else:
-        backfill_dates = [d for d in date_list if d < first_date]
-        append_dates = [d for d in date_list if d > last_date]
+        return [], dl
+    return ([d for d in dl if d < first_date],
+            [d for d in dl if d > last_date])
 
-    add_record_count = 0
 
-    # 1) 先回补比表内首条更早的历史（需重建表以保持升序）
-    if backfill_dates:
-        old_records = fetch_time_records(api, pytdx_market, code, backfill_dates)
-        if old_records:
-            cnt, table = prepend_h5_records(h5file, table, old_records)
-            add_record_count += cnt
+def fetch_stock_time(api_pool, pytdx_market, code, backfill_dates, append_dates):
+    """worker 调用：纯网络抓取，从连接池借还连接。"""
+    api = api_pool.get()
+    try:
+        bf = fetch_time_records(api, pytdx_market, code, backfill_dates) if backfill_dates else []
+        ap = fetch_time_records(api, pytdx_market, code, append_dates) if append_dates else []
+        return code, bf, ap
+    finally:
+        api_pool.put(api)
 
-    # 2) 再追加表尾之后的新数据
-    if append_dates:
-        new_records = fetch_time_records(api, pytdx_market, code, append_dates)
+
+def write_stock_time(h5file, market, code, backfill_recs, append_recs):
+    """写者串行调用：独占 h5file。回补走 prepend（重建表）保持升序，追加走 table.row.append。"""
+    table = get_time_table(h5file, market, code)
+    if table is None:
+        hku_error("Can't get time table({}{})!", market, code)
+        return 0
+    cnt = 0
+    if backfill_recs:
+        n, table = prepend_h5_records(h5file, table, backfill_recs)   # 回补需重建表，返回新表对象
+        cnt += n
+    if append_recs:
         row = table.row
-        for rec in new_records:
+        for rec in append_recs:
             for k, v in rec.items():
                 row[k] = v
             row.append()
-        add_record_count += len(new_records)
-
-    if add_record_count > 0:
+        cnt += len(append_recs)
+    if cnt > 0:
         table.flush()
     elif table.nrows == 0:
         table.remove()
+    return cnt
 
-    return add_record_count
 
-
-def import_time(connect, market, quotations, api, dest_dir, max_days=9000, progress=ProgressBar):
-    add_record_count = 0
+@hku_catch(ret=0, trace=True)
+def import_time(connect, market, quotations, api_pool, dest_dir,
+                max_days=9000, progress=ProgressBar, n_workers=1):
+    """分时线导入(HDF5)。api_pool 为 APIPool 实例；n_workers<=1 退回原串行逻辑。"""
     market = market.upper()
     h5file = open_time_file(dest_dir, market)
-
     stock_list = get_stock_list(connect, market, quotations)
-
+    pytdx_market = to_pytdx_market(market)
+    add_record_count = 0
+    done = 0
     total = len(stock_list)
-    for i, stock in enumerate(stock_list):
-        if stock[3] == 0 or len(stock[2]) != 6:
-            if progress:
-                progress(i, total)
-            continue
 
-        this_count = import_on_stock_time(connect, api, h5file, market, stock, max_days)
-        add_record_count += this_count
-        if progress:
-            progress(i, total)
+    # Phase A（写者串行）：构造 work_items（有效股票 + 回补/追加日期）
+    work_items = []
+    for stock in stock_list:
+        if stock[3] == 0 or len(stock[2]) != 6:
+            done += 1
+            if progress:
+                progress(done, total)
+            continue
+        code = stock[2]
+        bf, ap = plan_stock_time_dates(h5file, market, code, max_days)
+        if bf is None or (not bf and not ap):
+            done += 1
+            if progress:
+                progress(done, total)
+            continue
+        work_items.append((code, bf, ap))
+
+    if n_workers <= 1:
+        for code, bf, ap in work_items:
+            _, bfr, apr = fetch_stock_time(api_pool, pytdx_market, code, bf, ap)
+            add_record_count += write_stock_time(h5file, market, code, bfr, apr)
+            done += 1
+            if progress:
+                progress(done, total)
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=min(n_workers, api_pool.size)) as ex:
+            futs = {
+                ex.submit(fetch_stock_time, api_pool, pytdx_market, code, bf, ap): code
+                for code, bf, ap in work_items
+            }
+            for fut in as_completed(futs):
+                code = futs[fut]
+                try:
+                    _, bfr, apr = fut.result()
+                except Exception as e:
+                    hku_error("fetch time failed {}: {}", code, e)
+                    done += 1
+                    if progress:
+                        progress(done, total)
+                    continue
+                add_record_count += write_stock_time(h5file, market, code, bfr, apr)
+                done += 1
+                if progress:
+                    progress(done, total)
 
     connect.commit()
     h5file.close()
