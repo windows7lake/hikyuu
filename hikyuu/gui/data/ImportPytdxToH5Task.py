@@ -43,7 +43,7 @@ class ProgressBar:
 
 
 class ImportPytdxToH5:
-    def __init__(self, log_queue, queue, config, market, ktype, quotations, ip, port, dest_dir, start_datetime):
+    def __init__(self, log_queue, queue, config, market, ktype, quotations, ip, port, dest_dir, start_datetime, end_datetime=None):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.task_name = 'IMPORT_KDATA'
         self.queue = queue
@@ -56,6 +56,7 @@ class ImportPytdxToH5:
         self.port = port
         self.dest_dir = dest_dir
         self.startDatetime = start_datetime
+        self.endDatetime = end_datetime
         self.status = "no run"
 
     @hku_catch(trace=True)
@@ -97,7 +98,7 @@ class ImportPytdxToH5:
             hku_info("导入 {} {} 数据 from {}", self.market, self.ktype, self.ip)
             hku_check(api.connect(self.ip, self.port), "failed connect pytdx: {}:{}", self.ip, self.port)
             count = import_data(
-                connect, self.market, self.ktype, self.quotations, api, self.dest_dir, self.startDatetime, progress
+                connect, self.market, self.ktype, self.quotations, api, self.dest_dir, self.startDatetime, self.endDatetime, progress
             )
             self.logger.info("导入 {} {} 记录数: {}".format(self.market, self.ktype, count))
             api.disconnect()

@@ -238,7 +238,7 @@ def guess_5min_n_step(last_datetime):
 
 
 @hku_catch(trace=True)
-def import_one_stock_data(connect, api, h5file, market, ktype, stock_record, startDate=199012191500):
+def import_one_stock_data(connect, api, h5file, market, ktype, stock_record, startDate=199012191500, endDate=999912319999):
     market = market.upper()
     pytdx_market = to_pytdx_market(market)
 
@@ -285,6 +285,7 @@ def import_one_stock_data(connect, api, h5file, market, ktype, stock_record, sta
     add_record_count = 0
 
     row = table.row
+    reached_end = False
     while n >= 0:
         bar_list = get_bars(pytdx_kline_type, pytdx_market, code, n * 800, step)
         n -= 1
@@ -308,6 +309,11 @@ def import_one_stock_data(connect, api, h5file, market, ktype, stock_record, sta
             if 'open' not in bar or 'high' not in bar or 'low' not in bar or 'close' not in bar or 'vol' not in bar or 'amount' not in bar:
                 hku_warn(f"Ignore invalid bar: {bar_datetime}, missing fields!")
                 continue
+
+            if bar_datetime > endDate:
+                # 已超过指定的结束日期，后续(更新的)bar 必然也都超界，直接停止
+                reached_end = True
+                break
 
             if need_check and bar_datetime == last_datetime:
                 # print(f'{bar_datetime} {ktype} {market}{code}')
@@ -350,6 +356,7 @@ def import_one_stock_data(connect, api, h5file, market, ktype, stock_record, sta
                 continue
 
             if (today_datetime >= bar_datetime > last_datetime
+                    and bar_datetime <= endDate
                     and bar['high'] >= bar['open'] >= bar['low'] > 0
                     and bar['high'] >= bar['close'] >= bar['low'] > 0
                     and int(bar['vol']) >= 0 and int(bar['amount']*0.001) >= 0):
@@ -366,6 +373,9 @@ def import_one_stock_data(connect, api, h5file, market, ktype, stock_record, sta
                 except Exception as e:
                     hku_error("Can't trans record: {}! {}".format(bar, e))
                 last_datetime = bar_datetime
+
+        if reached_end:
+            break
 
     if add_record_count > 0:
         table.flush()
@@ -405,7 +415,7 @@ def get_hdf5_importer(market, ktype):
     return importer if importer.set_config(config.get("hikyuu", "datadir"), [market], [ktype]) else None
 
 
-def import_data(connect, market, ktype, quotations, api, dest_dir, startDate=199012190000, progress=ProgressBar):
+def import_data(connect, market, ktype, quotations, api, dest_dir, startDate=199012190000, endDate=999912319999, progress=ProgressBar):
     """导入通达信指定盘后数据路径中的K线数据。注：只导入基础信息数据库中存在的股票。
 
     :param connect   : sqlit3链接
@@ -414,6 +424,8 @@ def import_data(connect, market, ktype, quotations, api, dest_dir, startDate=199
     :param quotations: 'stock' | 'fund' | 'bond'
     :param src_dir   : 盘后K线数据路径，如上证5分钟线：D:\\Tdx\\vipdoc\\sh\\fzline
     :param dest_dir  : HDF5数据文件所在目录
+    :param startDate : 起始日期(整数 YYYYMMDDHHMM)
+    :param endDate   : 结束日期(整数 YYYYMMDDHHMM)，默认极大表示到最新交易日
     :param progress  : 进度显示函数
     :return: 导入记录数
     """
@@ -435,7 +447,7 @@ def import_data(connect, market, ktype, quotations, api, dest_dir, startDate=199
                 progress(i, total)
             continue
 
-        this_count, success, lastdate = import_one_stock_data(connect, api, h5file, market, ktype, stock, startDate)
+        this_count, success, lastdate = import_one_stock_data(connect, api, h5file, market, ktype, stock, startDate, endDate)
         if not success:
             failed_count += 1
             failed_list.append((market, stock[2], lastdate))
@@ -478,49 +490,77 @@ def import_data(connect, market, ktype, quotations, api, dest_dir, startDate=199
     return add_record_count
 
 
-def import_on_stock_trans(connect, api, h5file, market, stock_record, max_days):
-    market = market.upper()
-    pytdx_market = to_pytdx_market(market)
+def get_h5table_date_range(table, time_div):
+    """获取 h5 表内已有数据的日期范围
 
-    stockid, marketid, code, valid, stktype = stock_record[0], stock_record[1], stock_record[2], stock_record[3], \
-        stock_record[4]
-    hku_debug("{}{}".format(market, code))
-    table = get_trans_table(h5file, market, code)
-    if table is None:
-        hku_error("Failed get_trans_table({}{})!".format(market, code))
-        return 0
+    :param table: pytables 表
+    :param int time_div: datetime 字段中日期部分对应的除数（分笔 1000000，分时 10000）
+    :return: (first_date, last_date)，均为 yyyymmdd 整数；表为空时返回 (None, None)
+    """
+    if table.nrows == 0:
+        return None, None
+    return int(table[0]['datetime'] // time_div), int(table[-1]['datetime'] // time_div)
 
-    today = datetime.date.today()
-    if table.nrows > 0:
-        try:
-            last_datetime = int(table[-1]['datetime'] // 1000000)
-            last_y = int(last_datetime // 10000)
-            last_m = int(last_datetime // 100 - last_y * 100)
-            last_d = int(last_datetime - (last_y * 10000 + last_m * 100))
-            last_date = datetime.date(last_y, last_m, last_d)
-            need_days = (today - last_date).days
-        except Exception as e:
-            hku_error("Failed get last date from hdf5({}{}), remove this table! {}".format(market, code, e))
-            table.remove()
-            return 0
-    else:
-        need_days = max_days
 
-    date_list = []
-    for i in range(need_days):
-        cur_date = today - datetime.timedelta(i)
-        if cur_date.weekday() not in (5, 6):
-            date_list.append(cur_date.year * 10000 + cur_date.month * 100 + cur_date.day)
-    date_list.reverse()
+def prepend_h5_records(h5file, table, records):
+    """将 records 插入 table 头部，要求 records 升序且全部早于表内首条记录。
 
-    add_record_count = 0
+    HDF5 Table 只支持尾部追加，这里通过“建临时表 -> 先写新数据再搬旧数据 -> 替换原表”实现，
+    以保证表内 datetime 始终升序（hikyuu C++ 侧按升序做二分查找，顺序错乱会导致读取异常）。
 
+    :return: (写入条数, 替换后的表对象)
+    """
+    if not records:
+        return 0, table
+
+    group = table._v_parent
+    tablename = table.name
+    tmpname = "{}_hku_rebuild".format(tablename)
+
+    # 清理可能残留的临时表（上次中断）
+    try:
+        h5file.remove_node(group, tmpname)
+    except Exception:
+        pass
+
+    tmptable = h5file.create_table(group, tmpname, table.dtype)
+    row = tmptable.row
+    for rec in records:
+        for k, v in rec.items():
+            row[k] = v
+        row.append()
+    tmptable.flush()
+
+    # 分块搬运原有数据，避免大表一次性读入内存
+    total = table.nrows
+    chunk = 200000
+    start = 0
+    while start < total:
+        stop = min(start + chunk, total)
+        tmptable.append(table.read(start, stop))
+        start = stop
+    tmptable.flush()
+
+    h5file.remove_node(group, tablename)
+    h5file.rename_node(tmptable, tablename)
+
+    # 回补导致行号整体后移，原按日索引失效，删除待下次重建
+    try:
+        h5file.remove_node("/index", tablename)
+    except Exception:
+        pass
+
+    return len(records), tmptable
+
+
+def fetch_trans_records(api, pytdx_market, code, date_list):
+    """按日下载分笔数据，返回按 datetime 升序的记录 dict 列表"""
+    records = []
     # 用于去重的集合，记录已处理的 datetime
     seen_datetimes = set()
 
-    row = table.row
     for cur_date in date_list:
-        buf = pytdx_get_day_trans(api, pytdx_market, stock_record[2], cur_date)
+        buf = pytdx_get_day_trans(api, pytdx_market, code, cur_date)
         if not buf:
             continue
 
@@ -543,16 +583,69 @@ def import_on_stock_trans(connect, api, h5file, market, stock_record, max_days):
 
                     # 检查是否重复
                     if bar_datetime not in seen_datetimes:
-                        row['datetime'] = bar_datetime
-                        row['price'] = int(record['price'] * 1000)
-                        row['vol'] = record['vol']
-                        row['buyorsell'] = record['buyorsell']
-                        row.append()
-                        add_record_count += 1
+                        records.append({
+                            'datetime': bar_datetime,
+                            'price': int(record['price'] * 1000),
+                            'vol': record['vol'],
+                            'buyorsell': record['buyorsell'],
+                        })
                         # 标记为已处理
                         seen_datetimes.add(bar_datetime)
             except Exception as e:
                 hku_error("Failed trans to record! {}", e)
+
+    return records
+
+
+def import_on_stock_trans(connect, api, h5file, market, stock_record, max_days):
+    market = market.upper()
+    pytdx_market = to_pytdx_market(market)
+
+    stockid, marketid, code, valid, stktype = stock_record[0], stock_record[1], stock_record[2], stock_record[3], \
+        stock_record[4]
+    hku_debug("{}{}".format(market, code))
+    table = get_trans_table(h5file, market, code)
+    if table is None:
+        hku_error("Failed get_trans_table({}{})!".format(market, code))
+        return 0
+
+    today = datetime.date.today()
+
+    # 候选交易日完全由 max_days 决定，不再受表内已有数据裁剪，
+    # 这样把起始日期往前调之后，更早的历史可以被回补。
+    date_list = gen_trading_date_list(today, max_days)
+
+    try:
+        first_date, last_date = get_h5table_date_range(table, 1000000)
+    except Exception as e:
+        hku_error("Failed get date range from hdf5({}{}), remove this table! {}".format(market, code, e))
+        table.remove()
+        return 0
+
+    if first_date is None:
+        backfill_dates, append_dates = [], date_list
+    else:
+        backfill_dates = [d for d in date_list if d < first_date]
+        append_dates = [d for d in date_list if d > last_date]
+
+    add_record_count = 0
+
+    # 1) 先回补比表内首条更早的历史（需重建表以保持升序）
+    if backfill_dates:
+        old_records = fetch_trans_records(api, pytdx_market, code, backfill_dates)
+        if old_records:
+            cnt, table = prepend_h5_records(h5file, table, old_records)
+            add_record_count += cnt
+
+    # 2) 再追加表尾之后的新数据
+    if append_dates:
+        new_records = fetch_trans_records(api, pytdx_market, code, append_dates)
+        row = table.row
+        for rec in new_records:
+            for k, v in rec.items():
+                row[k] = v
+            row.append()
+        add_record_count += len(new_records)
 
     if add_record_count > 0:
         table.flush()
@@ -589,51 +682,16 @@ def import_trans(connect, market, quotations, api, dest_dir, max_days=30, progre
     return add_record_count
 
 
-def import_on_stock_time(connect, api, h5file, market, stock_record, max_days):
-    market = market.upper()
-    pytdx_market = to_pytdx_market(market)
-
-    stockid, marketid, code, valid, stktype = stock_record[0], stock_record[1], stock_record[2], stock_record[3], \
-        stock_record[4]
-    hku_debug("{}{}".format(market, code))
-    table = get_time_table(h5file, market, code)
-    if table is None:
-        hku_error("Can't get table({}{})!".format(market, code))
-        return 0
-
-    today = datetime.date.today()
-    if table.nrows > 0:
-        try:
-            last_datetime = int(table[-1]['datetime'] // 10000)
-            last_y = int(last_datetime // 10000)
-            last_m = int(last_datetime // 100 - last_y * 100)
-            last_d = int(last_datetime - (last_y * 10000 + last_m * 100))
-            last_date = datetime.date(last_y, last_m, last_d)
-            need_days = (today - last_date).days
-        except Exception as e:
-            hku_error("Failed get last date from hdf5({}{}), remove this table! {}".format(market, code, e))
-            table.remove()
-            return 0
-    else:
-        need_days = max_days
-
-    date_list = []
-    for i in range(need_days):
-        cur_date = today - datetime.timedelta(i)
-        if cur_date.weekday() not in (5, 6):
-            date_list.append(cur_date.year * 10000 + cur_date.month * 100 + cur_date.day)
-    date_list.reverse()
-
-    add_record_count = 0
-
+def fetch_time_records(api, pytdx_market, code, date_list):
+    """按日下载分时线（每日 240 点），返回按 datetime 升序的记录 dict 列表"""
+    records = []
     # 用于去重的集合，记录已处理的 datetime
     seen_datetimes = set()
 
-    row = table.row
     for cur_date in date_list:
-        buf = api.get_history_minute_time_data(pytdx_market, stock_record[2], cur_date)
+        buf = api.get_history_minute_time_data(pytdx_market, code, cur_date)
         if buf is None or len(buf) != 240:
-            # print(cur_date, "获取的分时线长度不为 240!", stock_record[1], stock_record[2])
+            # print(cur_date, "获取的分时线长度不为 240!", code)
             continue
         this_date = cur_date * 10000
         time = 930
@@ -653,16 +711,70 @@ def import_on_stock_time(connect, api, h5file, market, stock_record, max_days):
 
                     # 检查是否重复
                     if bar_datetime not in seen_datetimes:
-                        row['datetime'] = bar_datetime
-                        row['price'] = int(record['price'] * 1000)
-                        row['vol'] = record['vol']
-                        row.append()
-                        add_record_count += 1
+                        records.append({
+                            'datetime': bar_datetime,
+                            'price': int(record['price'] * 1000),
+                            'vol': record['vol'],
+                        })
                         # 标记为已处理
                         seen_datetimes.add(bar_datetime)
                 time += 1
             except Exception as e:
                 hku_error("Failed trans record {}! {}".format(record, e))
+
+    return records
+
+
+def import_on_stock_time(connect, api, h5file, market, stock_record, max_days):
+    market = market.upper()
+    pytdx_market = to_pytdx_market(market)
+
+    stockid, marketid, code, valid, stktype = stock_record[0], stock_record[1], stock_record[2], stock_record[3], \
+        stock_record[4]
+    hku_debug("{}{}".format(market, code))
+    table = get_time_table(h5file, market, code)
+    if table is None:
+        hku_error("Can't get table({}{})!".format(market, code))
+        return 0
+
+    today = datetime.date.today()
+
+    # 候选交易日完全由 max_days 决定，不再受表内已有数据裁剪，
+    # 这样把起始日期往前调之后，更早的历史可以被回补。
+    date_list = gen_trading_date_list(today, max_days)
+
+    try:
+        first_date, last_date = get_h5table_date_range(table, 10000)
+    except Exception as e:
+        hku_error("Failed get date range from hdf5({}{}), remove this table! {}".format(market, code, e))
+        table.remove()
+        return 0
+
+    if first_date is None:
+        backfill_dates, append_dates = [], date_list
+    else:
+        backfill_dates = [d for d in date_list if d < first_date]
+        append_dates = [d for d in date_list if d > last_date]
+
+    add_record_count = 0
+
+    # 1) 先回补比表内首条更早的历史（需重建表以保持升序）
+    if backfill_dates:
+        old_records = fetch_time_records(api, pytdx_market, code, backfill_dates)
+        if old_records:
+            cnt, table = prepend_h5_records(h5file, table, old_records)
+            add_record_count += cnt
+
+    # 2) 再追加表尾之后的新数据
+    if append_dates:
+        new_records = fetch_time_records(api, pytdx_market, code, append_dates)
+        row = table.row
+        for rec in new_records:
+            for k, v in rec.items():
+                row[k] = v
+            row.append()
+        add_record_count += len(new_records)
+
     if add_record_count > 0:
         table.flush()
     elif table.nrows == 0:

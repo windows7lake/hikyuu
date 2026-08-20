@@ -281,6 +281,17 @@ class Ui_MainWindow(object):
 
         self.gridLayout_4.addWidget(self.min5_start_dateEdit, 1, 1, 1, 1)
 
+        self.label_min5_end = QLabel(self.groupBox_7)
+        self.label_min5_end.setObjectName(u"label_min5_end")
+
+        self.gridLayout_4.addWidget(self.label_min5_end, 1, 2, 1, 1)
+
+        self.min5_end_dateEdit = QDateEdit(self.groupBox_7)
+        self.min5_end_dateEdit.setObjectName(u"min5_end_dateEdit")
+        self.min5_end_dateEdit.setCalendarPopup(True)
+
+        self.gridLayout_4.addWidget(self.min5_end_dateEdit, 1, 3, 1, 1)
+
         self.min_start_dateEdit = QDateEdit(self.groupBox_7)
         self.min_start_dateEdit.setObjectName(u"min_start_dateEdit")
         self.min_start_dateEdit.setCalendarPopup(True)
@@ -302,6 +313,17 @@ class Ui_MainWindow(object):
 
         self.gridLayout_4.addWidget(self.label_15, 2, 0, 1, 1)
 
+        self.label_min_end = QLabel(self.groupBox_7)
+        self.label_min_end.setObjectName(u"label_min_end")
+
+        self.gridLayout_4.addWidget(self.label_min_end, 2, 2, 1, 1)
+
+        self.min_end_dateEdit = QDateEdit(self.groupBox_7)
+        self.min_end_dateEdit.setObjectName(u"min_end_dateEdit")
+        self.min_end_dateEdit.setCalendarPopup(True)
+
+        self.gridLayout_4.addWidget(self.min_end_dateEdit, 2, 3, 1, 1)
+
         self.trans_start_dateEdit = QDateEdit(self.groupBox_7)
         self.trans_start_dateEdit.setObjectName(u"trans_start_dateEdit")
         self.trans_start_dateEdit.setCalendarPopup(True)
@@ -315,6 +337,17 @@ class Ui_MainWindow(object):
 
         self.gridLayout_4.addWidget(self.day_start_dateEdit, 0, 1, 1, 1)
 
+        self.label_day_end = QLabel(self.groupBox_7)
+        self.label_day_end.setObjectName(u"label_day_end")
+
+        self.gridLayout_4.addWidget(self.label_day_end, 0, 2, 1, 1)
+
+        self.day_end_dateEdit = QDateEdit(self.groupBox_7)
+        self.day_end_dateEdit.setObjectName(u"day_end_dateEdit")
+        self.day_end_dateEdit.setCalendarPopup(True)
+
+        self.gridLayout_4.addWidget(self.day_end_dateEdit, 0, 3, 1, 1)
+
         self.time_start_dateEdit = QDateEdit(self.groupBox_7)
         self.time_start_dateEdit.setObjectName(u"time_start_dateEdit")
         self.time_start_dateEdit.setCalendarPopup(True)
@@ -323,7 +356,7 @@ class Ui_MainWindow(object):
 
         self.horizontalSpacer_9 = QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
-        self.gridLayout_4.addItem(self.horizontalSpacer_9, 1, 2, 1, 1)
+        self.gridLayout_4.addItem(self.horizontalSpacer_9, 0, 4, 1, 1)
 
 
         self.verticalLayout_11.addLayout(self.gridLayout_4)
@@ -1378,9 +1411,12 @@ class Ui_MainWindow(object):
         self.import_time_checkBox.setText(QCoreApplication.translate("MainWindow", u"\u5206\u65f6", None))
         self.label_7.setText(QCoreApplication.translate("MainWindow", u"\u521d\u6b21\u5bfc\u5165\u5206\u65f6\u8d77\u59cb\u65e5\u671f\uff1a", None))
         self.label_6.setText(QCoreApplication.translate("MainWindow", u"\u521d\u6b21\u5bfc\u5165\u5206\u7b14\u8d77\u59cb\u65e5\u671f\uff1a", None))
+        self.label_min5_end.setText(QCoreApplication.translate("MainWindow", u"\u81f3", None))
         self.label_3.setText(QCoreApplication.translate("MainWindow", u"\u521d\u6b21\u5bfc\u5165\u65e5\u7ebf\u8d77\u59cb\u65e5\u671f\uff1a", None))
         self.label_10.setText(QCoreApplication.translate("MainWindow", u"\u521d\u6b21\u5bfc\u51655\u5206\u949f\u7ebf\u8d77\u59cb\u65e5\u671f\uff1a", None))
         self.label_15.setText(QCoreApplication.translate("MainWindow", u"\u521d\u6b21\u5bfc\u51651\u5206\u949f\u7ebf\u8d77\u59cb\u65e5\u671f\uff1a", None))
+        self.label_min_end.setText(QCoreApplication.translate("MainWindow", u"\u81f3", None))
+        self.label_day_end.setText(QCoreApplication.translate("MainWindow", u"\u81f3", None))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_4), QCoreApplication.translate("MainWindow", u"\u5bfc\u5165\u8bbe\u7f6e", None))
         self.groupBox_4.setTitle(QCoreApplication.translate("MainWindow", u"\u5b58\u50a8\u5f15\u64ce\u8bbe\u7f6e", None))
         self.enable_hdf55_radioButton.setText(QCoreApplication.translate("MainWindow", u"HDF5(\u63a8\u8350)", None))

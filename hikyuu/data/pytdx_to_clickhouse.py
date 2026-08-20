@@ -40,6 +40,7 @@ from hikyuu.data.common_clickhouse import (
     get_stock_list,
     get_table,
     get_lastdatetime,
+    get_firstdatetime,
     get_last_krecord,
     update_extern_data,
 )
@@ -254,7 +255,7 @@ def guess_5min_n_step(last_datetime):
 
 
 def import_one_stock_data(
-    connect, api, market, ktype, stock_record, startDate=199012191500
+    connect, api, market, ktype, stock_record, startDate=199012191500, endDate=999912319999
 ):
     market = market.upper()
     pytdx_market = to_pytdx_market(market)
@@ -297,6 +298,7 @@ def import_one_stock_data(
     buf = []
     # 用于去重的集合，记录已处理的 (market, code, date) 组合
     seen_keys = set()
+    reached_end = False
 
     while n >= 0:
         bar_list = get_bars(pytdx_kline_type, pytdx_market, code, n * 800, step)
@@ -321,6 +323,11 @@ def import_one_stock_data(
             if 'open' not in bar or 'high' not in bar or 'low' not in bar or 'close' not in bar or 'vol' not in bar or 'amount' not in bar:
                 hku_warn(f"Ignore invalid bar: {bar_datetime}, missing fields!")
                 continue
+
+            if bar_datetime > endDate:
+                # 已超过指定的结束日期，后续(更新的)bar 必然也都超界，直接停止
+                reached_end = True
+                break
 
             if last_krecord is not None and bar_datetime == last_datetime:
                 if abs(last_krecord[1] - bar["open"]) / last_krecord[1] > 0.01:
@@ -361,6 +368,7 @@ def import_one_stock_data(
             if (
                 bar_datetime not in seen_keys
                     and today_datetime >= bar_datetime > last_datetime
+                    and bar_datetime <= endDate
                     and bar["high"] >= bar["open"] >= bar["low"] > 0
                     and bar["high"] >= bar["close"] >= bar["low"] > 0
                     and bar["vol"] >= 0
@@ -385,6 +393,9 @@ def import_one_stock_data(
                 except Exception as e:
                     hku_error("Can't trans record({}), {}".format(bar, e))
                 last_datetime = bar_datetime
+
+        if reached_end:
+            break
 
     if len(buf) > 0:
         ic = connect.create_insert_context(table=table[0],
@@ -465,6 +476,7 @@ def import_data(
     api,
     dest_dir,
     startDate=199012190000,
+    endDate=999912319999,
     progress=ProgressBar,
 ):
     """导入通达信指定盘后数据路径中的K线数据。注：只导入基础信息数据库中存在的股票。
@@ -508,7 +520,7 @@ def import_data(
             continue
 
         this_count, success, lastdate = import_one_stock_data(
-            connect, api, market, ktype, stock, startDate
+            connect, api, market, ktype, stock, startDate, endDate
         )
         if not success:
             failed_count += 1
@@ -666,26 +678,17 @@ def import_on_stock_trans(connect, api, market, stock_record, max_days):
     hku_debug("{}{}".format(market, code))
     table = get_trans_table(connect, market, code)
     last_datetime = get_lastdatetime(connect, table)
+    first_datetime = get_firstdatetime(connect, table)
 
     today = datetime.date.today()
-    if last_datetime is not None:
-        # yyyymmddHHMMSS
-        last_y = last_datetime.year
-        last_m = last_datetime.month
-        last_d = last_datetime.day
-        last_date = datetime.date(last_y, last_m, last_d)
-        need_days = (today - last_date).days
-    else:
-        need_days = max_days
 
-    date_list = []
-    for i in range(need_days):
-        cur_date = today - datetime.timedelta(i)
-        if cur_date.weekday() not in (5, 6):
-            date_list.append(
-                cur_date.year * 10000 + cur_date.month * 100 + cur_date.day
-            )
-    date_list.reverse()
+    # 候选交易日完全由 max_days 决定，再剔除库中已覆盖的区间，
+    # 这样把起始日期往前调之后，更早的历史可以被回补（插入无顺序要求）
+    date_list = gen_trading_date_list(today, max_days)
+    if last_datetime is not None and first_datetime is not None:
+        first_date = first_datetime.year * 10000 + first_datetime.month * 100 + first_datetime.day
+        last_date = last_datetime.year * 10000 + last_datetime.month * 100 + last_datetime.day
+        date_list = [d for d in date_list if d < first_date or d > last_date]
 
     trans_buf = []
     # 用于去重的集合，记录已处理的 datetime
@@ -834,24 +837,17 @@ def import_on_stock_time(connect, api, market, stock_record, max_days):
     hku_debug("{}{}".format(market, code))
     table = get_time_table(connect, market, code)
     last_datetime = get_lastdatetime(connect, table)
+    first_datetime = get_firstdatetime(connect, table)
 
     today = datetime.date.today()
-    if last_datetime is not None:
-        # yyyymmddHHMM
-        last_y = last_datetime.year
-        last_m = last_datetime.month
-        last_d = last_datetime.day
-        last_date = datetime.date(last_y, last_m, last_d)
-        need_days = (today - last_date).days
-    else:
-        need_days = max_days
 
-    date_list = []
-    for i in range(need_days):
-        cur_date = today - datetime.timedelta(i)
-        if cur_date.weekday() not in (5, 6):
-            date_list.append(cur_date.year * 10000 + cur_date.month * 100 + cur_date.day)
-    date_list.reverse()
+    # 候选交易日完全由 max_days 决定，再剔除库中已覆盖的区间，
+    # 这样把起始日期往前调之后，更早的历史可以被回补（插入无顺序要求）
+    date_list = gen_trading_date_list(today, max_days)
+    if last_datetime is not None and first_datetime is not None:
+        first_date = first_datetime.year * 10000 + first_datetime.month * 100 + first_datetime.day
+        last_date = last_datetime.year * 10000 + last_datetime.month * 100 + last_datetime.day
+        date_list = [d for d in date_list if d < first_date or d > last_date]
 
     ticks = 1000000
     time_buf = []
