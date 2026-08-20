@@ -27,7 +27,7 @@ import sqlite3
 import mysql.connector
 import clickhouse_connect
 from pytdx.hq import TdxHq_API
-from hikyuu.data.pytdx_to_h5 import import_time as h5_import_time
+from hikyuu.data.pytdx_to_h5 import import_time as h5_import_time, APIPool
 from hikyuu.data.pytdx_to_mysql import import_time as mysql_import_time
 from hikyuu.data.pytdx_to_clickhouse import import_time as clickhouse_import_time
 from hikyuu.util import *
@@ -44,7 +44,7 @@ class ProgressBar:
 
 
 class ImportPytdxTimeToH5:
-    def __init__(self, log_queue, queue, config, market, quotations, ip, port, dest_dir, max_days):
+    def __init__(self, log_queue, queue, config, market, quotations, hosts, dest_dir, max_days):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.task_name = 'IMPORT_TIME'
         self.queue = queue
@@ -52,8 +52,7 @@ class ImportPytdxTimeToH5:
         self.config = config
         self.market = market
         self.quotations = quotations
-        self.ip = ip
-        self.port = port
+        self.hosts = hosts                       # [(ip, port), ...] 来自调度层的 use_hosts
         self.dest_dir = dest_dir
         self.max_days = int(max_days)
         self.status = "no run"
@@ -86,20 +85,38 @@ class ImportPytdxTimeToH5:
             import_time = clickhouse_import_time
 
         count = 0
+        api = None
         try:
             progress = ProgressBar(self)
-            api = TdxHq_API()
-            hku_info("导入 {} 分时数据 from {}", self.market, self.ip)
-            hku_check(api.connect(self.ip, self.port), "failed connect pytdx {}:{}", self.ip, self.port)
-            count = import_time(
-                connect, self.market, self.quotations, api, self.dest_dir, max_days=self.max_days, progress=progress
-            )
-            self.logger.info("导入 {} 分时记录数: {}".format(self.market, count))
-            api.disconnect()
+            if self.config.getboolean('hdf5', 'enable', fallback=True):
+                # HDF5：连接池 + 并行抓取
+                n_workers = self.config.getint('pytdx', 'time_workers', fallback=10)
+                n_workers = min(n_workers, len(self.hosts))
+                hku_info("分时(市场={}) 并行连接数: {}/{}", self.market, n_workers, len(self.hosts))
+                api_pool = APIPool(self.hosts, n_workers)
+                try:
+                    count = import_time(
+                        connect, self.market, self.quotations, api_pool,
+                        self.dest_dir, max_days=self.max_days,
+                        progress=progress, n_workers=n_workers)
+                finally:
+                    api_pool.close_all()
+            else:
+                # MySQL / ClickHouse：沿用原单连接逻辑（本次不动）
+                api = TdxHq_API()
+                hku_info("导入 {} 分时数据 from {}", self.market, self.hosts[0][0])
+                hku_check(api.connect(self.hosts[0][0], self.hosts[0][1]),
+                          "failed connect pytdx {}:{}", self.hosts[0][0], self.hosts[0][1])
+                count = import_time(
+                    connect, self.market, self.quotations, api,
+                    self.dest_dir, max_days=self.max_days, progress=progress)
+                self.logger.info("导入 {} 分时记录数: {}".format(self.market, count))
+                api.disconnect()
         except Exception as e:
             self.logger.error(e)
         finally:
-            api.close()
+            if api is not None:
+                api.close()
             connect.close()
 
         self.queue.put([self.task_name, self.market, 'TIME', None, count])
