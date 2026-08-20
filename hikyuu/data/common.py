@@ -180,6 +180,25 @@ def get_fund_code_name_list(market: str) -> list:
     return g_fund_code_name_list[market]
 
 
+def gen_trading_date_list(today, max_days):
+    """生成自 today 起向前 max_days 个自然日范围内的候选交易日列表（升序，已剔除周末）
+
+    用于分时线/分笔这类"按日逐天请求"的下载接口。节假日不在此过滤，
+    请求时服务器返回空数据会被调用方自动跳过。
+
+    :param datetime.date today: 结束日期（含）
+    :param int max_days: 向前回溯的自然日天数
+    :return: yyyymmdd 整数列表，升序
+    """
+    date_list = []
+    for i in range(int(max_days)):
+        cur_date = today - datetime.timedelta(i)
+        if cur_date.weekday() not in (5, 6):
+            date_list.append(cur_date.year * 10000 + cur_date.month * 100 + cur_date.day)
+    date_list.reverse()
+    return date_list
+
+
 @hku_catch(ret=[], trace=True)
 def get_new_holidays():
     """获取新的交易所休假日历"""

@@ -391,10 +391,31 @@ li.checked::marker { content: "\2612"; }
         self.min5_start_dateEdit.setDate(today - datetime.timedelta(90))
         self.min_start_dateEdit.setMinimumDate(datetime.date(1990, 12, 19))
         self.min5_start_dateEdit.setMinimumDate(datetime.date(1990, 12, 19))
-        self.trans_start_dateEdit.setDate(today - datetime.timedelta(7))
-        self.time_start_dateEdit.setDate(today - datetime.timedelta(7))
-        self.trans_start_dateEdit.setMinimumDate(today - datetime.timedelta(90))
-        self.time_start_dateEdit.setMinimumDate(today - datetime.timedelta(300))
+        # 分笔/分时起始日期：不再限制为最近 90/300 天，放开到与日线相同的下限。
+        # 实际能下到多早取决于所连 TDX 行情服务器的保留期，服务器无数据时返回空会自动跳过。
+        # 注意：必须先 setMinimumDate 再 setDate，否则更早的日期会被旧下限截断。
+        self.trans_start_dateEdit.setMinimumDate(datetime.date(1990, 12, 19))
+        self.time_start_dateEdit.setMinimumDate(datetime.date(1990, 12, 19))
+
+        def _get_saved_date(option, default_date):
+            """回填已保存的起始日期，避免每次启动都被重置"""
+            val = import_config.get('ktype', option, fallback=None)
+            if not val:
+                return default_date
+            try:
+                return datetime.datetime.strptime(val, '%Y-%m-%d').date()
+            except Exception:
+                return default_date
+
+        self.trans_start_dateEdit.setDate(_get_saved_date('trans_start_date', today - datetime.timedelta(7)))
+        self.time_start_dateEdit.setDate(_get_saved_date('time_start_date', today - datetime.timedelta(7)))
+        # 结束日期（不填/取今天表示下载到最新交易日）
+        self.day_end_dateEdit.setDate(today)
+        self.day_end_dateEdit.setMinimumDate(datetime.date(1990, 12, 19))
+        self.min5_end_dateEdit.setDate(today)
+        self.min5_end_dateEdit.setMinimumDate(datetime.date(1990, 12, 19))
+        self.min_end_dateEdit.setDate(today)
+        self.min_end_dateEdit.setMinimumDate(datetime.date(1990, 12, 19))
         self.collect_status_label.setText("已停止")
 
         # 初始化导入行情数据类型配置
@@ -575,7 +596,10 @@ li.checked::marker { content: "\2612"; }
             'min_start_date': self.min_start_dateEdit.date().toString('yyyy-MM-dd'),
             'min5_start_date': self.min5_start_dateEdit.date().toString('yyyy-MM-dd'),
             'trans_start_date': self.trans_start_dateEdit.date().toString('yyyy-MM-dd'),
-            'time_start_date': self.time_start_dateEdit.date().toString('yyyy-MM-dd')
+            'time_start_date': self.time_start_dateEdit.date().toString('yyyy-MM-dd'),
+            'day_end_date': self.day_end_dateEdit.date().toString('yyyy-MM-dd'),
+            'min5_end_date': self.min5_end_dateEdit.date().toString('yyyy-MM-dd'),
+            'min_end_date': self.min_end_dateEdit.date().toString('yyyy-MM-dd')
         }
         import_config['weight'] = {
             'enable': self.import_weight_checkBox.isChecked(),

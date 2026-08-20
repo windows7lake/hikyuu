@@ -146,9 +146,15 @@ class UsePytdxImportToH5Thread(QThread):
         cur_host = 0
 
         # 以下按数据量从大到小依次使用速度从高到低的TDX服务器
+        today = datetime.date.today()
         if self.config.getboolean('ktype', 'min5', fallback=False):
             start_date = datetime.datetime.strptime(
                 config['ktype']['min5_start_date'], '%Y-%m-%d').date()
+            end_date = datetime.datetime.strptime(
+                config['ktype'].get('min5_end_date', today.strftime('%Y-%m-%d')),
+                '%Y-%m-%d').date()
+            end_datetime = (end_date.year * 100000000 + end_date.month * 1000000 +
+                            end_date.day * 10000 + 1500) if end_date < today else 999912319999
             for market in g_market_list:
                 self.tasks.append(
                     ImportPytdxToH5(
@@ -156,12 +162,18 @@ class UsePytdxImportToH5Thread(QThread):
                         '5MIN', self.quotations, use_hosts[cur_host][0],
                         use_hosts[cur_host][1], dest_dir,
                         start_date.year * 100000000 +
-                        start_date.month * 1000000 + start_date.day * 10000))
+                        start_date.month * 1000000 + start_date.day * 10000,
+                        end_datetime))
                 cur_host += 1
 
         if self.config.getboolean('ktype', 'day', fallback=False):
             start_date = datetime.datetime.strptime(
                 config['ktype']['day_start_date'], '%Y-%m-%d').date()
+            end_date = datetime.datetime.strptime(
+                config['ktype'].get('day_end_date', today.strftime('%Y-%m-%d')),
+                '%Y-%m-%d').date()
+            end_datetime = (end_date.year * 100000000 + end_date.month * 1000000 +
+                            end_date.day * 10000) if end_date < today else 999912319999
             for market in g_market_list:
                 self.tasks.append(
                     ImportPytdxToH5(
@@ -169,7 +181,8 @@ class UsePytdxImportToH5Thread(QThread):
                         self.quotations, use_hosts[cur_host][0],
                         use_hosts[cur_host][1], dest_dir,
                         start_date.year * 100000000 +
-                        start_date.month * 1000000 + start_date.day * 10000))
+                        start_date.month * 1000000 + start_date.day * 10000,
+                        end_datetime))
                 cur_host += 1
 
         if self.config.getboolean('ktype', 'trans', fallback=False):
@@ -189,6 +202,11 @@ class UsePytdxImportToH5Thread(QThread):
         if self.config.getboolean('ktype', 'min', fallback=False):
             start_date = datetime.datetime.strptime(
                 config['ktype']['min_start_date'], '%Y-%m-%d').date()
+            end_date = datetime.datetime.strptime(
+                config['ktype'].get('min_end_date', today.strftime('%Y-%m-%d')),
+                '%Y-%m-%d').date()
+            end_datetime = (end_date.year * 100000000 + end_date.month * 1000000 +
+                            end_date.day * 10000 + 1500) if end_date < today else 999912319999
             for market in g_market_list:
                 self.tasks.append(
                     ImportPytdxToH5(
@@ -196,7 +214,8 @@ class UsePytdxImportToH5Thread(QThread):
                         '1MIN', self.quotations, use_hosts[cur_host][0],
                         use_hosts[cur_host][1], dest_dir,
                         start_date.year * 100000000 +
-                        start_date.month * 1000000 + start_date.day * 10000))
+                        start_date.month * 1000000 + start_date.day * 10000,
+                        end_datetime))
                 cur_host += 1
 
         if self.config.getboolean('ktype', 'time', fallback=False):

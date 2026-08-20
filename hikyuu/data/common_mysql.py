@@ -213,6 +213,15 @@ def get_lastdatetime(connect, tablename):
     return a[0]
 
 
+def get_firstdatetime(connect, tablename):
+    """获取表内最早一条记录的日期，表为空返回 None（用于判断是否需要回补更早历史）"""
+    cur = connect.cursor()
+    cur.execute("select min(date) from {}".format(tablename))
+    a = cur.fetchone()
+    cur.close()
+    return a[0]
+
+
 def get_last_krecord(connect, tablename):
     """获取最后一条K线记录
     返回：(date, open, close, high, low, amount, volume)

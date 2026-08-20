@@ -150,6 +150,15 @@ def get_lastdatetime(connect, tablename):
     return None if tmp == Datetime(1970, 1, 1) else tmp + UTCOffset()
 
 
+@hku_catch(ret=Datetime(1970, 1, 1))
+def get_firstdatetime(connect, tablename):
+    """获取表内最早一条记录的日期，无数据返回 None（用于判断是否需要回补更早历史）"""
+    tmp = connect.command("select min(date) from {} where market='{}' and code='{}'".format(
+        tablename[0], tablename[1], tablename[2]))
+    tmp = Datetime(tmp)
+    return None if tmp == Datetime(1970, 1, 1) else tmp + UTCOffset()
+
+
 def get_last_krecord(connect, tablename):
     """获取最后一条K线记录
     返回：(date, open, close, high, low, amount, volume)
