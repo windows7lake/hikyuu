@@ -122,24 +122,24 @@ sys.run(sm['sz000001'], Query(-150))
 
 > 遵循系统化交易理念严谨架构，每个组件可独立替换、自由组合
 
-| 层级                   | 组件                                                                                                                                | 说明                             |
-| :--------------------- | :---------------------------------------------------------------------------------------------------------------------------------- | :------------------------------- |
-| **投资组合层**   | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_portfolio/portfolio.html"><b>PF</b> · Portfolio</a>           | 投资组合 - 多标的策略调度        |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_portfolio/selector.html"><b>SE</b> · Selector</a>            | 交易对象选择 - 选股策略筛选      |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_portfolio/allocate_funds.html"><b>AF</b> · AllocateFunds</a>  | 资金分配 - 多标的资金调度        |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_portfolio/multifactor.html"><b>MF</b> · MultiFactor</a>       | 多因子模型 - 因子评分与排序      |
-| **交易系统 SYS** | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_sys/environment.html"><b>EV</b> · Environment</a>             | 市场环境判断 - 大盘环境有效性    |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_sys/condition.html"><b>CN</b> · Condition</a>                 | 系统有效条件 - 系统适用条件      |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_sys/signal.html"><b>SG</b> · Signal</a>                       | 信号指示器 - 产生买卖信号        |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_sys/stoploss.html"><b>ST</b> · Stoploss/Stopprofit</a>        | 止损 / 止盈 - 风险控制退出       |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_sys/money_manager.html"><b>MM</b> · MoneyManager</a>          | 资金管理 - 买卖数量控制          |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_sys/profitgoal.html"><b>PG</b> · ProfitGoal</a>               | 盈利目标 - 目标达成退出          |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_sys/slippage.html"><b>SP</b> · Slippage</a>                   | 移滑价差 - 回测价格模拟          |
-| **交易管理**     | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_manage/TradeManager.html"><b>TM</b> · TradeManager</a>        | 交易管理 - 账户资金与持仓记录    |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/trade_manage/OrderBroker.html"><b>OB</b> · OrderBroker</a>           | 订单执行 - 实盘下单 broker 对接  |
-| **数据层**       | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/stock_manager.html"><b>SM</b> · StockManager</a>                    | 证券管理 - StockManager 统一管理 |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/stock_manager.html#kdata"><b>KD</b> · KData</a>                     | K 线数据 - KData 量价序列        |
-|                        | <a target="_blank" href="https://hikyuu.readthedocs.io/zh-cn/latest/stock_manager.html#query"><b>Q</b> · Query</a>                      | 数据查询 - Query 时间范围筛选    |
+| 层级                   | 组件                             | 说明                             |
+| :--------------------- | :------------------------------- | :------------------------------- |
+| **投资组合层**   | <b> · PortfolioPF</a>           | 投资组合 - 多系统的策略调度      |
+|                        | <b> · SelectorSE</a>            | 系统对象选择 - 系统策略筛选      |
+|                        | <b> · AllocateFundsAF</a>       | 资金分配 - 多系统的资金分配      |
+|                        | <b> · MultiFactorMF</a>         | 多因子模型 - 因子评分与排序      |
+| **交易系统 SYS** | <b> · EnvironmentEV</a>         | 市场环境判断 - 大盘环境有效性    |
+|                        | <b> · ConditionCN</a>           | 系统有效条件 - 系统适用条件      |
+|                        | <b> · SignalSG</a>              | 信号指示器 - 产生买卖信号        |
+|                        | <b> · Stoploss/StopprofitST</a> | 止损 / 止盈 - 风险控制退出       |
+|                        | <b> · MoneyManagerMM</a>        | 资金管理 - 买卖数量控制          |
+|                        | <b> · ProfitGoalPG</a>          | 盈利目标 - 目标达成退出          |
+|                        | <b> · SlippageSP</a>            | 移滑价差 - 回测价格模拟          |
+| **交易管理**     | <b> · TradeManagerTM</a>        | 交易管理 - 账户资金与持仓记录    |
+|                        | <b> · OrderBrokerOB</a>         | 订单执行 - 实盘下单 broker 对接  |
+| **数据层**       | <b> · StockManagerSM</a>        | 证券管理 - StockManager 统一管理 |
+|                        | <b> · KDataKD</a>               | K 线数据 - KData 量价序列        |
+|                        | <b> · QueryQ</a>                | 数据查询 - Query 时间范围筛选    |
 
 ---
 
@@ -157,32 +157,26 @@ sys.run(sm['sz000001'], Query(-150))
 
 ## ❤️ 感谢捐赠，让 Hikyuu 走得更远
 
-> 因作者精力有限，对捐赠用户的问题会优先解答、确保响应；非捐赠用户的咨询会在时间允许的情况下尽力回复 😁
-
 <p align="center">
   <img src="docs/source/_static/dingyue.png" alt="订阅二维码" width="600">
 </p>
 
-| 方案                       | 说明                                                                 | 方式               | 链接                                       |
-| :------------------------- | :------------------------------------------------------------------- | :----------------- | :----------------------------------------- |
-| ☕**请作者喝杯咖啡** | ¥30 · 一次性的小小支持                                             | 支付宝             | [前往捐赠](https://pay.ldxp.cn/item/gflv3v) |
-| 📅**订阅 180 天**    | ¥50 · 半年期订阅权益                                               | 支付宝             | [前往捐赠](https://pay.ldxp.cn/item/du4h8s) |
-| 🗓️**订阅 365 天**  | ¥100 · 全年期订阅权益                                              | 支付宝             | [前往捐赠](https://pay.ldxp.cn/item/ehbz9b) |
-| 🌌**加入知识星球**   | ¥300/年 · 首年300元，续费半价3台设备登录 · 专属微信群及策略部件库 | 微信 / 知识星球APP | [前往加入](https://t.zsxq.com/YSATD)        |
+| 方案                       | 说明                                                                                          | 方式               | 链接                                       |
+| :------------------------- | :-------------------------------------------------------------------------------------------- | :----------------- | :----------------------------------------- |
+| ☕**请作者喝杯咖啡** | ¥30 · 一次性的小小支持(赠历史日线)                                                          | 支付宝             | [前往捐赠](https://pay.ldxp.cn/item/gflv3v) |
+| 📅**订阅 180 天**    | ¥50 · 半年期订阅权益(赠历史日线)                                                            | 支付宝             | [前往捐赠](https://pay.ldxp.cn/item/du4h8s) |
+| 🗓️**订阅 365 天**  | ¥100 · 全年期订阅权益(赠历史日/分/时/笔数据)                                                | 支付宝             | [前往捐赠](https://pay.ldxp.cn/item/ehbz9b) |
+| 🌌**加入知识星球**   | ¥300/年 · 首年300元，续费半价3台设备登录 · 专属微信群及策略部件库，(赠历史日/分/时/笔数据) | 微信 / 知识星球APP | [前往加入](https://t.zsxq.com/YSATD)        |
 
-> 🎁 **捐赠计划与附赠参见**：[https://hikyuu.readthedocs.io/zh-cn/latest/vip/donate-plan.html](https://hikyuu.readthedocs.io/zh-cn/latest/vip/donate-plan.html)
+> 🎁 **捐赠计划与附赠详见**：[https://hikyuu.readthedocs.io/zh-cn/latest/vip/donate-plan.html](https://hikyuu.readthedocs.io/zh-cn/latest/vip/donate-plan.html)
 
----
-
-## 💬 加入我们
-
-> 交流渠道以微信群为主、QQ 群为辅。**加入任一社群请备注「加入 hikyuu」，未备注将无法通过验证哦～**
+捐赠用户支持群（仅接受捐赠用户，入群请注明： Hikyuu 订阅）
 
 <p align="center">
-  <img src="docs/source/_static/qun.png" alt="交流群" width="500">
+  <img src="docs/source/_static/support.jpg" alt="捐赠用户支持" width="150">
 </p>
 
-### 🌟 需要的帮助
+## 🌟 需要的帮助
 
 欢迎社区成员一起参与贡献：
 
@@ -191,7 +185,7 @@ sys.run(sm['sz000001'], Query(-150))
 - 🔧 开发新功能
 - 🎨 网站优化
 
-> 💡 **建议通过在码云上开 issue 方式来贡献以上内容**
+> 💡 **建议通过在Github/Gitee/Gitcode开 issue 方式来贡献以上内容**
 
 ---
 
