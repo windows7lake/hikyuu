@@ -6,6 +6,7 @@
  */
 
 #include "doctest/doctest.h"
+#include <cmath>
 #include <fstream>
 #include <hikyuu/StockManager.h>
 #include <hikyuu/indicator/crt/INDEX.h>
@@ -20,14 +21,14 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_INDEXO") {
-    /** @arg 空指标 */
+    /** @arg An empty indicator */
     Indicator result = INDEXO();
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.name(), "INDEXO");
 
-    /** @arg 上证日线 */
+    /** @arg The Shanghai Composite daily line */
     KQuery query = KQueryByDate(Datetime(20111130), Datetime(20111206));
     auto k = getKData("sh600004", query);
     REQUIRE(k.size() > 0);
@@ -41,7 +42,7 @@ TEST_CASE("test_INDEXO") {
         CHECK_EQ(result[i], expect[i]);
     }
 
-    /** @arg 上证5分钟线 */
+    /** @arg The Shanghai Composite 5-minute line */
     query = KQueryByDate(Datetime(201111300930), Datetime(201111301400), KQuery::MIN5);
     k = getKData("sh600004", query);
     REQUIRE(k.size() > 0);
@@ -55,7 +56,7 @@ TEST_CASE("test_INDEXO") {
         CHECK_EQ(result[i], expect[i]);
     }
 
-    /** @arg 上证周线 */
+    /** @arg The Shanghai Composite weekly line */
     query = KQueryByDate(Datetime(20111101), Datetime(20111201), KQuery::WEEK);
     k = getKData("sh600004", query);
     REQUIRE(k.size() > 0);
@@ -70,12 +71,57 @@ TEST_CASE("test_INDEXO") {
     }
 }
 
+/**
+ * @par Test points
+ * The index code of the current security is a result of each calculation, not a permanent
+ * parameter: writing it back with setParam leaks the previous security's index into every later
+ * calculation which falls back to the parameter.
+ *
+ * Note: the companion fix declares INDEX as a context dependent indicator (m_need_context), which
+ * keeps a compiled factor plan from reusing one template node across securities.
+ */
+TEST_CASE("test_INDEX_market_code_not_permanent") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh600000");
+    REQUIRE_FALSE(stock.isNull());
+    KData k = stock.getKData(KQuery(0, 20));
+    CHECK_EQ(k.size(), 20);
+
+    // The daily data of the Shanghai Composite Index is a leaf of the test dataset, so the given
+    // code must stay unused by the calculation of an A share of the SH market
+    Indicator ind = INDEXC();
+    ind.getImp()->setParam<string>("market_code", "SH000001");
+    ind.setContext(k);
+
+    /** @arg the indicator is context dependent, so a plan cannot reuse it across securities */
+    CHECK_UNARY(ind.getImp()->isNeedContext());
+
+    /** @arg the calculation keeps the parameter as it was given */
+    CHECK_EQ(ind.getImp()->getParam<string>("market_code"), string("SH000001"));
+
+    // A user given code must survive a calculation of a security whose own index is derived
+    Indicator custom = INDEXC();
+    custom.getImp()->setParam<string>("market_code", "SZ399001");
+    custom.setContext(k);
+
+    /** @arg a calculation of a derived security does not drop the given code either */
+    CHECK_EQ(custom.getImp()->getParam<string>("market_code"), string("SZ399001"));
+
+    /** @arg the values still follow the index derived for the current security */
+    Indicator expect = INDEXC();
+    expect.setContext(k);
+    CHECK_EQ(custom.size(), expect.size());
+    for (size_t i = 0; i < expect.size(); ++i) {
+        CHECK_EQ(custom[i], doctest::Approx(expect[i]));
+    }
+}
+
 //-----------------------------------------------------------------------------
 // test export
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_INDEX_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

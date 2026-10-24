@@ -7,6 +7,7 @@
 
 #include "../test_config.h"
 #include <fstream>
+#include <limits>
 #include <hikyuu/StockManager.h>
 #include <hikyuu/indicator/crt/REFX.h>
 #include <hikyuu/indicator/crt/CVAL.h>
@@ -21,7 +22,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_REFX") {
     Indicator result;
 
@@ -130,6 +131,12 @@ TEST_CASE("test_REFX") {
     result = REFX(data, -11);
     CHECK_EQ(result.size(), 10);
     CHECK_EQ(result.discard(), 10);
+
+    /** @arg n = INT_MIN exercises the path that used to be UB under std::abs */
+    data = PRICELIST(a);
+    result = REFX(data, std::numeric_limits<int>::min());
+    CHECK_EQ(result.size(), 10);
+    CHECK_EQ(result.discard(), 10);
 }
 
 //-----------------------------------------------------------------------------
@@ -137,7 +144,7 @@ TEST_CASE("test_REFX") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_REFX_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

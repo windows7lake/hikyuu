@@ -14,24 +14,32 @@
 namespace hku {
 
 /**
- * 计算线性回归斜率、拟合优度R²和相对最大残差，N支持变量
- * @param n 时间窗口
- * @return Indicator，包含三个结果集：
- *         - result(0): 斜率
- *         - result(1): 拟合优度 R²
- *         - result(2): 相对最大残差 RelMaxRes = max|yi - ŷi| / ȳ
+ * Calculate the linear regression slope, the goodness of fit R² and the relative maximum residual;
+ * N supports a variable
+ * @note When any src value inside the regression window is non-finite (NaN or ±Inf), all three
+ *       outputs are Null for that bar (the sums stay finite via symmetric zero-fill and the
+ *       invalidation flag slides out with the window). Aligned with AGENTS.md "inf poisons every
+ *       downstream window aggregate".
+ * @param n time window
+ * @return Indicator, it contains three result sets:
+ *         - result(0): slope
+ *         - result(1): goodness of fit R²
+ *         - result(2): relative maximum residual RelMaxRes = max|yi - ŷi| / ȳ
+ *                      (Null when the window mean of y is 0, as the ratio is undefined)
  */
 Indicator HKU_API SLOPE(int n = 22);
 Indicator HKU_API SLOPE(const IndParam& n);
 
 /**
- * 计算线性回归斜率、拟合优度R²和相对最大残差，N支持变量
- * @param ind 待计算指标
- * @param n 时间窗口
- * @return Indicator，包含三个结果集：
- *         - result(0): 斜率
- *         - result(1): 拟合优度 R²
- *         - result(2): 相对最大残差 RelMaxRes = max|yi - ŷi| / ȳ
+ * Calculate the linear regression slope, the goodness of fit R² and the relative maximum residual;
+ * N supports a variable
+ * @param ind the indicator to be calculated
+ * @param n time window
+ * @return Indicator, it contains three result sets:
+ *         - result(0): slope
+ *         - result(1): goodness of fit R²
+ *         - result(2): relative maximum residual RelMaxRes = max|yi - ŷi| / ȳ
+ *                      (Null when the window mean of y is 0, as the ratio is undefined)
  */
 inline Indicator SLOPE(const Indicator& ind, int n = 22) {
     return SLOPE(n)(ind);

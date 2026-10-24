@@ -9,7 +9,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <hikyuu/hikyuu.h>
+#include <hikyuu/lang.h>
 #include <hikyuu/global/sysinfo.h>
+#include <hikyuu/data_driver/ipc/ShmClientHook.h>
 #include "pybind_utils.h"
 
 using namespace hku;
@@ -29,8 +31,8 @@ void export_MarketInfo(py::module& m);
 void export_StockTypeInfo(py::module& m);
 void export_StockWeight(py::module& m);
 void export_KQuery(py::module& m);
-void export_KReord(py::module& m);
-void export_TimeLineReord(py::module& m);
+void export_KRecord(py::module& m);
+void export_TimeLineRecord(py::module& m);
 void export_TransRecord(py::module& m);
 void export_KData(py::module& m);
 void export_Parameter(py::module& m);
@@ -69,6 +71,8 @@ PYBIND11_MODULE(core313, m) {
 // #warning "current python version: 3.14"
 PYBIND11_MODULE(core314, m) {
 #else
+#error \
+  "unsupported python version; add a matching PYBIND11_MODULE(core3XX, m) branch in hikyuu_pywrap/main.cpp"
 PYBIND11_MODULE(core, m) {
 #endif
 
@@ -76,8 +80,21 @@ PYBIND11_MODULE(core, m) {
 
     py::register_exception<hku::exception>(m, "HKUException");
 
-    // 设置系统运行状态
+    // Set the system running state
     setRunningInPython(true);
+
+    // Register the interrupt checker for the long IPC blocking waits (e.g. waiting for the data
+    // server readiness), responding to Ctrl+C; The waits happen in the C++ code that has released
+    // the GIL; the GIL needs to be re-acquired here before the signals can be checked.
+    ipc::setInterruptChecker([]() {
+        py::gil_scoped_acquire gil;
+        if (PyErr_CheckSignals() != 0) {
+            // Raise the pending exception (such as KeyboardInterrupt), which pybind11 converts to a
+            // Python exception
+            throw py::error_already_set();
+        }
+        return false;
+    });
 
 #if HKU_ENABLE_SEND_FEEDBACK
     sendPythonVersionFeedBack(PY_MAJOR_VERSION, PY_MINOR_VERSION, PY_MICRO_VERSION);
@@ -99,8 +116,8 @@ PYBIND11_MODULE(core, m) {
     export_StrategeContext(m);
     export_StockManager(m);
     export_KQuery(m);
-    export_KReord(m);
-    export_TimeLineReord(m);
+    export_KRecord(m);
+    export_TimeLineRecord(m);
     export_TransRecord(m);
     export_KData(m);
     export_Stock(m);
@@ -127,18 +144,27 @@ PYBIND11_MODULE(core, m) {
     m.def("set_python_in_jupyter", setPythonInJupyter);
     m.def("set_python_in_interactive", setPythonInInteractive);
 
-    m.def("close_spend_time", close_spend_time, "全局关闭 c++ 部分耗时打印");
-    m.def("open_spend_time", close_spend_time, "全局开启 c++ 部分耗时打印");
+    m.def("close_spend_time", close_spend_time,
+          "Globally disable the c++ part time-spending printing");
+    m.def("open_spend_time", open_spend_time,
+          "Globally enable the c++ part time-spending printing");
 
     m.def("hikyuu_init",
           py::overload_cast<const string&, bool, const StrategyContext&>(&hikyuu_init),
           py::arg("filename"), py::arg("ignore_preload") = false,
-          py::arg("context") = StrategyContext({"all"}));
+          py::arg("context") = StrategyContext({"all"}),
+          // The initialization (including the IPC negotiation, waiting for the data readiness and
+          // the preloading) may take a long time; the GIL must be released, otherwise all the other
+          // threads of the current process are frozen, and waiting for the master process to load
+          // as an IPC client appears as a hang; meanwhile, the C++ background threads of the master
+          // process (such as the log thread) also need the GIL to output to sys.stdout.
+          py::call_guard<py::gil_scoped_release>());
     m.def("hikyuu_init", py::overload_cast<const StrategyContext&, bool>(&hikyuu_init),
-          py::arg("context"), py::arg("ignore_preload") = false);
+          py::arg("context"), py::arg("ignore_preload") = false,
+          py::call_guard<py::gil_scoped_release>());
     m.def("get_version", getVersion, R"(getVersion()
 
-        :return: hikyuu 当前版本
+        :return: the current version of hikyuu
         :rtype: str)");
 
     m.def("get_version_with_build", getVersionWithBuild);
@@ -153,13 +179,32 @@ PYBIND11_MODULE(core, m) {
     });
     m.def("can_upgrade", CanUpgrade);
 
+    m.def(
+      "htr", [](const std::string& key) { return lang_htr(key.c_str()); }, py::arg("key"),
+      R"(htr(key)
+
+    Translate the given text into the current runtime language.
+
+    It shares the same gettext domain with the C++ part (the msgid must be in English), so that the
+    python-side text, such as the drawing labels, always appears in the same language as the C++
+    output, such as Performance.report().
+
+    The placeholders in the msgid use the python style ``{}``, and the caller formats the returned
+    text itself::
+
+        htr("Account({}) cumulative return").format(tm.name)
+
+    :param str key: the text in English (the msgid)
+    :return: the translated text; the original text is returned when no translation exists
+    :rtype: str)");
+
     m.def("get_stock", getStock,
           R"(get_stock(market_code)
 
-        根据"市场简称证券代码"获取对应的证券实例
+        Get the corresponding security instance by "market abbreviation + security code"
 
-        :param str market_code: 格式：“市场简称证券代码”，如"sh000001"
-        :return: 对应的证券实例，如果实例不存在，则返回空实例，即Stock()，不抛出异常
+        :param str market_code: the format: "market abbreviation + security code", e.g. "sh000001"
+        :return: the corresponding security instance; if the instance does not exist, return an empty instance, i.e. Stock(), without raising an exception
         :rtype: Stock)");
 
     int64_t null_int64 = Null<int64_t>();
@@ -167,10 +212,10 @@ PYBIND11_MODULE(core, m) {
 
     m.def("get_block", getBlock, R"(get_block(category: str, name: str)
     
-    获取预定义板块
+    Get the predefined block
 
-    :param str category: 板块分类
-    :param str name: 板块名称
+    :param str category: the block category
+    :param str name: the block name
     :rtype: Block)");
 
     m.def("get_kdata", py::overload_cast<const string&, const KQuery&>(getKData));
@@ -181,24 +226,25 @@ PYBIND11_MODULE(core, m) {
         getKData),
       py::arg("market_code"), py::arg("start") = 0, py::arg("end") = null_int64,
       py::arg("ktype") = KQuery::DAY, py::arg("recover_type") = KQuery::NO_RECOVER,
-      R"(根据证券代码及起止位置获取 [start, end) 范围的 K 线数据
+      R"(Get the K-line data within the [start, end) range by the security code and the start/end positions
 
-    :param str market_code: 证券代码，如: 'sh000001'
-    :param int start: 起始索引
-    :param int end: 结束索引
-    :param Query.KType ktype: K 线类型, 'DAY'|'WEEK'|'MONTH'|'QUARTER'|'HALFYEAR'|'YEAR'|'MIN'|'MIN5'|'MIN15'|'MIN30'|'MIN60'
-    :param Query.RecoverType recover_type: 复权类型)");
+    :param str market_code: the security code, e.g.: 'sh000001'
+    :param int start: the start index
+    :param int end: the end index
+    :param Query.KType ktype: the K-line type, 'DAY'|'WEEK'|'MONTH'|'QUARTER'|'HALFYEAR'|'YEAR'|'MIN'|'MIN5'|'MIN15'|'MIN30'|'MIN60'
+    :param Query.RecoverType recover_type: the recovery type)");
 
-    m.def("get_kdata",
-          py::overload_cast<const string&, const Datetime&, const Datetime&, const KQuery::KType&,
-                            KQuery::RecoverType>(getKData),
-          py::arg("market_code"), py::arg("start") = Datetime::min(), py::arg("end") = null_date,
-          py::arg("ktype") = KQuery::DAY, py::arg("recover_type") = KQuery::NO_RECOVER,
-          R"(根据证券代码及起止日期获取 [start, end) 范围的 K 线数据
+    m.def(
+      "get_kdata",
+      py::overload_cast<const string&, const Datetime&, const Datetime&, const KQuery::KType&,
+                        KQuery::RecoverType>(getKData),
+      py::arg("market_code"), py::arg("start") = Datetime::min(), py::arg("end") = null_date,
+      py::arg("ktype") = KQuery::DAY, py::arg("recover_type") = KQuery::NO_RECOVER,
+      R"(Get the K-line data within the [start, end) range by the security code and the start/end dates
 
-    :param str market_code: 证券代码，如: 'sh000001'
-    :param int start: 起始日期
-    :param int end: 结束日期
-    :param Query.KType ktype: K 线类型, 'DAY'|'WEEK'|'MONTH'|'QUARTER'|'HALFYEAR'|'YEAR'|'MIN'|'MIN5'|'MIN15'|'MIN30'|'MIN60'
-    :param Query.RecoverType recover_type: 复权类型)");
+    :param str market_code: the security code, e.g.: 'sh000001'
+    :param int start: the start date
+    :param int end: the end date
+    :param Query.KType ktype: the K-line type, 'DAY'|'WEEK'|'MONTH'|'QUARTER'|'HALFYEAR'|'YEAR'|'MIN'|'MIN5'|'MIN15'|'MIN30'|'MIN60'
+    :param Query.RecoverType recover_type: the recovery type)");
 }

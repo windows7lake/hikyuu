@@ -7,6 +7,7 @@
 
 #include <hikyuu/analysis/combinate.h>
 #include <hikyuu/analysis/analysis_sys.h>
+#include "../gil_policy.h"
 #include "../pybind_utils.h"
 
 using namespace hku;
@@ -54,8 +55,7 @@ static py::dict combinate_ind_analysis(const Stock& stk, const KQuery& query, Tr
 
     std::map<std::string, Performance> pers;
     {
-        OStreamToPython guard(false);
-        py::gil_scoped_release release;
+        ScopeGilRelease gil(!(sys && sys->hasPythonPart()));
         pers = combinateIndicatorAnalysis(stk, query, tm, sys, c_buy_inds, c_sell_inds, n);
     }
 
@@ -82,15 +82,14 @@ static py::dict combinate_ind_analysis_with_block(const Block& blk, const KQuery
 
     vector<CombinateAnalysisOutput> records;
     {
-        OStreamToPython guard(false);
-        py::gil_scoped_release release;
+        ScopeGilRelease gil(!(sys && sys->hasPythonPart()));
         records =
           combinateIndicatorAnalysisWithBlock(blk, query, tm, sys, c_buy_inds, c_sell_inds, n);
     }
 
     std::vector<py::list> tmp;
 
-    StringList names{"组合名称", "证券代码", "证券名称"};
+    StringList names{"组合名称", "证券代码", "证券名称"};  // The public contract column names, kept
     Performance per;
     auto keys = per.names();
     for (const auto& key : keys) {
@@ -103,11 +102,16 @@ static py::dict combinate_ind_analysis_with_block(const Block& blk, const KQuery
 
     for (size_t i = 0, total = records.size(); i < total; i++) {
         CombinateAnalysisOutput& record = records[i];
+        if (names.size() != record.values.size() + 3) {
+            HKU_WARN(
+              "combinate_ind_analysis_with_block: record values size ({}) != keys size ({}), "
+              "skipping {}",
+              record.values.size(), names.size() - 3, record.market_code);
+            continue;
+        }
         tmp[0].append(record.combinateName);
         tmp[1].append(record.market_code);
         tmp[2].append(record.name);
-        HKU_WARN_IF(names.size() != record.values.size() + 3, "lenght invalid: {} {}", names.size(),
-                    record.values.size());
         for (size_t j = 3, len = names.size(); j < len; j++) {
             tmp[j].append(record.values[j - 3]);
         }
@@ -125,17 +129,17 @@ static py::dict analysis_sys_list(const py::object& pystk_list, const KQuery& qu
                                   SystemPtr sys_proto) {
     HKU_CHECK(sys_proto, "sys_proto is null!");
 
-    sys_proto->forceResetAll();
+    auto sys_copy = sys_proto->clone();
+    sys_copy->forceResetAll();
     SystemList sys_list;
     StockList stk_list = get_stock_list_from_python(pystk_list);
     for (size_t i = 0, total = stk_list.size(); i < total; i++) {
-        sys_list.emplace_back(sys_proto->clone());
+        sys_list.emplace_back(sys_copy->clone());
     }
 
     vector<AnalysisSystemOutput> records;
     {
-        OStreamToPython guard(false);
-        py::gil_scoped_release release;
+        ScopeGilRelease gil(!sys_list_has_python_part(sys_list));
         records = analysisSystemList(sys_list, stk_list, query);
     }
 
@@ -145,6 +149,9 @@ static py::dict analysis_sys_list(const py::object& pystk_list, const KQuery& qu
     for (size_t i = 0, total = records.size(); i < total; i++) {
         const auto& record = records[i];
         if (record.values.size() != keys.size()) {
+            HKU_WARN("analysis_sys_list: record values size (" +
+                     std::to_string(record.values.size()) + ") != keys size (" +
+                     std::to_string(keys.size()) + "), skipping " + record.market_code);
             continue;
         }
         tmp[0].append(record.market_code);
@@ -158,9 +165,29 @@ static py::dict analysis_sys_list(const py::object& pystk_list, const KQuery& qu
     result["证券代码"] = tmp[0];
     result["证券名称"] = tmp[1];
     for (size_t i = 0, total = keys.size(); i < total; i++) {
-        if (!tmp[i + 2].empty()) {
-            result[keys[i].c_str()] = tmp[i + 2];
-        }
+        result[keys[i].c_str()] = tmp[i + 2];
+    }
+    return result;
+}
+
+static std::pair<double, SYSPtr> find_optimal_system(const SystemList& sys_list, const Stock& stk,
+                                                     const KQuery& query, const string& sort_key,
+                                                     int sort_mode) {
+    std::pair<double, SYSPtr> result;
+    {
+        ScopeGilRelease gil(!sys_list_has_python_part(sys_list));
+        result = findOptimalSystem(sys_list, stk, query, sort_key, sort_mode);
+    }
+    return result;
+}
+
+static std::pair<double, SYSPtr> find_optimal_system_multi(const SystemList& sys_list,
+                                                           const Stock& stk, const KQuery& query,
+                                                           const string& sort_key, int sort_mode) {
+    std::pair<double, SYSPtr> result;
+    {
+        ScopeGilRelease gil(!sys_list_has_python_part(sys_list));
+        result = findOptimalSystemMulti(sys_list, stk, query, sort_key, sort_mode);
     }
     return result;
 }
@@ -168,21 +195,21 @@ static py::dict analysis_sys_list(const py::object& pystk_list, const KQuery& qu
 void export_analysis(py::module& m) {
     m.def("combinate_index", combinate_index, R"(combinate_index(seq)
 
-    获取序列组合的下标索引, 输入序列的长度最大不超过15，否则抛出异常
+    Get the index of the sequence combination; the length of the input sequence is at most 15, otherwise an exception is raised
 
-    :param inds: list 或 tuple 等可使用索引的可迭代对象
-    :return: 返回组合的索引，可用于获取输入中相应索引位置的值
+    :param inds: an iterable object that can be indexed, such as a list or a tuple
+    :return: return the combination index, which can be used to get the values at the corresponding index positions in the input
     :rtype: list)");
 
     m.def("combinate_ind", combinate_indicator, py::arg("inds"), py::arg("n") = 7,
           R"(combinate_ind(inds[, n=7])
 
-    对输入的指标序列进行组合, 如输入为 [ind1, ind2], 输出为 [EXIST(ind1,n), EXIST(ind2,n),
+    Combine the input indicator sequence, e.g. if the input is [ind1, ind2], the output is [EXIST(ind1,n), EXIST(ind2,n),
     EXIST(ind1,n)&EXIST(ind2,n)]
 
-    :param list|tuple|seq inds: 待组合的指标列表
-    :param int n: 指标在 n 周期内存在
-    :return: 组合后的指标列表
+    :param list|tuple|seq inds: the indicator list to combine
+    :param int n: the indicator exists within the n periods
+    :return: the combined indicator list
     :rtype: list)");
 
     m.def("inner_combinate_ind_analysis", combinate_ind_analysis);
@@ -190,9 +217,9 @@ void export_analysis(py::module& m) {
 
     m.def("inner_analysis_sys_list", analysis_sys_list);
 
-    m.def("find_optimal_system", findOptimalSystem, py::arg("sys_list"), py::arg("stock"),
+    m.def("find_optimal_system", find_optimal_system, py::arg("sys_list"), py::arg("stock"),
           py::arg("query"), py::arg("sort_key") = string(), py::arg("sort_mode") = 0);
-    m.def("find_optimal_system_multi", findOptimalSystemMulti, py::arg("sys_list"),
+    m.def("find_optimal_system_multi", find_optimal_system_multi, py::arg("sys_list"),
           py::arg("stock"), py::arg("query"), py::arg("sort_key") = string(),
           py::arg("sort_mode") = 0);
 }

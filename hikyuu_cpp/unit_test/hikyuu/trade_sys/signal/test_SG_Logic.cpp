@@ -30,7 +30,7 @@ static void check_result(SignalPtr sg, const std::map<Datetime, double>& expect)
     }
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SG_Add") {
     auto k = getKData("sz000001", KQueryByDate(Datetime(20111108), Datetime(20111125)));
     std::map<Datetime, double> expect;
@@ -38,14 +38,14 @@ TEST_CASE("test_SG_Add") {
         expect[k[i].datetime] = 0.0;
     }
 
-    /** @arg 输入的 sg 都为空 */
+    /** @arg All the input sg are empty */
     SGPtr sg1, sg2;
     auto ret = sg1 + sg2;
     ret->setTO(k);
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 其中一个 sg 为空 */
+    /** @arg One of the sg is empty */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110));
     sg1->_addSellSignal(Datetime(20111115));
@@ -62,7 +62,7 @@ TEST_CASE("test_SG_Add") {
     ret->setTO(k);
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The alternate mode, sg1 and sg2 do not overlap */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110));
     sg1->_addSellSignal(Datetime(20111115));
@@ -81,7 +81,7 @@ TEST_CASE("test_SG_Add") {
     expect[Datetime(20111116)] = 0.0;
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The non-alternate mode, sg1 and sg2 do not overlap */
     ret = sg1 + sg2;
     ret->setParam<bool>("alternate", false);
     ret->setTO(k);
@@ -92,9 +92,9 @@ TEST_CASE("test_SG_Add") {
     expect[Datetime(20111116)] = -1.0;
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110));
@@ -116,9 +116,9 @@ TEST_CASE("test_SG_Add") {
     ret->setTO(k);
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The non-alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110));
@@ -142,7 +142,7 @@ TEST_CASE("test_SG_Add") {
     check_result(ret, expect);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SG_Sub") {
     auto k = getKData("sz000001", KQueryByDate(Datetime(20111108), Datetime(20111125)));
     std::map<Datetime, double> expect;
@@ -150,14 +150,14 @@ TEST_CASE("test_SG_Sub") {
         expect[k[i].datetime] = 0.0;
     }
 
-    /** @arg 输入的 sg 都为空 */
+    /** @arg All the input sg are empty */
     SGPtr sg1, sg2;
     auto ret = sg1 - sg2;
     ret->setTO(k);
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 其中一个 sg 为空 */
+    /** @arg One of the sg is empty */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110));
     sg1->_addSellSignal(Datetime(20111115));
@@ -178,7 +178,7 @@ TEST_CASE("test_SG_Sub") {
     expect[Datetime(20111115)] = 1.0;
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The alternate mode, sg1 and sg2 do not overlap */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110));
     sg1->_addSellSignal(Datetime(20111115));
@@ -197,7 +197,7 @@ TEST_CASE("test_SG_Sub") {
     expect[Datetime(20111116)] = 1.0;
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The non-alternate mode, sg1 and sg2 do not overlap */
     ret = sg1 - sg2;
     ret->setParam<bool>("alternate", false);
     ret->setTO(k);
@@ -208,9 +208,9 @@ TEST_CASE("test_SG_Sub") {
     expect[Datetime(20111116)] = 1.0;
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110));
@@ -231,9 +231,9 @@ TEST_CASE("test_SG_Sub") {
     expect[Datetime(20111116)] = 1.0;
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The non-alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110));
@@ -256,7 +256,7 @@ TEST_CASE("test_SG_Sub") {
     check_result(ret, expect);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SG_Mul") {
     auto k = getKData("sz000001", KQueryByDate(Datetime(20111108), Datetime(20111125)));
     std::map<Datetime, double> expect;
@@ -264,14 +264,14 @@ TEST_CASE("test_SG_Mul") {
         expect[k[i].datetime] = 0.0;
     }
 
-    /** @arg 输入的 sg 都为空 */
+    /** @arg All the input sg are empty */
     SGPtr sg1, sg2;
     auto ret = sg1 * sg2;
     ret->setTO(k);
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 其中一个 sg 为空 */
+    /** @arg One of the sg is empty */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110));
     sg1->_addSellSignal(Datetime(20111115));
@@ -288,7 +288,7 @@ TEST_CASE("test_SG_Mul") {
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The alternate mode, sg1 and sg2 do not overlap */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110));
     sg1->_addSellSignal(Datetime(20111115));
@@ -304,16 +304,16 @@ TEST_CASE("test_SG_Mul") {
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The non-alternate mode, sg1 and sg2 do not overlap */
     ret = sg1 * sg2;
     ret->setParam<bool>("alternate", false);
     ret->setTO(k);
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110));
@@ -334,9 +334,9 @@ TEST_CASE("test_SG_Mul") {
     expect[Datetime(20111116)] = 0.0;
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The non-alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110));
@@ -358,7 +358,7 @@ TEST_CASE("test_SG_Mul") {
     check_result(ret, expect);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SG_Div") {
     auto k = getKData("sz000001", KQueryByDate(Datetime(20111108), Datetime(20111125)));
     std::map<Datetime, double> expect;
@@ -366,14 +366,14 @@ TEST_CASE("test_SG_Div") {
         expect[k[i].datetime] = 0.0;
     }
 
-    /** @arg 输入的 sg 都为空 */
+    /** @arg All the input sg are empty */
     SGPtr sg1, sg2;
     auto ret = sg1 / sg2;
     ret->setTO(k);
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 其中一个 sg 为空 */
+    /** @arg One of the sg is empty */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110), 2.0);
     sg1->_addSellSignal(Datetime(20111115), -3.0);
@@ -390,7 +390,7 @@ TEST_CASE("test_SG_Div") {
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The alternate mode, sg1 and sg2 do not overlap */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110));
     sg1->_addSellSignal(Datetime(20111115));
@@ -406,16 +406,16 @@ TEST_CASE("test_SG_Div") {
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The non-alternate mode, sg1 and sg2 do not overlap */
     ret = sg1 / sg2;
     ret->setParam<bool>("alternate", false);
     ret->setTO(k);
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110));
@@ -436,9 +436,9 @@ TEST_CASE("test_SG_Div") {
     expect[Datetime(20111116)] = 0.0;
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The non-alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110), 6.0);
@@ -460,7 +460,7 @@ TEST_CASE("test_SG_Div") {
     check_result(ret, expect);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SG_AddValue") {
     auto k = getKData("sz000001", KQueryByDate(Datetime(20111108), Datetime(20111125)));
     std::map<Datetime, double> expect;
@@ -468,7 +468,7 @@ TEST_CASE("test_SG_AddValue") {
         expect[k[i].datetime] = 0.0;
     }
 
-    /** @arg 输入的 sg 为空 */
+    /** @arg The input sg is empty */
     SGPtr sg;
     auto ret = sg + 1.0;
     ret->setTO(k);
@@ -529,7 +529,7 @@ TEST_CASE("test_SG_AddValue") {
     check_result(ret, expect);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SG_MulValue") {
     auto k = getKData("sz000001", KQueryByDate(Datetime(20111108), Datetime(20111125)));
     std::map<Datetime, double> expect;
@@ -537,7 +537,7 @@ TEST_CASE("test_SG_MulValue") {
         expect[k[i].datetime] = 0.0;
     }
 
-    /** @arg 输入的 sg 为空 */
+    /** @arg The input sg is empty */
     SGPtr sg;
     auto ret = sg * 1.0;
     ret->setTO(k);
@@ -600,7 +600,7 @@ TEST_CASE("test_SG_MulValue") {
     check_result(ret, expect);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SG_SubValue") {
     auto k = getKData("sz000001", KQueryByDate(Datetime(20111108), Datetime(20111125)));
     std::map<Datetime, double> expect;
@@ -608,7 +608,7 @@ TEST_CASE("test_SG_SubValue") {
         expect[k[i].datetime] = 0.0;
     }
 
-    /** @arg 输入的 sg 为空 */
+    /** @arg The input sg is empty */
     SGPtr sg;
     auto ret = sg - 1.0;
     ret->setTO(k);
@@ -723,7 +723,7 @@ TEST_CASE("test_SG_SubValue") {
     check_result(ret, expect);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SG_DivValue") {
     auto k = getKData("sz000001", KQueryByDate(Datetime(20111108), Datetime(20111125)));
     std::map<Datetime, double> expect;
@@ -731,7 +731,7 @@ TEST_CASE("test_SG_DivValue") {
         expect[k[i].datetime] = 0.0;
     }
 
-    /** @arg 输入的 sg 为空 */
+    /** @arg The input sg is empty */
     SGPtr sg;
     auto ret = sg / 1.0;
     ret->setTO(k);
@@ -794,7 +794,7 @@ TEST_CASE("test_SG_DivValue") {
     check_result(ret, expect);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SG_Or") {
     auto k = getKData("sz000001", KQueryByDate(Datetime(20111108), Datetime(20111125)));
     std::map<Datetime, double> expect;
@@ -802,14 +802,14 @@ TEST_CASE("test_SG_Or") {
         expect[k[i].datetime] = 0.0;
     }
 
-    /** @arg 输入的 sg 都为空 */
+    /** @arg All the input sg are empty */
     SGPtr sg1, sg2;
     auto ret = sg1 | sg2;
     ret->setTO(k);
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 其中一个 sg 为空 */
+    /** @arg One of the sg is empty */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110));
     sg1->_addSellSignal(Datetime(20111115));
@@ -826,7 +826,7 @@ TEST_CASE("test_SG_Or") {
     ret->setTO(k);
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The alternate mode, sg1 and sg2 do not overlap */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110));
     sg1->_addSellSignal(Datetime(20111115));
@@ -845,7 +845,7 @@ TEST_CASE("test_SG_Or") {
     expect[Datetime(20111116)] = 0.0;
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The non-alternate mode, sg1 and sg2 do not overlap */
     ret = sg1 | sg2;
     ret->setParam<bool>("alternate", false);
     ret->setTO(k);
@@ -856,9 +856,9 @@ TEST_CASE("test_SG_Or") {
     expect[Datetime(20111116)] = -1.0;
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110));
@@ -871,8 +871,8 @@ TEST_CASE("test_SG_Or") {
 
     reset_expect(expect);
     expect[Datetime(20111110)] = 1.0;
-    expect[Datetime(20111114)] = 0.0;
-    expect[Datetime(20111115)] = -1.0;
+    expect[Datetime(20111114)] = -1.0;
+    expect[Datetime(20111115)] = 0.0;
     expect[Datetime(20111116)] = 0.0;
 
     ret = sg1 | sg2;
@@ -880,9 +880,9 @@ TEST_CASE("test_SG_Or") {
     ret->setTO(k);
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The non-alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110));
@@ -896,7 +896,7 @@ TEST_CASE("test_SG_Or") {
 
     reset_expect(expect);
     expect[Datetime(20111110)] = 1.0;
-    expect[Datetime(20111114)] = 0.0;
+    expect[Datetime(20111114)] = -1.0;
     expect[Datetime(20111115)] = -1.0;
     expect[Datetime(20111116)] = -1.0;
 
@@ -904,9 +904,26 @@ TEST_CASE("test_SG_Or") {
     ret->setParam<bool>("alternate", false);
     ret->setTO(k);
     check_result(ret, expect);
+
+    /** @arg The input amplitudes are dropped, only the direction is kept */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
+    sg1->_addBuySignal(Datetime(20111110), 3.0);
+    sg1->_addSellSignal(Datetime(20111114), -3.0);
+    sg2->_addBuySignal(Datetime(20111110), 2.0);
+    sg2->_addSellSignal(Datetime(20111114), -2.0);
+
+    reset_expect(expect);
+    expect[Datetime(20111110)] = 1.0;
+    expect[Datetime(20111114)] = -1.0;
+
+    ret = sg1 | sg2;
+    ret->setParam<bool>("alternate", false);
+    ret->setTO(k);
+    check_result(ret, expect);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SG_And") {
     auto k = getKData("sz000001", KQueryByDate(Datetime(20111108), Datetime(20111125)));
     std::map<Datetime, double> expect;
@@ -914,14 +931,14 @@ TEST_CASE("test_SG_And") {
         expect[k[i].datetime] = 0.0;
     }
 
-    /** @arg 输入的 sg 都为空 */
+    /** @arg All the input sg are empty */
     SGPtr sg1, sg2;
     auto ret = sg1 & sg2;
     ret->setTO(k);
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 其中一个 sg 为空 */
+    /** @arg One of the sg is empty */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110));
     sg1->_addSellSignal(Datetime(20111115));
@@ -938,7 +955,7 @@ TEST_CASE("test_SG_And") {
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The alternate mode, sg1 and sg2 do not overlap */
     sg1 = SG_Manual();
     sg1->_addBuySignal(Datetime(20111110));
     sg1->_addSellSignal(Datetime(20111115));
@@ -954,16 +971,16 @@ TEST_CASE("test_SG_And") {
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 不存在重叠 */
+    /** @arg The non-alternate mode, sg1 and sg2 do not overlap */
     ret = sg1 & sg2;
     ret->setParam<bool>("alternate", false);
     ret->setTO(k);
     reset_expect(expect);
     check_result(ret, expect);
 
-    /** @arg 交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110));
@@ -984,9 +1001,9 @@ TEST_CASE("test_SG_And") {
     expect[Datetime(20111116)] = 0.0;
     check_result(ret, expect);
 
-    /** @arg 非交替模式，sg1, sg2 存在重叠 */
-    sg1->reset();
-    sg2->reset();
+    /** @arg The non-alternate mode, sg1 and sg2 overlap */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
     sg1->setParam<bool>("alternate", false);
     sg2->setParam<bool>("alternate", false);
     sg1->_addBuySignal(Datetime(20111110));
@@ -1005,6 +1022,23 @@ TEST_CASE("test_SG_And") {
     expect[Datetime(20111114)] = 0.0;
     expect[Datetime(20111115)] = 0.0;
     expect[Datetime(20111116)] = -1.0;
+    check_result(ret, expect);
+
+    /** @arg The input amplitudes are dropped, only the direction is kept */
+    sg1 = SG_Manual();
+    sg2 = SG_Manual();
+    sg1->_addBuySignal(Datetime(20111110), 3.0);
+    sg1->_addSellSignal(Datetime(20111114), -3.0);
+    sg2->_addBuySignal(Datetime(20111110), 2.0);
+    sg2->_addSellSignal(Datetime(20111114), -2.0);
+
+    reset_expect(expect);
+    expect[Datetime(20111110)] = 1.0;
+    expect[Datetime(20111114)] = -1.0;
+
+    ret = sg1 & sg2;
+    ret->setParam<bool>("alternate", false);
+    ret->setTO(k);
     check_result(ret, expect);
 }
 

@@ -5,6 +5,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IVigor.h"
 #include "../crt/EMA.h"
 #include "../crt/PRICELIST.h"
@@ -26,7 +27,7 @@ IVigor::~IVigor() {}
 
 void IVigor::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 1);
+        HKU_ASSERT(getParam<int>("n") >= 1 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -40,10 +41,11 @@ void IVigor::_calculate(const Indicator& ind) {
 
     int n = getParam<int>("n");
 
-    m_discard = 1;
     if (0 == total) {
+        m_discard = 0;
         return;
     }
+    m_discard = 1;
 
     auto const* ks = kdata.data();
     PriceList tmp(total, Null<price_t>());

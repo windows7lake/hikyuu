@@ -21,7 +21,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_WMA") {
     Indicator result;
 
@@ -78,7 +78,7 @@ TEST_CASE("test_WMA") {
     CHECK_EQ(result[9], doctest::Approx(6.).epsilon(0.0001));
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_WMA_dyn") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-30));
@@ -106,6 +106,37 @@ TEST_CASE("test_WMA_dyn") {
     }
 }
 
+/** @par Test points: ST-N03 — a window holding a non-finite value still emits the weighted mean
+ * of the remaining entries, aligned with MA */
+TEST_CASE("test_WMA_nan_recovery") {
+    price_t nan = Null<price_t>();
+    Indicator data = PRICELIST({1.0, 2.0, 3.0, nan, 5.0, 6.0});
+    Indicator r = WMA(data, 3);
+    // i=3 window [2,3,NaN]: weights (1,2,3) over the valid entries only -> 8/3
+    CHECK_EQ(r[3], doctest::Approx(8. / 3.).epsilon(0.00001));
+    CHECK_EQ(r[4], doctest::Approx(4.5).epsilon(0.00001));
+    CHECK_EQ(r[5], doctest::Approx(5.6).epsilon(0.00001));
+    Indicator clean = PRICELIST({1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0});
+    Indicator dirty = PRICELIST({1.0, 2.0, 3.0, nan, 5.0, 6.0, 7.0});
+    Indicator rc = WMA(clean, 3);
+    Indicator rd = WMA(dirty, 3);
+    // Once NaN slides fully out at i=6, results should match clean
+    CHECK_UNARY(std::isfinite(rd[6]));
+    CHECK(rd[6] == doctest::Approx(rc[6]));
+}
+
+/** @par Test points: ST-N13 — the dynamic path matches the static semantics on non-finite
+ * windows (both exclude the entries and emit the weighted mean) */
+TEST_CASE("test_WMA_dynamic_non_finite_window") {
+    price_t nan = Null<price_t>();
+    Indicator data = PRICELIST({1.0, 2.0, 3.0, nan, 5.0, 6.0});
+    Indicator dyn = WMA(data, CVAL(data, 3));
+    Indicator stat = WMA(data, 3);
+    for (size_t i = 2; i < data.size(); i++) {
+        CHECK_EQ(dyn[i], doctest::Approx(stat[i]).epsilon(0.00001));
+    }
+}
+
 //-----------------------------------------------------------------------------
 // benchmark
 //-----------------------------------------------------------------------------
@@ -114,7 +145,7 @@ TEST_CASE("test_WMA_benchmark") {
     Stock stock = getStock("sh000001");
     KData kdata = stock.getKData(KQuery(0));
     Indicator c = kdata.close();
-    int cycle = 1000;  // 测试循环次数
+    int cycle = 1000;  // Test loop count
 
     {
         BENCHMARK_TIME_MSG(test_WMA_benchmark, cycle, fmt::format("data len: {}", c.size()));
@@ -126,12 +157,54 @@ TEST_CASE("test_WMA_benchmark") {
 }
 #endif
 
+/**
+ * @par Test points
+ * Incremental calculate must match a full calculation, including the narrow boundary where the
+ * framework puts start_pos at n-1.
+ *
+ * Background: min_increment_start() returned n-1 while _increment_calculate seeded at
+ * src[start_pos-n], which needs n elements before start_pos. At start_pos == n-1 that index became
+ * (size_t)-1: the seed loop was skipped (SIZE_MAX < start_pos) and src[trailingIdx++] read
+ * src[-1] before wrapping back to 0, so every value from start_pos on diverged.
+ */
+TEST_CASE("test_WMA_increment_equivalence") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh600000");
+    KData k_full = stock.getKData(KQuery(0, 20));
+    CHECK_EQ(k_full.size(), 20);
+
+    Indicator expect = WMA(CLOSE(), 10);
+    expect.setContext(k_full);
+
+    auto check_with_history = [&](size_t history) {
+        Indicator got = WMA(CLOSE(), 10);
+        got.setContext(stock.getKData(KQuery(0, history)));  // cache m_old_context
+        got.setContext(k_full);                              // extended at the tail
+        CHECK_EQ(got.size(), expect.size());
+        CHECK_EQ(got.discard(), expect.discard());
+        for (size_t i = 0; i < expect.size(); ++i) {
+            double a = expect[i];
+            double b = got[i];
+            if (std::isnan(a) && std::isnan(b)) {
+                continue;
+            }
+            CHECK_EQ(b, doctest::Approx(a).epsilon(0.0001));
+        }
+    };
+
+    /** @arg The old context holds exactly n bars, so start_pos == n - 1 (the boundary) */
+    check_with_history(10);
+
+    /** @arg The old context holds more than n bars, the usual incremental path */
+    check_with_history(15);
+}
+
 //-----------------------------------------------------------------------------
 // test export
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_WMA_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

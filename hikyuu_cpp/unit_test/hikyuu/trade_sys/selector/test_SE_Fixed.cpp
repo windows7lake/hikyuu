@@ -23,20 +23,20 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SE_Fixed") {
     StockManager& sm = StockManager::instance();
 
     SYSPtr sys = SYS_Simple();
     SEPtr se = SE_Fixed();
 
-    /** @arg 试图加入一个不存在的stock */
+    /** @arg Try to add a stock that does not exist */
     CHECK_THROWS_AS(se->addStock(Stock(), sys), std::exception);
 
-    /** @arg 试图加入一个空的系统策略原型 */
+    /** @arg Try to add an empty system strategy prototype */
     CHECK_THROWS_AS(se->addStock(sm["sh600000"], SYSPtr()), std::exception);
 
-    // /** @arg 试图加入一个缺少MM | SG的系统策略原型 */
+    // /** @arg Try to add a system strategy prototype missing MM | SG */
     SGPtr sg = SG_Cross(MA(CLOSE(), 5), MA(CLOSE(), 10));
     MMPtr mm = MM_FixedCount(100);
     sys->setSG(sg);
@@ -46,7 +46,7 @@ TEST_CASE("test_SE_Fixed") {
     sys->setMM(mm);
     CHECK_THROWS_AS(se->addStock(sm["sh600000"], sys), std::exception);
 
-    // 目前必须有PF指定实际执行的子系统，下面代码无法执行
+    // Currently a PF must specify the actually executed subsystem, so the code below cannot run
     // /** @arg getSelectedSystemList */
     sys->setSG(sg);
     se->addStock(sm["sh600000"], sys);
@@ -68,12 +68,16 @@ TEST_CASE("test_SE_Fixed") {
     result = se->getSelected(Datetime(200001010000L));
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 克隆操作 */
+    /** @arg The clone drops the runtime cache, it must calculate again to select */
     proto_sys_list = se->getProtoSystemList();
     se->calculate(proto_sys_list, KQuery(-20));
-    SEPtr se2;
-    se2 = se->clone();
+    SEPtr se2 = se->clone();
     CHECK_NE(se2.get(), se.get());
+    CHECK_UNARY(!se2->getProtoSystemList().empty());
+    CHECK_UNARY(se2->getRealSystemList().empty());
+    CHECK_EQ(se2->getSelected(Datetime(200001010000L)).size(), 0);
+
+    se2->calculate(se2->getProtoSystemList(), KQuery(-20));
     result = se2->getSelected(Datetime(200001010000L));
     CHECK_EQ(result.size(), 3);
     CHECK_EQ(sm["sh600000"], result[0].sys->getStock());
@@ -86,7 +90,7 @@ TEST_CASE("test_SE_Fixed") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_SE_Fixed_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

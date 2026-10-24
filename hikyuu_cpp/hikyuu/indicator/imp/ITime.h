@@ -14,7 +14,7 @@
 namespace hku {
 
 /*
- * 通达信时间函数实现
+ * Implementation of the TDX time functions
  */
 class ITime : public IndicatorImp {
     INDICATOR_IMP(ITime)
@@ -25,6 +25,10 @@ public:
     ITime();
     virtual ~ITime() override;
     virtual void _checkParam(const string& name) const override;
+
+private:
+    DatetimeList _getDatetimeList(const Indicator& data) const;
+    void _doCalculate(const DatetimeList& ds, size_t start_pos);
 };
 
 }  // namespace hku

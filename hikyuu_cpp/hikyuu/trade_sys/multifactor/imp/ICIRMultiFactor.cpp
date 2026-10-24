@@ -44,8 +44,6 @@ IndicatorList ICIRMultiFactor::_calculate(const vector<IndicatorList>& all_stk_i
     int ir_n = getParam<int>("ic_rolling_n");
     bool spearman = getParam<bool>("use_spearman");
 
-    auto ref_k = m_ref_stk.getKData(m_query);
-
     IndicatorList all_returns = _getAllReturns(ic_n);
     IndicatorList icir =
       global_parallel_for_index(0, ind_count, [&, ic_n, ir_n, spearman](size_t ii) {
@@ -69,6 +67,7 @@ IndicatorList ICIRMultiFactor::_calculate(const vector<IndicatorList>& all_stk_i
     return global_parallel_for_index(0, stk_count, [&, discard, ind_count, days_total](size_t si) {
         PriceList new_values(days_total, 0.0);
         PriceList sum_weight(days_total, 0.0);
+        vector<size_t> countByDate(days_total, 0);
         for (size_t di = 0; di < discard; di++) {
             new_values[di] = Null<price_t>();
         }
@@ -76,13 +75,22 @@ IndicatorList ICIRMultiFactor::_calculate(const vector<IndicatorList>& all_stk_i
             const auto* ind_data = all_stk_inds[si][ii].data();
             const auto* icir_data = icir[ii].data();
             for (size_t di = discard; di < days_total; di++) {
-                new_values[di] += ind_data[di] * icir_data[di];
-                sum_weight[di] += std::abs(icir_data[di]);
+                // A zero IC variance makes ICIR inf/nan: drop that factor for the day instead of
+                // poisoning the whole composite score; a missing factor value is dropped too
+                if (!std::isnan(ind_data[di]) && std::isfinite(icir_data[di])) {
+                    new_values[di] += ind_data[di] * icir_data[di];
+                    sum_weight[di] += std::abs(icir_data[di]);
+                    countByDate[di] += 1;
+                }
             }
         }
 
         for (size_t di = discard; di < days_total; di++) {
-            if (!std::isnan(new_values[di]) && sum_weight[di] != 0.0) {
+            // Zero weight sum means no valid information that day; an identical 0.0 score would
+            // degrade the ranking to the stock code order
+            if (countByDate[di] == 0 || sum_weight[di] == 0.0) {
+                new_values[di] = Null<price_t>();
+            } else {
                 new_values[di] = new_values[di] / sum_weight[di];
             }
         }

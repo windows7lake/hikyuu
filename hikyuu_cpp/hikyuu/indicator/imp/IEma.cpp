@@ -5,8 +5,7 @@
  *      Author: fasiondog
  */
 
-#include "../crt/SLICE.h"
-#include "../crt/EMA.h"
+#include <climits>
 #include "IEma.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -23,7 +22,8 @@ IEma::~IEma() {}
 
 void IEma::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") > 0);
+        int n = getParam<int>("n");
+        HKU_ASSERT(n > 0 && n < INT_MAX);
     }
 }
 
@@ -44,7 +44,13 @@ void IEma::_calculate(const Indicator& indicator) {
 
     value_t multiplier = 2.0 / (n + 1);
     for (size_t i = startPos + 1; i < total; ++i) {
-        dst[i] = (src[i] - dst[i - 1]) * multiplier + dst[i - 1];
+        if (!std::isfinite(src[i])) {
+            dst[i] = dst[i - 1];
+        } else if (!std::isfinite(dst[i - 1])) {
+            dst[i] = src[i];
+        } else {
+            dst[i] = (src[i] - dst[i - 1]) * multiplier + dst[i - 1];
+        }
     }
 }
 
@@ -57,16 +63,32 @@ void IEma::_increment_calculate(const Indicator& data, size_t start_pos) {
 
     size_t total = data.size();
     for (size_t i = start_pos + 1; i < total; ++i) {
-        dst[i] = (src[i] - dst[i - 1]) * multiplier + dst[i - 1];
+        if (!std::isfinite(src[i])) {
+            dst[i] = dst[i - 1];
+        } else if (!std::isfinite(dst[i - 1])) {
+            dst[i] = src[i];
+        } else {
+            dst[i] = (src[i] - dst[i - 1]) * multiplier + dst[i - 1];
+        }
     }
 }
 
 void IEma::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step) {
-    Indicator slice = SLICE(ind, 0, curPos + 1);
-    Indicator ema = EMA(slice, step);
-    if (ema.size() > 0) {
-        _set(ema[ema.size() - 1], curPos);
+    // Intentional: replicate the static EMA recursion on the prefix [0, curPos] with raw scalars,
+    // bitwise identical to EMA(SLICE(ind, 0, curPos + 1)) but without per-bar allocations.
+    auto const* src = ind.data();
+    value_t multiplier = 2.0 / (step + 1.0);
+    value_t prev = src[ind.discard()];
+    for (size_t i = ind.discard() + 1; i <= curPos; ++i) {
+        if (!std::isfinite(src[i])) {
+            // hold prev (may still be unseeded before the first valid observation)
+        } else if (!std::isfinite(prev)) {
+            prev = src[i];
+        } else {
+            prev = (src[i] - prev) * multiplier + prev;
+        }
     }
+    _set(prev, curPos);
 }
 
 Indicator HKU_API EMA(int n) {

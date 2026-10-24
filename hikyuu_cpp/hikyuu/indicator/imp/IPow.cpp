@@ -3,7 +3,7 @@
  *
  *  Copyright (c) 2019 hikyuu.org
  *
- *  Created on: 2019年4月2日
+ *  Created on: 2019-4-2
  *      Author: fasiondog
  */
 
@@ -38,13 +38,13 @@ void IPow::_increment_calculate(const Indicator& data, size_t start_pos) {
     int n = getParam<int>("n");
     auto const* src = data.data();
     auto* dst = this->data();
-    for (size_t i = start_pos; i < data.size(); ++i) {
-        dst[i] = std::pow(src[i], n);
+    for (size_t i = start_pos, end = data.size(); i < end; ++i) {
+        dst[i] = safe_math(std::pow(src[i], n));
     }
 }
 
 void IPow::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step) {
-    _set(std::pow(ind[curPos], step), curPos);
+    _set(safe_math(std::pow(ind[curPos], step)), curPos);
 }
 
 Indicator HKU_API POW(int n) {

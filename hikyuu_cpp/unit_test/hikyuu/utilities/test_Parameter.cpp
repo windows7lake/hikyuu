@@ -7,6 +7,7 @@
 
 #include "doctest/doctest.h"
 #include "hikyuu/utilities/Log.h"
+#include <algorithm>
 #include <hikyuu/utilities/Parameter.h>
 #include <hikyuu/StockManager.h>
 
@@ -24,11 +25,11 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_Parameter") {
     Parameter param;
 
-    /** @arg 正常添加、读取、修改参数 */
+    /** @arg The normal adding, reading and modifying of the parameters */
     param.set<int>("n", 1);
     param.set<int64_t>("n64", 21474836480ll);
     param.set<bool>("bool", true);
@@ -52,16 +53,39 @@ TEST_CASE("test_Parameter") {
     CHECK(param.get<double>("double") == 10.01);
     CHECK(param.get<string>("string") == "test2");
 
-    /** @arg 添加不支持的参数类型 */
+    /** @arg Add an unsupported parameter type */
     CHECK_THROWS_AS(param.set<size_t>("n", 10), std::logic_error);
     CHECK_THROWS_AS(param.set<float>("n", 10.0), std::logic_error);
 
-    /** @arg 修改参数时，指定的类型和原有类型不符 */
+    /** @arg Set an unsupported type via boost::any */
+    CHECK_THROWS_AS(param.set("unsupported", boost::any(size_t(10))), std::logic_error);
+
+    /** @arg Modify an existing parameter via boost::any with a mismatching type */
+    CHECK_THROWS_AS(param.set("n", boost::any(string("x"))), std::logic_error);
+
+    /** @arg int parameters set via rvalue and lvalue are normalized to the same int64 type */
+    Parameter pi1, pi2;
+    pi1.set<int>("n", 1);
+    int n = 1;
+    pi2.set<int>("n", n);
+    CHECK(pi1.type("n") == "int64");
+    CHECK(pi2.type("n") == "int64");
+    CHECK_EQ(pi1, pi2);
+
+    /** @arg get<int> throws when the stored int64 value is out of the int range */
+    param.set<int64_t>("big", 21474836480ll);
+    param.set<int64_t>("small", -21474836480ll);
+    CHECK_THROWS_AS(param.get<int>("big"), std::out_of_range);
+    CHECK_THROWS_AS(param.get<int>("small"), std::out_of_range);
+    CHECK(param.get<int64_t>("big") == 21474836480ll);
+    CHECK(param.get<int64_t>("small") == -21474836480ll);
+
+    /** @arg When modifying a parameter, the given type does not match the existing one */
     CHECK_THROWS_AS(param.set<float>("n", 10.0), std::logic_error);
     CHECK_THROWS_AS(param.set<float>("bool", 10.0), std::logic_error);
     CHECK_THROWS_AS(param.set<float>("double", 10.0), std::logic_error);
 
-    /** @arg 测试相等比较 */
+    /** @arg Test the equality comparison */
     Parameter p1, p2;
     p1.set<string>("string", "test");
     p1.set<bool>("bool", true);
@@ -100,21 +124,21 @@ TEST_CASE("test_Parameter") {
     p2.set<PriceList>("ps", {1.0, 2.0});
     CHECK_EQ(p1, p2);
 
-    /** @arg 测试使用 Stock 做为参数 */
+    /** @arg Test using Stock as a parameter */
     Stock stk = getStock("sh600000");
     Parameter p;
     p.set<Stock>("stk", stk);
     Stock stk2 = p.get<Stock>("stk");
     CHECK(stk == stk2);
 
-    /** @arg 测试使用 Block 做为参数 */
+    /** @arg Test using Block as a parameter */
     Block blk;
     p = Parameter();
     p.set<Block>("blk", blk);
     Block blk2 = p.get<Block>("blk");
     CHECK(blk == blk2);
 
-    /** @arg 测试使用 KQuery 做为参数 */
+    /** @arg Test using KQuery as a parameter */
     KQuery query(10, 20);
     p = Parameter();
     p.set<KQuery>("query", query);
@@ -122,7 +146,7 @@ TEST_CASE("test_Parameter") {
     q2 = p.get<KQuery>("query");
     CHECK(query == q2);
 
-    /** @arg 测试使用 KData 做为参数 */
+    /** @arg Test using KData as a parameter */
     KData k = stk.getKData(query);
     p = Parameter();
     p.set<KData>("k", k);
@@ -139,7 +163,7 @@ TEST_CASE("test_Parameter") {
     CHECK(k.getStock() == k2.getStock());
     CHECK(k.getQuery() == k2.getQuery());
 
-    /** @arg 测试使用 PriceList 做为参数 */
+    /** @arg Test using PriceList as a parameter */
     PriceList x;
     for (int i = 0; i < 10; i++) {
         x.push_back(i);
@@ -151,9 +175,16 @@ TEST_CASE("test_Parameter") {
     for (int i = 0; i < 10; i++) {
         CHECK(x[i] == x2[i]);
     }
+
+    /** @arg KData is not the last item, getNameValueList still separates the items with ',' */
+    p = Parameter();
+    p.set<KData>("k", k);
+    p.set<int>("n", 1);
+    string nv = p.getNameValueList();
+    CHECK_EQ(std::count(nv.begin(), nv.end(), ','), 1);
 }
 
-/** @par 验证对 KData 的获取 */
+/** @par Verify the getting of KData */
 TEST_CASE("test_Parameter_KData") {
     KData k = getKData("sh000001", KQuery(-10));
     CHECK_EQ(k.size(), 10);
@@ -161,7 +192,7 @@ TEST_CASE("test_Parameter_KData") {
     Parameter param;
     param.set<KData>("k", k);
 
-    /** @arg 验证是否可以多次读取 KData，防止移动语义影响 */
+    /** @arg Verify that KData can be read several times, avoiding the move semantics */
     auto ek = param.get<KData>("k");
     CHECK_EQ(ek, k);
 
@@ -170,7 +201,7 @@ TEST_CASE("test_Parameter_KData") {
 }
 
 #if HKU_SUPPORT_SERIALIZATION
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_Parameter_serialize") {
     string filename(StockManager::instance().tmpdir());
     filename += "/Parameter.xml";
@@ -179,6 +210,7 @@ TEST_CASE("test_Parameter_serialize") {
     p1.set<int>("n", 10);
     p1.set<bool>("bool", true);
     p1.set<double>("p", 0.101);
+    p1.set<double>("prec", 0.1234567890123456);
     p1.set<string>("string", "This is string!");
     p1.set<Datetime>("date", Datetime(20260101));
     Stock stk = getStock("sh600000");
@@ -213,6 +245,7 @@ TEST_CASE("test_Parameter_serialize") {
     CHECK(p2.get<int>("n") == 10);
     CHECK(p2.get<bool>("bool") == true);
     CHECK(p2.get<double>("p") == 0.101);
+    CHECK(p2.get<double>("prec") == 0.1234567890123456);
     CHECK(p2.get<string>("string") == "This is string!");
     CHECK(p2.get<Stock>("stk") == stk);
     CHECK(p2.get<Block>("blk") == Block());

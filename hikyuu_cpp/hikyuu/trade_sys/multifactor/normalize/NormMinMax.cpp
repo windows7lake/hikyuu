@@ -18,12 +18,18 @@ NormMinMax::NormMinMax() : NormalizeBase("NORM_MinMax") {}
 NormMinMax::~NormMinMax() {}
 
 PriceList NormMinMax::normalize(const PriceList& data) {
-    PriceList result(data.size());
+    PriceList result(data.size(), Null<price_t>());
     HKU_IF_RETURN(data.empty(), result);
 
-    price_t min_value = data.front();
-    price_t max_value = data.front();
-    for (size_t i = 1; i < data.size(); ++i) {
+    size_t first = 0;
+    while (first < data.size() && std::isnan(data[first])) {
+        ++first;
+    }
+    HKU_IF_RETURN(first == data.size(), result);
+
+    price_t min_value = data[first];
+    price_t max_value = data[first];
+    for (size_t i = first + 1; i < data.size(); ++i) {
         if (!std::isnan(data[i])) {
             if (data[i] < min_value) {
                 min_value = data[i];
@@ -34,7 +40,14 @@ PriceList NormMinMax::normalize(const PriceList& data) {
     }
 
     if (min_value == max_value) {
-        std::copy(data.begin(), data.end(), result.begin());
+        // A zero-range cross-section has no dispersion to scale: map the valid positions to the
+        // constant 0 (rather than leaking the raw magnitudes); being constant it leaves the
+        // cross-sectional ordering unchanged
+        for (size_t i = 0; i < data.size(); ++i) {
+            if (!std::isnan(data[i])) {
+                result[i] = 0.0;
+            }
+        }
         return result;
     }
 

@@ -1,10 +1,11 @@
 /*
  * ITsRank.cpp
  *
- *  Created on: 2026年6月9日
+ *  Created on: 2026-6-9
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "ITsRank.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -21,7 +22,7 @@ ITsRank::~ITsRank() {}
 
 void ITsRank::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") > 0);
+        HKU_ASSERT(getParam<int>("n") > 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -43,15 +44,23 @@ void ITsRank::_calculate(const Indicator& ind) {
     }
 
     global_parallel_for_index_void(m_discard, total, [&, n, src, dst](size_t i) {
-        int count = 0;
-        size_t start = i + 1 - n;
         value_t current = src[i];
+        if (!std::isfinite(current)) {
+            dst[i] = Null<price_t>();
+            return;
+        }
+        int count = 0;
+        size_t valid = 0;
+        size_t start = i + 1 - n;
         for (size_t j = start; j <= i; ++j) {
-            if (src[j] <= current) {
-                count++;
+            if (std::isfinite(src[j])) {
+                valid++;
+                if (src[j] <= current) {
+                    count++;
+                }
             }
         }
-        dst[i] = static_cast<price_t>(count) / n;
+        dst[i] = static_cast<price_t>(count) / valid;
     });
 }
 
@@ -66,15 +75,23 @@ void ITsRank::_increment_calculate(const Indicator& ind, size_t start_pos) {
 
     int n = getParam<int>("n");
     for (size_t i = start_pos; i < total; ++i) {
-        int count = 0;
-        size_t start = i + 1 - n;
         value_t current = src[i];
+        if (!std::isfinite(current)) {
+            dst[i] = Null<price_t>();
+            continue;
+        }
+        int count = 0;
+        size_t valid = 0;
+        size_t start = i + 1 - n;
         for (size_t j = start; j <= i; ++j) {
-            if (src[j] <= current) {
-                count++;
+            if (std::isfinite(src[j])) {
+                valid++;
+                if (src[j] <= current) {
+                    count++;
+                }
             }
         }
-        dst[i] = static_cast<price_t>(count) / n;
+        dst[i] = static_cast<price_t>(count) / valid;
     }
 }
 
@@ -82,14 +99,24 @@ void ITsRank::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step
     if (curPos < ind.discard() + step - 1) {
         return;
     }
+    value_t current = ind[curPos];
+    if (!std::isfinite(current)) {
+        _set(Null<price_t>(), curPos);
+        return;
+    }
     size_t start = curPos + 1 - step;
     int count = 0;
+    size_t valid = 0;
     for (size_t j = start; j <= curPos; ++j) {
-        if (ind[j] <= ind[curPos]) {
-            count++;
+        value_t v = ind[j];
+        if (std::isfinite(v)) {
+            valid++;
+            if (v <= current) {
+                count++;
+            }
         }
     }
-    _set(static_cast<price_t>(count) / step, curPos);
+    _set(static_cast<price_t>(count) / valid, curPos);
 }
 
 Indicator HKU_API TS_RANK(int n) {

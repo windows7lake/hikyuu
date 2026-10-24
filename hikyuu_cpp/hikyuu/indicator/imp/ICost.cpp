@@ -6,6 +6,7 @@
  */
 
 #include "ICost.h"
+#include "StockWeightFill.h"
 
 #if HKU_SUPPORT_SERIALIZATION
 BOOST_CLASS_EXPORT(hku::ICost)
@@ -27,8 +28,8 @@ void ICost::_checkParam(const string& name) const {
     }
 }
 
-// 假设成本分布：DMA(x, HSL=A) = A*X+(1-A)*Y'
-// 实际算法：DMA(CLOSE() + (HIGH() - LOW()) * x / 100.0, HSL());
+// Assume the cost distribution: DMA(x, HSL=A) = A*X+(1-A)*Y'
+// The actual algorithm: DMA(CLOSE() + (HIGH() - LOW()) * x / 100.0, HSL());
 void ICost::_calculate(const Indicator& data) {
     HKU_WARN_IF(!isLeaf() && !data.empty(),
                 "The input is ignored because {} depends on the context!", m_name);
@@ -37,84 +38,30 @@ void ICost::_calculate(const Indicator& data) {
     size_t total = k.size();
     HKU_IF_RETURN(total == 0, void());
 
+    // transCount is in lots on the daily line and above but in shares below it; freeCount is in
+    // units of 10 thousand shares. The factor normalizes both to the turnover ratio (x 100 = %).
+    bool day_or_above =
+      KQuery::getKTypeInSeconds(k.getQuery().kType()) >= KQuery::getKTypeInSeconds(KQuery::DAY);
+    value_t hsl_factor = day_or_above ? 0.01 : 0.0001;
+
     _readyBuffer(total, 1);
 
-    // 先将 discard 设为全部，后续更新
-    m_discard = total;
-
-    Stock stock = k.getStock();
-    auto* kdata = k.data();
-    Datetime lastdate = kdata[total - 1].datetime.startOfDay();
-
-    StockWeightList sw_list = stock.getWeight(Datetime::min(), lastdate + Days(1));
-    HKU_IF_RETURN(sw_list.empty(), void());
-
-    // 寻找第一个流通盘不为0的权息
-    price_t pre_free_count = 0.0;
-    Datetime pre_sw_date;
-    auto sw_iter = sw_list.begin();
-    for (; sw_iter != sw_list.end(); ++sw_iter) {
-        if (sw_iter->freeCount() > 0) {
-            pre_free_count = sw_iter->freeCount();
-            pre_sw_date = sw_iter->datetime();
-            break;
-        }
-    }
-
-    // 没有流通盘相关权息数据, 或者该权息日期大于最后一根K线日期, 直接返回
-    HKU_IF_RETURN(sw_iter == sw_list.end() || pre_sw_date > lastdate, void());
-
-    auto* dst = this->data();
-
     value_t percent = getParam<double>("percent") * 0.01;
-    size_t pos = 0;
-    value_t x, a;
-    for (; sw_iter != sw_list.end(); ++sw_iter) {
-        price_t free_count = sw_iter->freeCount();
-        Datetime cur_sw_date = sw_iter->datetime();
-        if (free_count <= 0.0) {
-            continue;  // 忽略流通盘为0的权息
-        }
+    auto* dst = this->data();
+    // DMA state decoupled from the buffer: seed with x until the first recursive value exists
+    bool has_pre_cost = false;
+    value_t pre_cost = 0.0;
+    fill_by_weight_series(
+      k, 0, [](const StockWeight& w) { return w.freeCount(); },
+      [&](size_t pos, const KRecord& krecord, price_t pre_free_count) {
+          value_t x = krecord.closePrice + (krecord.highPrice - krecord.lowPrice) * percent;
+          value_t a = krecord.transCount / pre_free_count * hsl_factor;
+          dst[pos] = has_pre_cost ? a * x + (1 - a) * pre_cost : x;
+          has_pre_cost = true;
+          pre_cost = dst[pos];
+      });
 
-        while (pos < total && kdata[pos].datetime < cur_sw_date) {
-            const KRecord& krecord = kdata[pos];
-            if (krecord.datetime >= pre_sw_date) {
-                x = krecord.closePrice + (krecord.highPrice - krecord.lowPrice) * percent;
-                // transCount 为手数，流通股为万股
-                a = krecord.transCount / pre_free_count * 0.01;
-                dst[pos] = pos > 0 ? a * x + (1 - a) * dst[pos - 1] : x;
-            }
-            pos++;
-        }
-
-        pre_free_count = free_count;
-        pre_sw_date = cur_sw_date;
-        if (pos >= total) {
-            break;
-        }
-    }
-
-    if (pos == 0) {
-        const KRecord& krecord = kdata[pos];
-        x = krecord.closePrice + (krecord.highPrice - krecord.lowPrice) * percent;
-        dst[pos] = x;
-        pos++;
-    }
-
-    for (; pos < total; pos++) {
-        const KRecord& krecord = kdata[pos];
-        x = krecord.closePrice + (krecord.highPrice - krecord.lowPrice) * percent;
-        a = krecord.transCount / pre_free_count * 0.01;
-        dst[pos] = a * x + (1 - a) * dst[pos - 1];
-    }
-
-    // 更新 discard
-    for (size_t i = 0; i < total; i++) {
-        if (!std::isnan(dst[i])) {
-            m_discard = i;
-            break;
-        }
-    }
+    updateDiscard(true);
 }
 
 Indicator HKU_API COST(double x) {

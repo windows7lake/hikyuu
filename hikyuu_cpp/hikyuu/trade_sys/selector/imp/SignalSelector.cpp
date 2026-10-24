@@ -17,31 +17,32 @@ SignalSelector::SignalSelector() : SelectorBase("SE_Sigal") {}
 
 SignalSelector::~SignalSelector() {}
 
-bool SignalSelector::isMatchAF(const AFPtr& af) {
-    // HKU_WARN_IF_RETURN(
-    //   af->getParam<bool>("adjust_running_sys"), false,
-    //   "AF will adjust running system funds, but this se is not suitable the case!");
-    return true;
-}
-
 SystemWeightList SignalSelector::_getSelected(Datetime date) {
     auto iter = m_sys_dict.find(date);
-    return iter != m_sys_dict.end() ? iter->second : SystemWeightList();
+    if (iter == m_sys_dict.end()) {
+        return SystemWeightList();
+    }
+
+    SystemWeightList ret;
+    ret.reserve(iter->second.size());
+    for (const auto& sys : iter->second) {
+        ret.emplace_back(sys, 1.0);
+    }
+    return ret;
 }
 
 void SignalSelector::_calculate() {
-    size_t total = m_real_sys_list.size();
-    for (size_t i = 0; i < total; i++) {
-        auto& sys = m_real_sys_list[i];
-        auto sg = sys->getSG();
-        auto dates = sg->getBuySignal();
-        for (auto& date : dates) {
-            auto iter = m_sys_dict.find(date);
-            if (iter != m_sys_dict.end()) {
-                iter->second.emplace_back(sys, 1.0);
-            } else {
-                m_sys_dict[date] = {SystemWeight(sys, 1.0)};
-            }
+    // Only the signals the systems already have can be selected, so a mode C cycle sub-system
+    // (declared on admission) is never seen here
+    // Drop the previous selection first: a second calculate must not duplicate the systems of
+    // the same day
+    m_sys_dict.clear();
+
+    // Only the systems are kept per date; the weight of a signal selection is always 1.0
+    for (const auto& sys : m_real_sys_list) {
+        DatetimeList dates = sys->getSG()->getBuySignal();
+        for (const auto& date : dates) {
+            m_sys_dict[date].push_back(sys);
         }
     }
 }

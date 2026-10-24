@@ -13,14 +13,26 @@
 namespace hku {
 
 /**
- * @brief 计算指定的因子相对于参考证券的 IC （实际为 RankIC）
- * @note IC 原本需要 “t 时刻因子值→t+1 时刻收益”，改为计算 “t 时刻因子值→t 时刻之前 N
-        天的收益”（比如过去 5 天的收益），并称之为 “当前 IC”。(否则当前值都会是缺失NA)
-        如需严格“t 时刻因子值→t+1 时刻收益“计算，请设置 strict=True (注意此模式下, 后n位为 NA)
- * @param stks 证券组合
- * @param n 时间窗口 (对应 n 日收益率)
- * @param spearman 使用 spearman 相关系数，否则为 pearson
- * @param strict 严格模式， 遵循IC定义“t 时刻因子值→t+1 时刻收益”
+ * @brief Cross-section information coefficient (IC) of a factor over a stock set.
+ * @details Each trading day, the factor values and the n-day return of every stock are collected
+ *          into a cross-section and their Spearman (default) or Pearson correlation is computed.
+ *
+ * @note Alignment: the daily pair is (factor observed at t - n, return over [t - n, t]). By
+ *       default the result is stored at index t (the observation completion date), so the current
+ *       value is readable without future data — the "current IC" convention. Set
+ *       strict = true to re-index by the factor observation date (t - n), matching the
+ *       industry-standard forward IC definition; in that mode the trailing n values are Null
+ *       because their forward returns are not yet realized.
+ *
+ * @note Choosing strict: backtests that feed IC into MF_ICWeight / MF_ICIRWeight or any
+ *       live-decision path should keep the default non-strict mode — strict IC[t] uses
+ *       returns over [t, t+n] and would introduce look-ahead bias if consumed at t. Use
+ *       strict = true only for offline factor analysis or when aligning with published
+ *       (academic / industry) IC numbers that are indexed by factor date.
+ * @param stks the security portfolio
+ * @param n time window (corresponding to the n-day return)
+ * @param spearman use the spearman correlation coefficient, otherwise pearson
+ * @param strict re-index by factor observation date; the last n values are Null
  * @return Indicator
  * @ingroup Indicator
  */
@@ -39,14 +51,15 @@ inline Indicator IC(const Indicator& ind, const Block& blk, int n = 1, bool spea
 }
 
 /**
- * @brief 计算指定的因子列表相对于指定的收益列表的
- * IC，其中，inds和returns均为已经计算好并按日期对齐后的结果。inds不需要按n右移。
- * @note 仅为数值计算，返回结果无对齐日期
- * @param inds 因子列表，inds不需要按n右移。
- * @param returns 收益列表
- * @param n 时间窗口 (对应 n 日收益率)
- * @param use_spearman 使用 spearman 相关系数，否则为 pearson
- * @param strict 严格模式， 遵循IC定义“t 时刻因子值→t+1 时刻收益”
+ * @brief Cross-section IC of an already-aligned factor/return list pair.
+ * @details inds and returns are both pre-computed and date-aligned by the caller; inds is
+ *          interpreted as the factor at its observation date, no REF shift is applied.
+ * @note Numeric-only result, no datetime alignment on the output.
+ * @param inds factor list (do not pre-shift by n)
+ * @param returns return list
+ * @param n time window (corresponding to the n-day return)
+ * @param use_spearman use the spearman correlation coefficient, otherwise pearson
+ * @param strict re-index by factor observation date; the last n values are Null
  */
 Indicator HKU_API IC(IndicatorList inds, IndicatorList returns, int n = 1, bool use_spearman = true,
                      bool strict = false);

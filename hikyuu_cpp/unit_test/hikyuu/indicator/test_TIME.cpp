@@ -9,6 +9,8 @@
 #include <fstream>
 #include <hikyuu/StockManager.h>
 #include <hikyuu/indicator/crt/TIME.h>
+#include <hikyuu/indicator/crt/PRICELIST.h>
+#include <hikyuu/indicator/crt/KDATA.h>
 
 using namespace hku;
 
@@ -18,13 +20,13 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_TIME") {
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh000001");
     KData kdata;
 
-    /** @arg 无输入参数 */
+    /** @arg No input parameter */
     Indicator date = hku::DATE(), time = TIME(), year = YEAR(), month = MONTH(), week = WEEK(),
               day = DAY(), hour = HOUR(), minute = MINUTE();
     CHECK_EQ(date.size(), 0);
@@ -59,7 +61,7 @@ TEST_CASE("test_TIME") {
     CHECK_EQ(minute.empty(), true);
     CHECK_EQ(minute.name(), "MINUTE");
 
-    /** @arg 对应的KData为空 */
+    /** @arg The corresponding KData is empty */
     CHECK_EQ(kdata.empty(), true);
 
     date = hku::DATE(kdata);
@@ -102,7 +104,7 @@ TEST_CASE("test_TIME") {
     CHECK_EQ(minute.empty(), true);
     CHECK_EQ(minute.name(), "MINUTE");
 
-    /** @arg 非空的KData */
+    /** @arg A non-empty KData */
     KQuery query(-10);
     kdata = stock.getKData(query);
     size_t total = kdata.size();
@@ -151,7 +153,7 @@ TEST_CASE("test_TIME") {
         CHECK_EQ(minute[i], d.minute());
     }
 
-    /** @arg 非空的KData */
+    /** @arg A non-empty KData */
     date = hku::DATE();
     time = TIME();
     year = YEAR();
@@ -207,12 +209,37 @@ TEST_CASE("test_TIME") {
     }
 }
 
+/** @par Test points */
+TEST_CASE("test_TIME_non_leaf_date_axis") {
+    /** @arg input with its own dates: the result covers the input date axis */
+    DatetimeList dates{Datetime(2024, 3, 5), Datetime(2024, 3, 6), Datetime(2024, 3, 7)};
+    Indicator x = PRICELIST(PriceList{1.0, 2.0, 3.0}, dates);
+    Indicator y = YEAR()(x);
+    CHECK_EQ(y.size(), 3);
+    for (size_t i = 0; i < 3; ++i) {
+        CHECK_EQ(y[i], 2024);
+    }
+    Indicator d = hku::DATE()(x);
+    CHECK_EQ(d[0], 1240305);
+    CHECK_EQ(d[1], 1240306);
+    CHECK_EQ(d[2], 1240307);
+
+    /** @arg input without dates: fall back to the context date axis */
+    KData k = StockManager::instance().getStock("sh000001").getKData(KQuery(-10));
+    if (k.empty()) {
+        return;
+    }
+    Indicator w = YEAR()(CLOSE())(k);
+    CHECK_EQ(w.size(), k.size());
+    CHECK_EQ(w[0], k[0].datetime.year());
+}
+
 //-----------------------------------------------------------------------------
 // test export
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_TIME_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

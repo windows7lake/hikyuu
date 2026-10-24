@@ -14,7 +14,8 @@
 namespace hku {
 
 /**
- * 指数, EXP(X)为e的X次幂
+ * Exponent, EXP(X) is e to the power of X
+ * @note Overflow (result beyond the finite range) returns null
  * @ingroup Indicator
  */
 Indicator HKU_API EXP();

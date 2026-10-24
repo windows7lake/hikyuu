@@ -1,7 +1,7 @@
 /*
  * FixedPercentProfitGoal.h
  *
- *  Created on: 2016年5月6日
+ *  Created on: 2016-5-6
  *      Author: Administrator
  */
 
@@ -21,6 +21,7 @@ public:
     FixedPercentProfitGoal();
     virtual ~FixedPercentProfitGoal();
     virtual void _checkParam(const string& name) const override;
+    virtual price_t _getShortGoal(const Datetime& datetime, price_t price) override;
 };
 
 } /* namespace hku */

@@ -10,7 +10,11 @@
 #endif
 
 #include "GlobalInitializer.h"
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string.hpp>
@@ -20,12 +24,12 @@
 #include "hikyuu/utilities/thread/algorithm.h"
 #include "StockManager.h"
 #include "global/schedule/inner_tasks.h"
-#include "data_driver/kdata/cvs/KDataTempCsvDriver.h"
 #include "plugin/interface/plugins.h"
 #include "plugin/device.h"
 #include "plugin/hkuextra.h"
 #include "plugin/extind.h"
 #include "global/sysinfo.h"
+#include "data_driver/ipc/ShmClientHook.h"
 
 namespace hku {
 StockManager* StockManager::m_sm = nullptr;
@@ -42,6 +46,17 @@ StockManager::StockManager() {
 }
 
 StockManager::~StockManager() {
+    // Wait for the background preload thread to exit first: otherwise it would still access the
+    // members (m_load_tg) after their destruction, causing a UAF; at the same time it guarantees
+    // that m_preload_thread is not joinable at its destruction (otherwise the std::thread
+    // destructor would trigger std::terminate). Idempotent: clean() has usually joined already, so
+    // calling it again here is a no-op (it also covers the destruction path without clean()).
+    joinPreloadThread();
+    // Unregister the shm client forwarding callbacks (breaking the reference to the plugin
+    // implementation): after that the forwarding call of Stock::realtimeUpdate returns directly,
+    // avoiding blocking on an already invalid connection during the exit. The server shutdown has
+    // been moved to the plugin (the stopShmServer facade)
+    ipc::registerShmClient(ipc::ShmClientForwarders());
     delete m_stockDict_mutex;
     fmt::print("Quit Hikyuu system!\n\n");
 }
@@ -77,12 +92,24 @@ void StockManager::init(const Parameter& baseInfoParam, const Parameter& blockPa
     HKU_WARN_IF_RETURN(m_initializing, void(),
                        "The last initialization has not finished. Please try again later!");
 
-    // 防止重复 init
+    // Prevent a duplicated init
     if (m_thread_id != std::thread::id()) {
         return;
     }
     m_initializing = true;
     m_thread_id = std::this_thread::get_id();
+    // Roll back the init flags on any exception so a failed init can be retried
+    struct Guard {
+        std::atomic_bool& initializing;
+        std::thread::id& thread_id;
+        bool committed{false};
+        ~Guard() {
+            initializing = false;
+            if (!committed)
+                thread_id = std::thread::id();
+        }
+    } guard{m_initializing, m_thread_id};
+
     HKU_CHECK(!context.empty(), "No stock code list is included in the context!");
 
     if (m_i18n_path.empty()) {
@@ -98,18 +125,18 @@ void StockManager::init(const Parameter& baseInfoParam, const Parameter& blockPa
     m_hikyuuParam = hikyuuParam;
     m_context = context;
 
-    // 获取路径信息
+    // Get the path information
     m_tmpdir = hikyuuParam.tryGet<string>("tmpdir", ".");
     m_datadir = hikyuuParam.tryGet<string>("datadir", ".");
 
-    // 设置插件路径
+    // Set the plugin path
     auto plugin_path = getPluginPath();
     if (plugin_path.empty() || plugin_path == ".") {
         m_plugin_manager.pluginPath("./plugin");
     }
     HKU_INFO(htr("Plugin path: {}", getPluginPath()));
 
-    // 注册扩展K线处理
+    // Register the extended K-line handling
     registerPredefinedExtraKType();
 
     global_submit_task([this]() {
@@ -147,12 +174,13 @@ void StockManager::init(const Parameter& baseInfoParam, const Parameter& blockPa
         DataDriverFactory::regBlockDriver(driver);
     }
 
-    // 加载证券基本信息
+    // Load the basic security information
     m_baseInfoDriver = DataDriverFactory::getBaseInfoDriver(baseInfoParam);
     HKU_CHECK(m_baseInfoDriver, "Failed get base info driver!");
 
-    // 获取板块驱动
+    // Get the block driver
     m_blockDriver = DataDriverFactory::getBlockDriver(blockParam);
+    HKU_CHECK(m_blockDriver, "Failed get block driver!");
 
     auto driver = DataDriverFactory::getKDataDriverPool(m_kdataDriverParam);
     HKU_CHECK(driver, "driver is null!");
@@ -160,18 +188,39 @@ void StockManager::init(const Parameter& baseInfoParam, const Parameter& blockPa
         m_kdataDriverParam = driver->getPrototype()->getParameter();
     }
 
-    // 加载数据
+    // The pure client negotiates the shm data service (on a successful connection it is replaced by
+    // the proxy driver and the local preload is turned off; on failure it degrades to the
+    // standalone mode)
+    _negotiateShmServer();
+
+    // Load the data
     loadData();
 
-    // 初始化内部定时任务（重加载）
+    // The basic data and the snapshot publishing are done by the plugin subscribing to LoadEvent;
+    // the core library no longer notifies the readiness actively.
+
+    // Initialize the internal scheduled task (reload)
     initInnerTask();
 
-    m_initializing = false;
+    guard.committed = true;
 }
 
 void StockManager::loadData() {
     std::chrono::system_clock::time_point start_time = std::chrono::system_clock::now();
     m_data_ready.store(false, std::memory_order_release);
+    m_load_error.store(false, std::memory_order_release);
+
+    struct Guard {
+        std::atomic_bool& data_ready;
+        std::atomic_bool& load_error;
+        bool done{false};
+        ~Guard() {
+            if (!done) {
+                load_error.store(true, std::memory_order_release);
+                data_ready.store(true, std::memory_order_release);
+            }
+        }
+    } guard{m_data_ready, m_load_error};
 
     loadAllHolidays();
     loadAllMarketInfos();
@@ -179,38 +228,184 @@ void StockManager::loadData() {
     loadAllStocks();
     loadInnerBlocks();
     loadAllStockWeights();
+    // The ex-rights/ex-dividend data is ready; the plugin publishes a basic information snapshot
+    // accordingly. The historical finance is not preloaded yet at this moment, so the plugin must
+    // publish with include_finance=false, otherwise it would be lazily loaded security by security.
+    _fireLoadEvent(LoadEvent::BASE_DATA_READY);
     loadAllZhBond10();
     loadHistoryFinanceField();
 
     HKU_INFO(htr("Loading block..."));
     m_blockDriver->load();
+    // The blocks are loaded, dispatch the BLOCKS_LOADED event: the plugin refreshes the block cache
+    // of the IPC service accordingly (the former refreshBlocks)
+    _fireLoadEvent(LoadEvent::BLOCKS_LOADED);
 
-    // 获取K线数据驱动并预加载指定的数据
+    // Get the K-line data driver and preload the given data
     HKU_INFO(htr("Loading KData..."));
 
-    // 加载K线及历史财务信息
+    // Load the K-lines and the historical financial information
     loadAllKData();
 
-    // 更新 license expire time
+    // Update the license expire time
     updateSysInfoExpiredTime(getExpireDate());
 
     std::chrono::duration<double> sec = std::chrono::system_clock::now() - start_time;
     auto seconds = sec.count();
     HKU_INFO(htr("{:<.2f}s Loaded Data.", seconds));
+
+    guard.done = true;
+}
+
+KDataDriverConnectPoolPtr StockManager::_getKDataDriverPool() {
+    if (m_ipc_kdata_pool) {
+        return m_ipc_kdata_pool;
+    }
+    return DataDriverFactory::getKDataDriverPool(m_kdataDriverParam);
+}
+
+void StockManager::_negotiateShmServer() {
+    // The master gate: when it is off nothing participates at all (no detection, no mapping, no
+    // forwarding) and the behavior equals to the feature being disabled. It is off by default (the
+    // process runs in the standalone mode by default); connecting to an existing service as a
+    // client requires enabling it explicitly in the config
+    HKU_IF_RETURN(!m_hikyuuParam.tryGet<bool>("use_shm_server", false), void());
+    // This process is in the server role: it never enters the client mode (to prevent the
+    // realtimeUpdate self-forwarding loop)
+    HKU_IF_RETURN(isShmServerRole(), void());
+
+    // All the client capabilities (detection / connection / waiting for readiness / the proxy
+    // driver / the three forwardings) are provided by the shmserver plugin; the core library only
+    // depends on the single contract ShmServerPluginInterface and degrades to the standalone mode
+    // when the plugin is missing (print=false: no startup noise). The forwardings are registered by
+    // the plugin itself after a successful connect, the core library holds no client pointer
+    auto* plugin = getPlugin<ShmServerPluginInterface>(HKU_PLUGIN_SHM_SERVER, false);
+    HKU_IF_RETURN(!plugin, void());
+
+    // Connect to the existing service and wait for its data to be ready (the retries, the
+    // interruption check and the forwarding registration are done inside the plugin; the client
+    // never starts the service itself)
+    auto wait_timeout = m_hikyuuParam.tryGet<int64_t>("shm_server_wait_timeout", 600);
+    HKU_WARN_IF_RETURN(!plugin->connect(m_datadir, wait_timeout < 0 ? 0 : (uint64_t)wait_timeout),
+                       void(), "Failed connect to hikyuu shm server, fallback to standalone mode!");
+
+    // Switch to the client mode: install the proxy driver provided by the plugin and turn off the
+    // local preload (an in-memory override only, the config file is not modified)
+    m_ipc_client_mode.store(true, std::memory_order_release);
+    m_baseInfoDriver = plugin->createBaseInfoDriver(m_baseInfoDriver);
+    m_blockDriver = plugin->createBlockDriver(m_blockDriver);
+    // The whole local driver connection pool is passed in (instead of its prototype): the types not
+    // preloaded by the service process and the time-sharing / tick data are served by the local
+    // driver of the client directly, and a connection must be taken from the pool to avoid multiple
+    // clones reusing the same connection / file handle concurrently
+    auto local_pool = DataDriverFactory::getKDataDriverPool(m_kdataDriverParam);
+    m_ipc_kdata_pool =
+      std::make_shared<KDataDriverConnectPool>(plugin->createKDataDriver(local_pool));
+    for (const auto& ktype : KQuery::getBaseKTypeList()) {
+        auto low_ktype = ktype;
+        to_lower(low_ktype);
+        m_preloadParam.set<bool>(low_ktype, false);
+    }
+    // The client has no preload buffer; the update is applied to the buffer by the service process
+    // and mirrored to the shared memory, visible to all the clients
+    HKU_INFO("Connected to hikyuu shm server: {}, running in client mode.", plugin->serverAddr());
+}
+
+bool StockManager::isIpcClientMode() const {
+    return m_ipc_client_mode.load(std::memory_order_acquire);
+}
+
+// ── LoadEvent event bus (the core library only dispatches and the plugin subscribes) ─────────────
+namespace {
+// The callback container is held with new entirely and never deleted: if its member lock were
+// destroyed during the static destruction, stopShmServer() would throw EINVAL while locking when
+// unregistering the callbacks in clean() and the noexcept destruction chain would call
+// std::terminate. Therefore the container itself is also placed on the heap and never released.
+struct LoadEventState {
+    std::shared_mutex mutex;
+    std::vector<std::pair<size_t, LoadEventCallback>> callbacks;
+    size_t next_id{1};
+    std::atomic<size_t> in_flight{0};  // dispatches running on their snapshots
+    std::condition_variable_any cv;
+};
+LoadEventState* g_load_event = new LoadEventState;
+std::atomic<bool> g_shm_server_role{false};
+thread_local size_t t_dispatch_depth{
+  0};  // unregistering inside a callback must not wait for itself
+}  // namespace
+
+size_t registerLoadEventCallback(LoadEventCallback&& cb) {
+    std::unique_lock<std::shared_mutex> lock(g_load_event->mutex);
+    size_t id = g_load_event->next_id++;
+    g_load_event->callbacks.emplace_back(id, std::move(cb));
+    return id;
+}
+
+void unregisterLoadEventCallback(size_t id) {
+    {
+        std::unique_lock<std::shared_mutex> lock(g_load_event->mutex);
+        auto& v = g_load_event->callbacks;
+        v.erase(std::remove_if(
+                  v.begin(), v.end(),
+                  [id](const std::pair<size_t, LoadEventCallback>& p) { return p.first == id; }),
+                v.end());
+    }
+    if (t_dispatch_depth > 0) {
+        return;
+    }
+    std::unique_lock<std::shared_mutex> lock(g_load_event->mutex);
+    g_load_event->cv.wait(lock, [] { return g_load_event->in_flight.load() == 0; });
+}
+
+void setShmServerRole(bool role) noexcept {
+    g_shm_server_role.store(role, std::memory_order_relaxed);
+}
+
+bool isShmServerRole() noexcept {
+    return g_shm_server_role.load(std::memory_order_relaxed);
+}
+
+void StockManager::_fireLoadEvent(LoadEvent event) {
+    std::vector<std::pair<size_t, LoadEventCallback>> callbacks;
+    {
+        std::shared_lock<std::shared_mutex> lock(g_load_event->mutex);
+        callbacks = g_load_event->callbacks;
+        g_load_event->in_flight.fetch_add(1);
+    }
+    ++t_dispatch_depth;
+    struct DispatchGuard {
+        ~DispatchGuard() {
+            --t_dispatch_depth;
+            if (g_load_event->in_flight.fetch_sub(1) == 1) {
+                std::unique_lock<std::shared_mutex> lock(g_load_event->mutex);
+                g_load_event->cv.notify_all();
+            }
+        }
+    } guard;
+    for (const auto& cb : callbacks) {
+        cb.second(event);
+    }
+}
+
+void StockManager::joinPreloadThread() {
+    if (m_preload_thread.joinable()) {
+        m_preload_thread.join();
+    }
 }
 
 void StockManager::loadAllKData() {
-    // 按 K 线类型控制加载顺序
+    // Control the loading order by the K-line type
     vector<KQuery::KType> ktypes;
     vector<string> low_ktypes;
 
-    // 如果上下文指定了 ktype list，则按上下文指定的 ktype 顺序加载，否则按默认顺序加载
+    // If the context gives a ktype list, load in the order of the ktypes given by the context,
+    // otherwise load in the default order
     const auto& context_ktypes = m_context.getKTypeList();
     if (context_ktypes.empty()) {
         ktypes = KQuery::getBaseKTypeList();
 
     } else {
-        // 使用上下文预加载参数覆盖全局预加载参数
+        // Override the global preload parameters with the context preload parameters
         ktypes = context_ktypes;
         for (const auto& ktype : ktypes) {
             auto low_ktype = ktype;
@@ -225,7 +420,8 @@ void StockManager::loadAllKData() {
         auto& back = low_ktypes.emplace_back(ktype);
         to_lower(back);
 
-        // 判断上下文是否指定了预加载数量，如果指定了，则覆盖默认值
+        // Judge whether the context gives the preload numbers; when it does, they override the
+        // default values
         string preload_key = fmt::format("{}_max", back);
         auto context_iter = context_preload_num.find(preload_key);
         if (context_iter != context_preload_num.end()) {
@@ -247,107 +443,207 @@ void StockManager::loadAllKData() {
     bool lazy_preload = m_hikyuuParam.tryGet<bool>("lazy_preload", false);
     HKU_INFO_IF(lazy_preload && canLazyLoad(KQuery::MIN), htr("Use lazy preload!"));
 
-    // 先加载同类K线
-    auto driver = DataDriverFactory::getKDataDriverPool(m_kdataDriverParam);
-    if (!driver->getPrototype()->canParallelLoad()) {
-        for (size_t i = 0, len = ktypes.size(); i < len; i++) {
+    // Load the K-lines of the same kind first (the preload is only a cache warm-up, it always runs
+    // asynchronously in the background and does not block the initialization; the queries during
+    // the warm-up are fetched from the driver in real time and their results are not affected; the
+    // scenarios needing to wait for the warm-up to finish can call waitDataReady() explicitly)
+    auto driver = _getKDataDriverPool();
+    if (isIpcClientMode()) {
+        // In the client mode the data is provided by the server, there is no local preload task and
+        // it is ready directly
+        m_data_ready.store(true, std::memory_order_release);
+        return;
+    }
+
+    // The preload thread is the joinable member m_preload_thread (no longer detached): at the exit
+    // joinPreloadThread() waits for its exit before stopping m_load_tg / destroying the IPC
+    // service, eradicating the concurrent access race. If the previous preload thread still exists
+    // (a duplicated initialization), join it before the new assignment, avoiding terminate on
+    // assigning a joinable thread.
+    joinPreloadThread();
+    const bool parallel = driver->getPrototype()->canParallelLoad();
+    m_preload_thread = std::thread([this, ktypes, low_ktypes, parallel]() mutable {
+        _loadAllKDataSafely(std::move(ktypes), std::move(low_ktypes), parallel);
+    });
+}
+
+void StockManager::_loadAllKDataSafely(vector<KQuery::KType> ktypes,
+                                       const vector<string>& low_ktypes, bool parallel) {
+    try {
+        if (parallel) {
+            _loadAllKDataParallel(std::move(ktypes), low_ktypes);
+        } else {
+            _loadAllKDataSerial(std::move(ktypes), low_ktypes);
+        }
+    } catch (const std::exception& e) {
+        HKU_ERROR("Failed preload kdata: {}", e.what());
+        m_load_error.store(true, std::memory_order_release);
+        m_data_ready.store(true, std::memory_order_release);
+    } catch (...) {
+        HKU_ERROR("Failed preload kdata with unknown exception!");
+        m_load_error.store(true, std::memory_order_release);
+        m_data_ready.store(true, std::memory_order_release);
+    }
+}
+
+void StockManager::_loadAllKDataSerial(vector<KQuery::KType> ktypes,
+                                       const vector<string>& low_ktypes) {
+    // The progress reporting has moved to the plugin side (through LoadEvent and its own polling);
+    // loaded/total is no longer counted here
+
+    for (size_t i = 0, len = ktypes.size(); i < len; i++) {
+        if (m_cancel_load) {
+            break;
+        }
+        if (canLazyLoad(ktypes[i])) {
+            continue;
+        }
+        std::shared_lock<std::shared_mutex> lock(*m_stockDict_mutex);
+        for (auto iter = m_stockDict.begin(); iter != m_stockDict.end(); ++iter) {
             if (m_cancel_load) {
                 break;
             }
-            if (canLazyLoad(ktypes[i])) {
+            const auto& low_ktype = low_ktypes[i];
+            if (m_preloadParam.tryGet<bool>(low_ktype, false)) {
+                iter->second.loadKDataToBuffer(ktypes[i]);
+            }
+        }
+    }
+
+    // Dispatched before the historical finance is loaded, so that the clients get the hot K-line
+    // data as early as possible; skipped on a cancelled preload (the process exit)
+    if (!m_cancel_load) {
+        _fireLoadEvent(LoadEvent::KDATA_PRELOAD_FINISHED);
+    }
+
+    if (!m_cancel_load && m_hikyuuParam.tryGet<bool>("load_history_finance", true)) {
+        ThreadPool tg;
+        std::shared_lock<std::shared_mutex> lock(*m_stockDict_mutex);
+        for (auto iter = m_stockDict.begin(); iter != m_stockDict.end(); ++iter) {
+            if (m_cancel_load) {
+                break;
+            }
+            tg.submit([stk = iter->second, this]() {
+                HKU_IF_RETURN(m_cancel_load, void());
+                try {
+                    stk.getHistoryFinance();
+                } catch (const std::exception& e) {
+                    HKU_ERROR("Failed load history finance: {}", e.what());
+                } catch (...) {
+                    HKU_ERROR("Failed load history finance with unknown exception!");
+                }
+            });
+        }
+        lock.unlock();
+        tg.join();
+    }
+
+    // The historical finance is ready; the plugin rebuilds the basic snapshot as a whole
+    // accordingly (the ex-rights/ex-dividend data and the finance are collected together). Skipped
+    // on a cancelled preload (the process exit), avoiding a publish that is destroyed immediately
+    if (!m_cancel_load) {
+        _fireLoadEvent(LoadEvent::HISTORY_FINANCE_LOADED);
+    }
+
+    m_data_ready.store(true, std::memory_order_release);
+}
+
+void StockManager::_loadAllKDataParallel(vector<KQuery::KType> ktypes,
+                                         const vector<string>& low_ktypes) {
+    // The progress reporting has moved to the plugin side; loaded/total is no longer counted here
+    auto loaded_codes = tryLoadAllKDataFromColumnFirst(ktypes);
+
+    // Load the K-lines of the other securities (they may use different K-line drivers)
+    this->m_load_tg = std::make_unique<ThreadPool>();
+    for (size_t i = 0, len = ktypes.size(); i < len; i++) {
+        if (m_cancel_load) {
+            break;
+        }
+        if (canLazyLoad(ktypes[i])) {
+            continue;
+        }
+        std::shared_lock<std::shared_mutex> lock(*m_stockDict_mutex);
+        for (auto iter = m_stockDict.begin(); iter != m_stockDict.end(); ++iter) {
+            if (m_cancel_load) {
+                break;
+            }
+            if (loaded_codes.find(iter->first) != loaded_codes.end()) {
                 continue;
             }
-            for (auto iter = m_stockDict.begin(); iter != m_stockDict.end(); ++iter) {
-                if (m_cancel_load) {
-                    break;
-                }
-                const auto& low_ktype = low_ktypes[i];
-                if (m_preloadParam.tryGet<bool>(low_ktype, false)) {
-                    iter->second.loadKDataToBuffer(ktypes[i]);
-                }
-            }
-        }
-
-        if (!m_cancel_load && m_hikyuuParam.tryGet<bool>("load_history_finance", true)) {
-            ThreadPool tg;
-            for (auto iter = m_stockDict.begin(); iter != m_stockDict.end(); ++iter) {
-                if (m_cancel_load) {
-                    break;
-                }
-                tg.submit([stk = iter->second, this]() {
+            if (m_preloadParam.tryGet<bool>(low_ktypes[i], false)) {
+                // ktypes[i] is reused by the inner stock loop within the outer ktype loop; a
+                // std::move here would make the first stock submit an empty moved-from ktypes[i],
+                // and the following stocks would call loadKDataToBuffer("") and all fail (only the
+                // first stock fills the preload buffer). Therefore a copy is used; ktype is a short
+                // string and the cost is negligible.
+                m_load_tg->submit([this, stk = iter->second, ktype = ktypes[i]]() mutable {
                     HKU_IF_RETURN(m_cancel_load, void());
-                    stk.getHistoryFinance();
+                    try {
+                        stk.loadKDataToBuffer(ktype);
+                    } catch (const std::exception& e) {
+                        HKU_ERROR("Failed load kdata to buffer ({}): {}", ktype, e.what());
+                    } catch (...) {
+                        HKU_ERROR("Failed load kdata to buffer ({}) with unknown exception!",
+                                  ktype);
+                    }
                 });
             }
-            tg.join();
         }
-
-        m_data_ready.store(true, std::memory_order_release);
-
-    } else {
-        // 异步并行加载
-        std::thread t = std::thread([this, ktypes, low_ktypes]() {
-            auto loaded_codes = tryLoadAllKDataFromColumnFirst(ktypes);
-
-            // 加载其他证券K线(可能不同不同K线驱动的证券)
-            this->m_load_tg = std::make_unique<ThreadPool>();
-            for (size_t i = 0, len = ktypes.size(); i < len; i++) {
-                if (m_cancel_load) {
-                    break;
-                }
-                if (canLazyLoad(ktypes[i])) {
-                    continue;
-                }
-                std::shared_lock<std::shared_mutex> lock(*m_stockDict_mutex);
-                for (auto iter = m_stockDict.begin(); iter != m_stockDict.end(); ++iter) {
-                    if (m_cancel_load) {
-                        break;
-                    }
-                    if (loaded_codes.find(iter->first) != loaded_codes.end()) {
-                        continue;
-                    }
-                    if (m_preloadParam.tryGet<bool>(low_ktypes[i], false)) {
-                        m_load_tg->submit(
-                          [this, stk = iter->second, ktype = std::move(ktypes[i])]() mutable {
-                              HKU_IF_RETURN(m_cancel_load, void());
-                              stk.loadKDataToBuffer(ktype);
-                          });
-                    }
-                }
-            }
-
-            if (!m_cancel_load && m_hikyuuParam.tryGet<bool>("load_history_finance", true)) {
-                std::shared_lock<std::shared_mutex> lock(*m_stockDict_mutex);
-                for (auto iter = m_stockDict.begin(); iter != m_stockDict.end(); ++iter) {
-                    if (m_cancel_load) {
-                        break;
-                    }
-                    if (loaded_codes.find(iter->first) != loaded_codes.end()) {
-                        continue;
-                    }
-                    m_load_tg->submit([this, stk = iter->second]() {
-                        HKU_IF_RETURN(m_cancel_load, void());
-                        stk.getHistoryFinance();
-                    });
-                }
-            }
-
-            m_load_tg->join();
-            m_load_tg.reset();
-            m_data_ready.store(true, std::memory_order_release);
-        });
-        t.detach();
     }
+
+    // The dispatch must happen after the join, otherwise the buffer may not be filled yet; skipped
+    // on a cancelled preload (the process exit)
+    m_load_tg->join();
+    m_load_tg.reset();
+
+    if (!m_cancel_load) {
+        _fireLoadEvent(LoadEvent::KDATA_PRELOAD_FINISHED);
+    }
+
+    if (!m_cancel_load && m_hikyuuParam.tryGet<bool>("load_history_finance", true)) {
+        m_load_tg = std::make_unique<ThreadPool>();
+        std::shared_lock<std::shared_mutex> lock(*m_stockDict_mutex);
+        for (auto iter = m_stockDict.begin(); iter != m_stockDict.end(); ++iter) {
+            if (m_cancel_load) {
+                break;
+            }
+            if (loaded_codes.find(iter->first) != loaded_codes.end()) {
+                continue;
+            }
+            m_load_tg->submit([this, stk = iter->second]() {
+                HKU_IF_RETURN(m_cancel_load, void());
+                try {
+                    stk.getHistoryFinance();
+                } catch (const std::exception& e) {
+                    HKU_ERROR("Failed load history finance: {}", e.what());
+                } catch (...) {
+                    HKU_ERROR("Failed load history finance with unknown exception!");
+                }
+            });
+        }
+        lock.unlock();
+        m_load_tg->join();
+        m_load_tg.reset();
+    }
+
+    // The historical finance is ready; the plugin rebuilds the basic snapshot as a whole
+    // accordingly (the ex-rights/ex-dividend data and the finance are collected together). Skipped
+    // on a cancelled preload (the process exit), for the same reason as the serial branch
+    if (!m_cancel_load) {
+        _fireLoadEvent(LoadEvent::HISTORY_FINANCE_LOADED);
+    }
+
+    m_data_ready.store(true, std::memory_order_release);
 }
 
 std::unordered_set<string> StockManager::tryLoadAllKDataFromColumnFirst(
   const vector<KQuery::KType>& ktypes) {
     std::unordered_set<string> loaded_codes;
     HKU_IF_RETURN(!m_context.isAll(), loaded_codes);
-    auto driver = DataDriverFactory::getKDataDriverPool(m_kdataDriverParam);
+    auto driver = _getKDataDriverPool();
     HKU_IF_RETURN(!driver || !driver->getPrototype()->isColumnFirst(), loaded_codes);
 
-    // 尝试优先加载 SH000001 K线
+    // Try to load the SH000001 K-lines with priority
     Stock sh000001;
     {
         std::shared_lock<std::shared_mutex> lock(*m_stockDict_mutex);
@@ -372,7 +668,7 @@ std::unordered_set<string> StockManager::tryLoadAllKDataFromColumnFirst(
 
     HKU_IF_RETURN(m_cancel_load, loaded_codes);
 
-    // 主要受带宽限制，无需多线程
+    // It is mainly bandwidth limited, no multi-threading is needed
     for (size_t i = 0, len = ktypes.size(); i < len; i++) {
         if (m_cancel_load) {
             break;
@@ -429,17 +725,36 @@ std::unordered_set<string> StockManager::tryLoadAllKDataFromColumnFirst(
 }
 
 void StockManager::reload() {
+    std::lock_guard<std::mutex> lock(m_init_mutex);
     HKU_IF_RETURN(m_initializing, void());
     m_initializing = true;
+    // Reset the flag even if loadData throws, so reload is not permanently gated out
+    struct Guard {
+        std::atomic_bool& initializing;
+        ~Guard() {
+            initializing = false;
+        }
+    } guard{m_initializing};
 
     HKU_INFO("start reload ...");
     loadData();
-    m_initializing = false;
+
+    // The cached non-preloaded private buffers are frozen copies; drop them so the next query is
+    // rebuilt from the reloaded data
+    clearKDataCache();
 }
 
 void StockManager::reloadWith(const StrategyContext& context) {
+    std::lock_guard<std::mutex> lock(m_init_mutex);
     HKU_IF_RETURN(m_initializing, void());
     m_initializing = true;
+    // Reset the flag even if loadData throws, so reload is not permanently gated out
+    struct Guard {
+        std::atomic_bool& initializing;
+        ~Guard() {
+            initializing = false;
+        }
+    } guard{m_initializing};
 
     if (!context.empty()) {
         m_context = context;
@@ -449,7 +764,8 @@ void StockManager::reloadWith(const StrategyContext& context) {
 
     HKU_INFO("start reload ...");
     loadData();
-    m_initializing = false;
+
+    clearKDataCache();
 }
 
 const string& StockManager::tmpdir() const {
@@ -466,7 +782,7 @@ Stock StockManager::getStock(const string& querystr) const {
     to_upper(query_str);
     size_t pos = query_str.find('.');
     if (pos != string::npos) {
-        // 后缀表示法
+        // The suffix notation
         std::string suffix = query_str.substr(pos + 1);
         std::string prefix = query_str.substr(0, pos);
         query_str = suffix + prefix;
@@ -477,19 +793,22 @@ Stock StockManager::getStock(const string& querystr) const {
 }
 
 StockList StockManager::getStockList(std::function<bool(const Stock&)>&& filter) const {
-    StockList ret;
-    std::shared_lock<std::shared_mutex> lock(*m_stockDict_mutex);
-    ret.reserve(m_stockDict.size());
-    auto iter = m_stockDict.begin();
-    if (filter) {
-        for (; iter != m_stockDict.end(); ++iter) {
-            if (filter(iter->second)) {
-                ret.emplace_back(iter->second);
-            }
+    StockList snapshot;
+    {
+        std::shared_lock<std::shared_mutex> lock(*m_stockDict_mutex);
+        snapshot.reserve(m_stockDict.size());
+        for (auto iter = m_stockDict.begin(); iter != m_stockDict.end(); ++iter) {
+            snapshot.emplace_back(iter->second);
         }
-    } else {
-        for (; iter != m_stockDict.end(); ++iter) {
-            ret.emplace_back(iter->second);
+    }
+    if (!filter) {
+        return snapshot;
+    }
+    StockList ret;
+    ret.reserve(snapshot.size());
+    for (const auto& stock : snapshot) {
+        if (filter(stock)) {
+            ret.emplace_back(stock);
         }
     }
     return ret;
@@ -550,7 +869,14 @@ StringList StockManager::getAllMarket() const {
 }
 
 StringList StockManager::getAllCategory() {
-    return m_blockDriver ? m_blockDriver->getAllCategory() : StringList();
+    StringList result = m_blockDriver ? m_blockDriver->getAllCategory() : StringList();
+    for (const auto& iter : m_innerBlocks) {
+        const auto& category = iter.second.category();
+        if (std::find(result.begin(), result.end(), category) == result.end()) {
+            result.push_back(category);
+        }
+    }
+    return result;
 }
 
 Block StockManager::getBlock(const string& category, const string& name) {
@@ -579,19 +905,19 @@ void StockManager::removeBlock(const string& category, const string& name) {
 
 BlockList StockManager::getBlockList(const string& category) {
     BlockList result;
-    HKU_IF_RETURN(!m_blockDriver, BlockList());
-    result =
-      category.empty() ? m_blockDriver->getBlockList() : m_blockDriver->getBlockList(category);
-    auto iter = m_innerBlocks.begin();
-    if (category.empty()) {
-        for (; iter != m_innerBlocks.end(); ++iter) {
-            result.push_back(iter->second);
-        }
-    } else {
-        for (; iter != m_innerBlocks.end(); ++iter) {
-            if (iter->first == category) {
-                result.push_back(iter->second);
-            }
+    string upper_category;
+    if (!category.empty()) {
+        upper_category = category;
+        to_upper(upper_category);
+    }
+    if (m_blockDriver) {
+        result =
+          category.empty() ? m_blockDriver->getBlockList() : m_blockDriver->getBlockList(category);
+    }
+    for (const auto& iter : m_innerBlocks) {
+        const auto& blk = iter.second;
+        if (upper_category.empty() || blk.category() == upper_category) {
+            result.push_back(blk);
         }
     }
     return result;
@@ -621,6 +947,8 @@ BlockList StockManager::getStockBelongs(const Stock& stk, const string& category
 
 DatetimeList StockManager::getTradingCalendar(const KQuery& query, const string& market) {
     auto marketinfo = getMarketInfo(market);
+    HKU_WARN_IF_RETURN(marketinfo == Null<MarketInfo>(), DatetimeList(), "{}: {}!",
+                       htr("Not found market info"), market);
     return getStock(fmt::format("{}{}", marketinfo.market(), marketinfo.code()))
       .getDatetimeList(query);
 }
@@ -670,31 +998,6 @@ bool StockManager::isTradingHours(const Datetime& d, const string& market) const
     return false;
 }
 
-Stock StockManager::addTempCsvStock(const string& code, const string& day_filename,
-                                    const string& min_filename, price_t tick, price_t tickValue,
-                                    int precision, size_t minTradeNumber, size_t maxTradeNumber) {
-    string new_code(code);
-    to_upper(new_code);
-    Stock result("TMP", new_code, day_filename, STOCKTYPE_TMP, true, Datetime(199901010000),
-                 Null<Datetime>(), tick, tickValue, precision, minTradeNumber, maxTradeNumber);
-
-    Parameter param;
-    param.set<string>("type", "TMPCSV");
-    auto driver_pool = DataDriverFactory::getKDataDriverPool(param);
-    auto driver = driver_pool->getPrototype();
-    KDataTempCsvDriver* p = dynamic_cast<KDataTempCsvDriver*>(driver.get());
-    p->setDayFileName(day_filename);
-    p->setMinFileName(min_filename);
-    result.setKDataDriver(driver_pool);
-    result.loadKDataToBuffer(KQuery::DAY);
-    result.loadKDataToBuffer(KQuery::MIN);
-    return addStock(result) ? result : Null<Stock>();
-}
-
-void StockManager::removeTempCsvStock(const string& code) {
-    removeStock(fmt::format("TMP{}", code));
-}
-
 bool StockManager::addStock(const Stock& stock) {
     string market_code(stock.market_code());
     to_upper(market_code);
@@ -725,15 +1028,23 @@ void StockManager::loadAllStocks() {
         auto all_market = getAllMarket();
         for (auto stkcode : load_stock_code_list) {
             to_upper(stkcode);
-            bool find = false;
+            const string* matched_market = nullptr;
             for (auto& market : all_market) {
-                auto pos = stkcode.find(market);
-                if (pos != string::npos && market.size() <= stkcode.size()) {
-                    string stk_market = stkcode.substr(pos, market.size());
-                    string stk_code = stkcode.substr(market.size(), stkcode.size());
-                    stockInfos.push_back(m_baseInfoDriver->getStockInfo(stk_market, stk_code));
+                if (market.empty() || stkcode.size() <= market.size()) {
+                    continue;
+                }
+                if (stkcode.compare(0, market.size(), market) == 0 &&
+                    (!matched_market || market.size() > matched_market->size())) {
+                    matched_market = &market;
+                }
+            }
+            bool find = false;
+            if (matched_market) {
+                auto info = m_baseInfoDriver->getStockInfo(*matched_market,
+                                                           stkcode.substr(matched_market->size()));
+                if (!info.market.empty() && !info.code.empty()) {
+                    stockInfos.push_back(std::move(info));
                     find = true;
-                    break;
                 }
             }
             HKU_WARN_IF(!find, "Invalid stock code: {}", stkcode);
@@ -750,7 +1061,7 @@ void StockManager::loadAllStocks() {
         }
     }
 
-    auto kdriver = DataDriverFactory::getKDataDriverPool(m_kdataDriverParam);
+    auto kdriver = _getKDataDriverPool();
 
     std::unique_lock<std::shared_mutex> lock(*m_stockDict_mutex);
     for (auto& info : stockInfos) {
@@ -798,7 +1109,7 @@ void StockManager::loadAllStocks() {
                 stock.m_data->m_minTradeNumber = info.minTradeNumber;
                 stock.m_data->m_maxTradeNumber = info.maxTradeNumber;
                 stock.m_data->m_history_finance_ready = false;
-                // 强制释放所有已缓存K线数据
+                // Force releasing all the cached K-line data
                 stock.m_data->m_lastUpdate.clear();
                 for (const auto& ktype : base_ktypes) {
                     stock.releaseKDataBuffer(ktype);
@@ -827,11 +1138,6 @@ void StockManager::loadAllMarketInfos() {
         to_upper(market);
         m_marketInfoDict[market] = marketInfo;
     }
-
-    // add special Market, for temp csv file
-    m_marketInfoDict["TMP"] =
-      MarketInfo("TMP", "Temp Csv file", "temp load from csv file", "000001", Null<Datetime>(),
-                 TimeDelta(0), TimeDelta(0), TimeDelta(0), TimeDelta(0));
 }
 
 void StockManager::loadAllStockTypeInfo() {
@@ -929,6 +1235,15 @@ void StockManager::loadInnerBlocks() {
 
 void StockManager::loadAllStockWeights() {
     HKU_IF_RETURN(!m_hikyuuParam.tryGet<bool>("load_stock_weight", true), void());
+    // The client mode also materializes all the ex-rights/ex-dividend data at the startup according
+    // to the config above: the shared memory snapshot has been mapped at once by the connection
+    // after waitReady (IpcConnector::mapSessionShm) and IpcBaseInfoDriver reads all the
+    // ex-rights/ex-dividend data from the snapshot (when the snapshot does not cover it, the local
+    // driver is read directly, sharing the same data source with the main process); after that
+    // Stock::getWeight hits the local cache directly, satisfying the high frequency reading of the
+    // ex-rights/ex-dividend data; the securities not materialized (the config off, added by
+    // addStock or newly constructed) are still handled by the on-demand lazy loading fallback of
+    // Stock::getWeight.
     HKU_INFO(htr("Loading stock weight..."));
     if (m_context.isAll()) {
         auto all_stkweight_dict = m_baseInfoDriver->getAllStockWeightList();
@@ -938,10 +1253,17 @@ void StockManager::loadAllStockWeights() {
         std::shared_lock<std::shared_mutex> lock1(*m_stockDict_mutex);
         for (auto iter = m_stockDict.begin(); iter != m_stockDict.end(); ++iter) {
             auto weight_iter = all_stkweight_dict.find(iter->first);
-            if (weight_iter != all_stkweight_dict.end()) {
+            {
                 Stock& stock = iter->second;
                 std::unique_lock<std::shared_mutex> lock2(stock.m_data->m_weight_mutex);
-                stock.m_data->m_weightList.swap(weight_iter->second);
+                if (weight_iter != all_stkweight_dict.end()) {
+                    stock.m_data->m_weightList.swap(weight_iter->second);
+                }
+                // It is marked materialized whether the security has the ex-rights/ex-dividend data
+                // or not: not being collected means this security has none (such as most ETFs),
+                // avoiding the client mode getWeight repeatedly triggering an empty lazy loading
+                // query for the securities without the ex-rights/ex-dividend data
+                stock.m_data->m_weight_ready.store(true, std::memory_order_release);
             }
         }
     } else {
@@ -954,7 +1276,38 @@ void StockManager::loadAllStockWeights() {
             {
                 std::unique_lock<std::shared_mutex> lock2(stock.m_data->m_weight_mutex);
                 stock.m_data->m_weightList = std::move(sw_list);
+                stock.m_data->m_weight_ready.store(true, std::memory_order_release);
             }
+        }
+    }
+}
+
+void StockManager::releaseShmServerBaseInfoCache() {
+    // Only the shm server role (and not the client mode) is allowed; the client / ordinary
+    // standalone mode must not release it: the client does not materialize the historical finance
+    // locally, and the ex-rights/ex-dividend materialization at the startup (load_stock_weight)
+    // cannot rely on a shared snapshot in a non-server role, so after a release getWeight would
+    // silently return empty without a lazy loading fallback
+    HKU_IF_RETURN(!isShmServerRole() || isIpcClientMode(), void());
+    HKU_DEBUG(htr("Release stock weight/finance cache after shm base info published"));
+    std::shared_lock<std::shared_mutex> lock1(*m_stockDict_mutex);
+    for (auto iter = m_stockDict.begin(); iter != m_stockDict.end(); ++iter) {
+        Stock& stock = iter->second;
+        {
+            std::unique_lock<std::shared_mutex> lock2(stock.m_data->m_weight_mutex);
+            StockWeightList().swap(stock.m_data->m_weightList);
+            vector<EqualRecoverFactor>().swap(stock.m_data->m_recover_factors);
+            // Set it to false: the next Stock::getWeight re-reads it through the driver lazy
+            // loading (the server role has the lazy loading fallback)
+            stock.m_data->m_weight_ready.store(false, std::memory_order_release);
+            stock.m_data->m_recover_ready.store(false, std::memory_order_release);
+        }
+        {
+            std::unique_lock<std::shared_mutex> lock2(stock.m_data->m_history_finance_mutex);
+            vector<HistoryFinanceInfo>().swap(stock.m_data->m_history_finance);
+            // Set it to false: the next Stock::getHistoryFinance re-reads it through the driver
+            // lazy loading (every mode has the fallback)
+            stock.m_data->m_history_finance_ready = false;
         }
     }
 }
@@ -965,8 +1318,15 @@ void StockManager::loadAllZhBond10() {
 }
 
 void StockManager::loadHistoryFinanceField() {
+    m_field_ix_to_name.clear();
+    m_field_name_to_ix.clear();
     auto fields = m_baseInfoDriver->getHistoryFinanceField();
     for (const auto& field : fields) {
+        if (field.first < 1) {
+            HKU_WARN("Invalid history finance field index (must be >= 1), skipped: {}",
+                     field.first);
+            continue;
+        }
         m_field_ix_to_name[field.first - 1] = field.second;
         m_field_name_to_ix[field.second] = field.first - 1;
     }
@@ -986,9 +1346,12 @@ vector<std::pair<size_t, string>> StockManager::getHistoryFinanceAllFields() con
 
 void StockManager::waitDataReady() const {
     HKU_INFO_IF(!dataReady(), htr("Waiting for preload data loading to complete..."));
-    while (!dataReady()) {
+    while (!dataReady() && !loadFailed()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+    HKU_ERROR_IF(
+      loadFailed(),
+      htr("Stopped waiting for the data: the loading failed, the preload is incomplete!"));
 }
 
 }  // namespace hku

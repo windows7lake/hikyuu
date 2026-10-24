@@ -17,15 +17,13 @@ using namespace hikyuu::flat;
 
 namespace hku {
 
-string SpotAgent::ms_pubUrl{"ipc:///tmp/hikyuu_real.ipc"};  // 数据发送服务地址
+string SpotAgent::ms_pubUrl{"ipc:///tmp/hikyuu_real.ipc"};  // The data sending service address
 const char* SpotAgent::ms_startTag = ":spot:[start spot]";
 const char* SpotAgent::ms_endTag = ":spot:[end spot]";
 const char* SpotAgent::ms_spotTopic = ":spot:";
 const size_t SpotAgent::ms_spotTopicLength = strlen(SpotAgent::ms_spotTopic);
 const size_t SpotAgent::ms_startTagLength = strlen(SpotAgent::ms_startTag);
 const size_t SpotAgent::ms_endTagLength = strlen(SpotAgent::ms_endTag);
-
-Datetime SpotAgent::ms_start_rev_time;
 
 SpotAgent::~SpotAgent() {
     stop();
@@ -71,12 +69,13 @@ void SpotAgent::stop() {
 
 class ProcessTask {
 public:
-    ProcessTask(const std::function<void(const SpotRecord&)>& func, const SpotRecord& spot)
-    : m_func(func), m_spot(spot) {}
+    ProcessTask(const std::function<void(const SpotRecord&)>& func,
+                std::shared_ptr<const SpotRecord> spot)
+    : m_func(func), m_spot(std::move(spot)) {}
 
     void operator()() {
         try {
-            m_func(m_spot);
+            m_func(*m_spot);
         } catch (const std::exception& e) {
             HKU_ERROR(e.what());
         } catch (...) {
@@ -86,17 +85,19 @@ public:
 
 private:
     std::function<void(const SpotRecord&)> m_func;
-    SpotRecord m_spot;
+    std::shared_ptr<const SpotRecord> m_spot;
 };
 
-unique_ptr<SpotRecord> SpotAgent::parseFlatSpot(const hikyuu::flat::Spot* spot) {
-    SpotRecord* result = nullptr;
+std::shared_ptr<const SpotRecord> SpotAgent::parseFlatSpot(const hikyuu::flat::Spot* spot) {
+    std::shared_ptr<SpotRecord> result;
     try {
-        result = new SpotRecord;
-        if (spot->market())
-            result->market = spot->market()->str();
-        if (spot->code())
-            result->code = spot->code()->str();
+        result = std::make_shared<SpotRecord>();
+        if (!spot->market() || !spot->code() || !spot->datetime()) {
+            result.reset();
+            return result;
+        }
+        result->market = spot->market()->str();
+        result->code = spot->code()->str();
         if (spot->name())
             result->name = spot->name()->str();
         result->datetime = Datetime(spot->datetime()->str());
@@ -144,22 +145,26 @@ unique_ptr<SpotRecord> SpotAgent::parseFlatSpot(const hikyuu::flat::Spot* spot) 
         }
 
     } catch (std::exception& e) {
-        result = nullptr;
+        result.reset();
         HKU_ERROR(e.what());
     } catch (...) {
-        result = nullptr;
+        result.reset();
         HKU_ERROR_UNKNOWN;
     }
 
-    return unique_ptr<SpotRecord>(result);
+    return result;
 }
 
-void SpotAgent::parseSpotData(const void* buf, size_t buf_len) {
+void SpotAgent::parseSpotData(const void* buf, size_t buf_len, const Datetime& revTime) {
     // SPEND_TIME(receive_data);
+    // The message is the topic prefix (":spot:") followed by the SpotList flatbuffer;
+    // the verifier must only cover the flatbuffer part, otherwise its upper bound extends
+    // past the end of the allocation (6 bytes over-read on crafted/corrupted messages).
+    HKU_CHECK(buf_len > ms_spotTopicLength, "Invalid data length: {}!", buf_len);
     const uint8_t* spot_list_buf = (const uint8_t*)(buf) + ms_spotTopicLength;
 
-    // 校验数据
-    flatbuffers::Verifier verify(spot_list_buf, buf_len);
+    // Validate the data
+    flatbuffers::Verifier verify(spot_list_buf, buf_len - ms_spotTopicLength);
     HKU_CHECK(VerifySpotListBuffer(verify), "Invalid data!");
 
 #if defined(_MSC_VER)
@@ -167,17 +172,19 @@ void SpotAgent::parseSpotData(const void* buf, size_t buf_len) {
 #pragma warning(disable : 4267)
 #endif
 
-    // 更新K线数据
+    // Update the K-line data
     auto* spot_list = GetSpotList(spot_list_buf);
     auto* spots = spot_list->spot();
+    HKU_DEBUG_IF_RETURN(!spots, void(), "Received SpotList without spot field!");
+
     size_t total = spots->size();
     vector<std::future<void>> tasks;
     for (size_t i = 0; i < total; i++) {
         auto* spot = spots->Get(i);
-        auto spot_record = parseFlatSpot(spot);
-        if (spot_record) {
+        auto record = parseFlatSpot(spot);
+        if (record) {
             for (const auto& process : m_processList) {
-                tasks.emplace_back(m_tg->submit(ProcessTask(process, *spot_record)));
+                tasks.emplace_back(m_tg->submit(ProcessTask(process, record)));
             }
         }
     }
@@ -187,7 +194,13 @@ void SpotAgent::parseSpotData(const void* buf, size_t buf_len) {
     }
     HKU_DEBUG("received count: {}", total);
     for (const auto& postProcess : m_postProcessList) {
-        postProcess(ms_start_rev_time);
+        try {
+            postProcess(revTime);
+        } catch (const std::exception& e) {
+            HKU_ERROR(e.what());
+        } catch (...) {
+            HKU_ERROR_UNKNOWN;
+        }
     }
 
 #if defined(_MSC_VER)
@@ -202,10 +215,18 @@ void SpotAgent::work_thread() {
     HKU_ERROR_IF_RETURN(rv != 0, void(), "Can't open nng sub0! {}", nng_strerror(rv));
 
     rv = nng_socket_set(sock, NNG_OPT_SUB_SUBSCRIBE, ms_spotTopic, ms_spotTopicLength);
-    HKU_ERROR_IF_RETURN(rv != 0, void(), "Failed set nng socket option! {}", nng_strerror(rv));
+    if (rv != 0) {
+        HKU_ERROR("Failed set nng socket option! {}", nng_strerror(rv));
+        nng_close(sock);
+        return;
+    }
 
     rv = nng_socket_set_ms(sock, NNG_OPT_RECVTIMEO, m_revTimeout);
-    HKU_ERROR_IF_RETURN(rv != 0, void(), "Failed set receive timeout option!");
+    if (rv != 0) {
+        HKU_ERROR("Failed set receive timeout option!");
+        nng_close(sock);
+        return;
+    }
 
     rv = -1;
     Datetime pretime = Datetime::now();
@@ -220,7 +241,7 @@ void SpotAgent::work_thread() {
 
     HKU_INFO_IF(!m_stop && m_print, "Ready to receive quotation from {} ...", ms_pubUrl);
 
-    m_connected = true;
+    m_connected = !m_stop;
     while (!m_stop) {
         char* buf = nullptr;
         size_t length = 0;
@@ -232,27 +253,29 @@ void SpotAgent::work_thread() {
             }
             switch (m_status) {
                 case WAITING:
-                    if (memcmp(buf, ms_startTag, ms_startTagLength) == 0) {
-                        ms_start_rev_time = Datetime::now();
+                    if (length >= ms_startTagLength &&
+                        memcmp(buf, ms_startTag, ms_startTagLength) == 0) {
                         m_status = RECEIVING;
                     }
                     break;
                 case RECEIVING:
-                    if (memcmp(buf, ms_endTag, ms_endTagLength) == 0) {
+                    if (length >= ms_endTagLength && memcmp(buf, ms_endTag, ms_endTagLength) == 0) {
                         m_status = WAITING;
-                    } else if (memcmp(buf, ms_startTag, ms_startTagLength) != 0) {
+                    } else if (length >= ms_startTagLength &&
+                               memcmp(buf, ms_startTag, ms_startTagLength) != 0) {
                         std::shared_ptr<char[]> data_buf(new char[length]);
                         memcpy(data_buf.get(), buf, length);
-                        m_receive_data_tg->submit([this, length, new_buf = std::move(data_buf)]() {
+                        m_receive_data_tg->submit([this, length, rev_time = Datetime::now(),
+                                                   new_buf = std::move(data_buf)]() {
                             try {
-                                this->parseSpotData(new_buf.get(), length);
+                                this->parseSpotData(new_buf.get(), length, rev_time);
                             } catch (const std::exception& e) {
                                 HKU_ERROR(e.what());
                             } catch (...) {
                                 HKU_ERROR_UNKNOWN;
                             }
                         });
-                    }  // else {继续等待数据}
+                    }  // else {keep waiting for the data}
                     break;
             }
         } catch (std::exception& e) {

@@ -16,7 +16,8 @@
 namespace hku {
 
 /**
- * 反正弦值
+ * Arcsine value
+ * @note Undefined domain (|X| > 1) returns null
  * @ingroup Indicator
  */
 Indicator HKU_API ASIN();

@@ -1,7 +1,7 @@
 /*
  * test_REF.cpp
  *
- *  Created on: 2015年3月21日
+ *  Created on: 2015-3-21
  *      Author: fasiondog
  */
 
@@ -21,7 +21,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_REF") {
     Indicator result;
 
@@ -56,7 +56,7 @@ TEST_CASE("test_REF") {
     CHECK_EQ(result.discard(), 10);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_REF_dyn") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-30));
@@ -80,7 +80,7 @@ TEST_CASE("test_REF_dyn") {
     for (size_t i = expect.discard(); i < expect.size(); i++) {
         CHECK_EQ(expect[i], doctest::Approx(result[i]));
     }
-    
+
     auto temp = IF(CVAL(1), 9, 10);
     result = REF(CLOSE(), temp + 1);
     result.setContext(kdata);
@@ -100,8 +100,48 @@ TEST_CASE("test_REF_dyn") {
     for (size_t i = expect.discard(); i < expect.size(); i++) {
         CHECK_EQ(expect[i], doctest::Approx(result[i]));
     }
+}
 
+/**
+ * @par Test points
+ * Incremental calculate must match a full calculation, including a first context that was fully
+ * discarded.
+ *
+ * Background: IRef declared incremental support but not min_increment_start(), so the framework
+ * could only raise start_pos with the previous m_discard. When the first context was shorter than
+ * n, that m_discard degraded to its own size and left start_pos < n, making src[i-n] read before
+ * the input and write garbage into the range that must stay NaN.
+ */
+TEST_CASE("test_REF_increment_equivalence") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh600000");
+    KData k_full = stock.getKData(KQuery(0, 30));
+    CHECK_EQ(k_full.size(), 30);
 
+    Indicator expect = REF(CLOSE(), 10);
+    expect.setContext(k_full);
+
+    auto check_with_history = [&](size_t history) {
+        Indicator got = REF(CLOSE(), 10);
+        got.setContext(stock.getKData(KQuery(0, history)));  // cache m_old_context
+        got.setContext(k_full);                              // extended at the tail
+        CHECK_EQ(got.size(), expect.size());
+        CHECK_EQ(got.discard(), expect.discard());
+        for (size_t i = 0; i < expect.size(); ++i) {
+            double a = expect[i];
+            double b = got[i];
+            if (std::isnan(a) && std::isnan(b)) {
+                continue;
+            }
+            CHECK_EQ(b, doctest::Approx(a).epsilon(0.0001));
+        }
+    };
+
+    /** @arg The first context was fully discarded, so start_pos fell below n */
+    check_with_history(5);
+
+    /** @arg The first context already had valid results, the usual incremental path */
+    check_with_history(20);
 }
 
 //-----------------------------------------------------------------------------
@@ -109,7 +149,7 @@ TEST_CASE("test_REF_dyn") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_REF_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

@@ -9,6 +9,13 @@
 #ifndef INDICATORIMP_H_
 #define INDICATORIMP_H_
 
+#include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <type_traits>
+#include <vector>
+
 #include "hikyuu/config.h"
 #include "hikyuu/KData.h"
 #include "hikyuu/utilities/Parameter.h"
@@ -18,6 +25,7 @@
 namespace hku {
 
 #define MAX_RESULT_NUM 6
+#define IND_EQ_THRESHOLD 0.000001  ///< Threshold for judging float equality
 
 class HKU_API Indicator;
 class HKU_API IndParam;
@@ -26,11 +34,36 @@ namespace detail {
 class CompiledFactorPlan;
 }
 
-vector<Indicator> HKU_API combineCalculateIndicators(const vector<Indicator>& indicators,
-                                                     const KData& kdata, bool tovalue);
-
 /**
- * 指标实现类，定义新指标时，应从此类继承
+ * Indicator implementation class; when defining a new indicator, this class should be inherited
+ *
+ * @note Conventions on declaring and producing results:
+ * 1. The invalid prefix of a result is declared by the implementation itself (m_discard /
+ *    setDiscard); it is never derived by scanning the produced values, and the framework does
+ *    not adjust it for the full calculation.
+ * 2. Window based formulas (MA, SUM, STD, VAR, STDEV, HHV, LLV, WMA, SLOPE, CORR ...): a result
+ *    of a window that is not full has no meaning, so declare data.discard() + window - 1.
+ * 3. Recursive formulas (EMA, SMA, DMA, MACD, AMA, KALMAN, Wilder ATR): seeded from the first bar
+ *    by definition, so declare what the seeding rule needs, which is not the window rule.
+ * 4. An indicator whose window is documented as unlimited when its size is 0 (MDD, MRR) computes
+ *    over the available history on purpose, which is not a warm up value to discard.
+ * 5. An undefined financial state yields Null, never 0.0 or infinity: zero divisor (operators div
+ *    and mod), zero variance (BETA, CORR), all-missing window (SAFTYLOSS), zero baseline (the
+ *    cumulative profit curve). 0.0 collides with legitimate zero values, inf poisons every
+ *    downstream window aggregate; Null (NaN) is the no-data marker that propagates on purpose.
+ *    By convention the r2 result of SLOPE over a constant window is 0.0, a perfect fit.
+ * 6. An implementation whose invalid prefix cannot be derived from its formula may declare it by
+ *    scanning its own output once, e.g. the trailing updateDiscard of ALIGN / REPLACE / BARSSINCE
+ *    / BARSLASTS / IC; the framework never derives it on their behalf.
+ * 7. A window formula excludes non-finite entries (NaN / ±Inf) from its aggregates: a value
+ *    enters the sums only when finite and the denominator counts only the valid entries
+ *    (MA, WMA, STDEV, VAR, CORR, COV, HHV, LLV ...); the window keeps emitting once its minimum
+ *    valid count is met (1 for the mean family, 2 for the deviation family), and a fully missing
+ *    window yields Null.
+ * 8. Recursive formulas (EMA, SMA, DMA, MACD, AMA, KALMAN) hold the previous output at a
+ *    non-finite bar with their state frozen; a leading non-finite prefix leaves the state
+ *    unseeded until the first finite observation. Per-bar transforms and pure accumulators
+ *    (ABS, LOG, REF, SUM, the ROC family ...) propagate non-finite values by contract.
  * @ingroup Indicator
  */
 class HKU_API IndicatorImp : public enable_shared_from_this<IndicatorImp> {
@@ -38,29 +71,25 @@ class HKU_API IndicatorImp : public enable_shared_from_this<IndicatorImp> {
     friend HKU_API std::ostream& operator<<(std::ostream& os, const IndicatorImp& imp);
     friend class detail::CompiledFactorPlan;
 
-    typedef vector<Indicator> IndicatorList;
-    friend IndicatorList HKU_API combineCalculateIndicators(const IndicatorList& indicators,
-                                                            const KData& kdata, bool tovalue);
-
 public:
     enum OPType : uint8_t {
-        LEAF,   ///< 叶子节点
+        LEAF,   ///< Leaf node
         OP,     /// OP(OP1,OP2) OP1->calcalue(OP2->calculate(ind))
-        ADD,    ///< 加
-        SUB,    ///< 减
-        MUL,    ///< 乘
-        DIV,    ///< 除
-        MOD,    ///< 取模
-        EQ,     ///< 等于
-        GT,     ///< 大于
-        LT,     ///< 小于
-        NE,     ///< 不等于
-        GE,     ///< 大于等于
-        LE,     ///< 小于等于
-        AND,    ///< 与
-        OR,     ///< 或
-        WEAVE,  ///< 特殊的，需要两个指标作为参数的指标
-        OP_IF,  /// if操作
+        ADD,    ///< Addition
+        SUB,    ///< Subtraction
+        MUL,    ///< Multiplication
+        DIV,    ///< Division
+        MOD,    ///< Modulo
+        EQ,     ///< Equal
+        GT,     ///< Greater than
+        LT,     ///< Less than
+        NE,     ///< Not equal
+        GE,     ///< Greater than or equal
+        LE,     ///< Less than or equal
+        AND,    ///< And
+        OR,     ///< Or
+        WEAVE,  ///< Special, an indicator that requires two indicators as the parameters
+        OP_IF,  /// if operation
         INVALID
     };
 
@@ -68,12 +97,21 @@ public:
     typedef IndicatorImpBuffer buffer_t;
 
 public:
-    /** 默认构造函数   */
+    /** Default constructor   */
     IndicatorImp();
     explicit IndicatorImp(const string& name);
     IndicatorImp(const string& name, size_t result_num);
 
     virtual ~IndicatorImp();
+
+    /** Whether two result values are equal: two NaNs match, infinities match exactly, finite
+     *  values within a relative threshold (absolute below magnitude 1) */
+    static bool equalValue(value_t v1, value_t v2) noexcept;
+
+    // It owns raw result buffers (m_pBuffer), so an implicit copy would be a shallow copy
+    // leading to a double free; copies must go through clone()
+    IndicatorImp(const IndicatorImp&) = delete;
+    IndicatorImp& operator=(const IndicatorImp&) = delete;
 
     typedef shared_ptr<IndicatorImp> IndicatorImpPtr;
     IndicatorImpPtr operator()(const Indicator& ind);
@@ -101,47 +139,54 @@ public:
 
     size_t getPos(Datetime) const;
 
-    /** 以PriceList方式获取指定的输出集 */
+    /** Get the given output set in the form of a PriceList */
     PriceList getResultAsPriceList(size_t result_num);
 
-    /** 以Indicator的方式获取指定的输出集，该方式包含了discard的信息 */
+    /** Get the given output set in the form of an Indicator, it contains the discard information */
     IndicatorImpPtr getResult(size_t result_num);
 
     /**
-     * 使用IndicatorImp(const Indicator&...)构造函数后，计算结果使用该函数,
-     * 未做越界保护
+     * After using the IndicatorImp(const Indicator&...) constructor, this function is used for the
+     * calculation result; no out-of-range protection is done
      */
     void _set(value_t val, size_t pos, size_t num = 0);
 
     /**
-     * 准备内存
-     * @param len 长度，如果长度大于MAX_RESULT_NUM将抛出异常std::invalid_argument
-     * @param result_num 结果集数量
-     * @return true 成功 | false 失败
+     * Prepare the memory
+     * @param len the length; std::invalid_argument is thrown if the length is greater than
+     *            MAX_RESULT_NUM
+     * @param result_num number of the result sets
+     * @return true success | false failure
      */
     void _readyBuffer(size_t len, size_t result_num);
 
-    /** 数据中是否包含 nan 值 */
+    /** Whether the data contains nan values */
     bool existNan(size_t result_idx = 0) const;
 
     const string& name() const noexcept;
     void name(const string& name) noexcept;
 
-    /** 返回形如：Name(param1=val,param2=val,...) */
+    /** It is returned in the form: Name(param1=val,param2=val,...) */
     string long_name() const;
 
     /**
-     * @brief 构造出身标识（进程内唯一，clone/cloneNode 传承，不序列化）
+     * @brief Construction origin identifier (unique within the process, inherited by
+     * clone/cloneNode, not serialized)
      *
-     * 供缓存类设施用作身份（如截面面板缓存）。同一次构造及其克隆链共享同一 id；
-     * 独立构造必然不同 id。不参与 alike()/operator==/formula() 等任何既有判等与展示。
+     * It is used as the identity by the caching facilities (such as the cross-section panel cache).
+     * One construction and its clone chain share the same id; independent constructions necessarily
+     * have different ids. It does not participate in any existing equality judgment or display such
+     * as alike()/operator==/formula().
      *
-     * 注：定义在 IndicatorImp.cpp（非 inline）。dllexport 类的 inline 成员不保证导出，
-     * 是否产生外部符号引用取决于调用方的内联决策，插件 dll 会链接失败。
+     * Note: it is defined in IndicatorImp.cpp (not inline). The inline member of a dllexport class
+     * is not guaranteed to be exported, whether an external symbol reference is generated depends
+     * on the inline decision of the caller, and a plugin dll will fail to link.
      *
-     * 注意（身份语义限制）：origin_id 只标识"出身"，不感知构造后的原地变异
-     * （setParam/setIndParam/add）。凡被缓存设施用作身份的指标对象，构造后必须
-     * 视为不可变；如需不同参数请构造新对象（新对象必持新 id）。
+     * Note (identity semantic limitation): origin_id only identifies the "origin", it is not aware
+     * of the in-place mutation after the construction (setParam/setIndParam/add). Any indicator
+     * object used as an identity by a caching facility must be regarded as immutable after the
+     * construction; construct a new object if different parameters are needed (a new object always
+     * holds a new id).
      */
     uint64_t originId() const noexcept;
 
@@ -166,22 +211,30 @@ public:
 
     bool isPythonObject() const noexcept;
 
+    /** Whether this implementation or any indicator it holds is defined in Python (isPythonObject
+     *  checks only the node itself). ABI note: a new slot here needs the plugins rebuilt */
+    virtual bool hasPythonPart() const noexcept;
+
     /**
-     * 该实现是否可在可复用的批处理执行器上被反复重算。
+     * Whether this implementation can be recalculated repeatedly on a reusable batch executor.
      *
-     * 默认放行（非 Python 实现、且未显式置 `_support_batch_reuse=false` 都视为可复用）。
-     * 参与复用意味着同一节点的计算图会被 `CompiledFactorPlan` 跨股票反复重绑 context
-     * 并重算，因此自定义 C++ 指标必须满足：除 IndicatorImp 自身的 result buffer 与
-     * `m_params/m_ind_params` 外，不持有任何跨股票会残留的成员状态（如缓存统计量、可变
-     * 缓冲、上次输入依赖的中间结果等）。凡是会在 `_calculate`/`_dyn_calculate` 外部保留
-     * 上述状态、或无法通过 `scrubTemplateNode` 重置干净的实现，都应在构造时调用
-     * `supportBatchReuse(false)` 主动退出快速路径，回退到旧行为。
+     * It is allowed by default (a non-Python implementation without an explicit
+     * `_support_batch_reuse=false` is regarded as reusable). Participating in the reuse means that
+     * the calculation graph of the same node is repeatedly rebounded to the context across the
+     * stocks and recalculated by `CompiledFactorPlan`, so a custom C++ indicator must satisfy:
+     * apart from the result buffer of IndicatorImp itself and `m_params/m_ind_params`, it holds no
+     * member state that would remain across the stocks (such as cached statistics, mutable buffers,
+     * intermediate results that depend on the last input, and so on). Any implementation that keeps
+     * the above state outside `_calculate`/`_dyn_calculate`, or cannot be reset cleanly through
+     * `scrubTemplateNode`, should call `supportBatchReuse(false)` at construction to exit the fast
+     * path actively and fall back to the old behavior.
      */
     bool supportBatchReuse() const;
 
     void supportBatchReuse(bool enable);
 
-    /** 仅用于两个结果集数量相同、长度相同的指标交换数据，不交换其他参数。失败抛出异常 */
+    /** Only used to swap the data of two indicators with the same number of result sets and the
+     *  same length, no other parameters are swapped. An exception is thrown on failure */
     void swap(IndicatorImp* other);
     void swap(IndicatorImp* other, size_t other_result_idx, size_t self_result_idx);
 
@@ -195,32 +248,33 @@ public:
     const ind_param_map_t& getIndParams() const;
 
     // ===================
-    //  子类接口
+    //  Subclass interface
     // ===================
     virtual void _calculate(const Indicator&);
 
-    // ====== start 动态参数计算相关接口 ======
+    // ====== start dynamic parameter calculation related interface ======
     /**
-     * 动态参数计算接口
-     * @note 如果只有一个动态参数，且该参数代表计算窗口周期，可以直接重载_dyn_run_one_step
-     * 配合isSerial
+     * Dynamic parameter calculation interface
+     * @note If there is only one dynamic parameter and it represents the calculation window period,
+     *       _dyn_run_one_step can be overloaded directly together with isSerial
      */
     virtual void _dyn_calculate(const Indicator&);
 
     /**
-     * 如果只有一个动态参数，且该参数代表计算窗口周期，则可使用该宏定义动态周期计算接口，否则需要自己重载
-     * _dyn_calculate 函数实现动态参数计算
+     * If there is only one dynamic parameter and it represents the calculation window period, this
+     * macro can be used to define the dynamic cycle calculation interface; otherwise you need to
+     * overload the _dyn_calculate function yourself to implement the dynamic parameter calculation
      */
     virtual void _dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step) {}
 
-    /** 是否必须串行计算 */
+    /** Whether the calculation must be serial */
     bool isSerial() const noexcept {
         return m_is_serial;
     }
-    // ====== end 动态参数计算相关接口 ======
+    // ====== end dynamic parameter calculation related interface ======
 
-    // ====== start 增量计算相关接口 =======
-    /** 是否支持增量计算 */
+    // ====== start incremental calculation related interface =======
+    /** Whether the incremental calculation is supported */
     virtual bool supportIncrementCalculate() const;
 
     virtual size_t min_increment_start() const {
@@ -228,7 +282,7 @@ public:
     }
 
     virtual void _increment_calculate(const Indicator& ind, size_t start_pos) {}
-    // ====== end 增量计算相关接口 =======
+    // ====== end incremental calculation related interface ======
 
     virtual IndicatorImpPtr _clone() {
         return make_shared<IndicatorImp>();
@@ -249,17 +303,19 @@ public:
 
 public:
     // ===================
-    //  内部特殊用途公共接口
+    //  Internal public interface for special purposes
     // ===================
 
     void onlySetContext(const KData&);
 
     void setCalculateFlag(bool flag) noexcept;
 
-    /** 判断是否和另一个指标等效，即计算效果相同 */
+    /** Judge whether it is equivalent to another indicator, i.e. the calculation effect is the
+     *  same */
     bool alike(const IndicatorImp& other) const;
 
-    /** 判断指标公式中是否包含指定名称的指标（特殊用途） */
+    /** Judge whether the indicator formula contains the indicator with the given name (for special
+     *  use) */
     bool contains(const string& name) const;
 
     value_t* data(size_t result_idx = 0) noexcept;
@@ -274,26 +330,56 @@ public:
     void printAllSubTrees(bool show_long_name = false) const;
     void printLeaves(bool show_long_name = false) const;
 
-    /* 特殊指标需自己实现 selfAlike 函数的, needSelfAlikeCompare 应返回 true */
+    /* For a special indicator that needs to implement the selfAlike function itself,
+     *  needSelfAlikeCompare should return true */
     bool needSelfAlikeCompare() const noexcept {
         return m_need_self_alike_compare;
     }
 
-    // 特殊指标需自己实现 selfAlike 函数，返回true表示两个指标等效
+    // A special indicator needs to implement the selfAlike function itself; returning true means
+    // the two indicators are equivalent
     virtual bool selfAlike(const IndicatorImp& other) const noexcept {
         return false;
     }
 
-    // 使用输入上下文的特殊指标获取内部节点，以便合入指标树优化
+    // Get the inner nodes of the special indicator that uses the input context, so that it can be
+    // merged into the indicator tree optimization
     virtual void getSelfInnerNodesWithInputConext(vector<IndicatorImpPtr>& nodes) const {}
 
-    // 指定独立 ktype 的叶子节点重载获取内部子节点
+    // Overload of a leaf node with a separate ktype to get its inner child nodes
     virtual void getSeparateKTypeLeafSubNodes(vector<IndicatorImpPtr>& nodes) const {}
 
 private:
+    // The layout of a node that merges two operands: the result length, the invalid leading count,
+    // the first position to (re)calculate, the result set count, and the index offset of each
+    // operand, i.e. the value of node index i is kept at operand index i - offset
+    struct BinaryLayout {
+        size_t total = 0;
+        size_t discard = 0;
+        size_t start_pos = 0;
+        size_t result_num = 1;
+        int64_t left_offset = 0;
+        int64_t right_offset = 0;
+    };
+
     bool needCalculate();
     bool can_inner_calculate();
     bool can_increment_calculate();
+
+    // Precondition of shifting the old results in place: every result buffer must be laid out
+    // exactly as the old context, i.e. buffer index i holds the value of m_old_context[i], and
+    // every operand must be long enough to keep that layout bar aligned (operand_total is the
+    // context length the operands are currently bound to). Nodes mixing inputs of another length
+    // do not satisfy it and must fall back to a full recalculation, otherwise the shift reads or
+    // writes out of the buffer.
+    bool can_shift_old_results(size_t operand_total) const noexcept;
+
+    // Prepare a two-operand node: bind the context to the operands, calculate them when the
+    // incremental path was refused, align the operands onto the context length and prepare the
+    // result buffer. When weave is true, the result sets of both operands are kept instead of the
+    // common ones
+    BinaryLayout prepareBinaryOp(bool weave = false);
+
     bool increment_execute_leaf_or_op(const Indicator& ind);
     size_t increment_execute();
     void execute_add();
@@ -323,10 +409,10 @@ private:
 
     void _printTree(int depth = 0, bool isLast = true, bool show_long_name = false) const;
 
-    // 获取所有子树
+    // Get all the subtrees
     vector<IndicatorImp*> getAllSubTrees() const;
 
-    // 获取子树中节点的数量
+    // Get the number of the nodes in the subtree
     static size_t treeSize(IndicatorImp* tree);
 
     static bool nodeInTree(IndicatorImp* node, IndicatorImp* tree);
@@ -357,10 +443,12 @@ protected:
 
     IndicatorImp* m_parent{nullptr};  // can't use shared_from_this in python, so not weak_ptr
 
-    /** 构造发号器：唯一定义在 IndicatorImp.cpp，保证跨 DLL 只有一份计数器 */
+    /** Construction id issuer: defined only in IndicatorImp.cpp, guaranteeing that there is only
+     *  one counter across the DLLs */
     static uint64_t nextOriginId() noexcept;
 
-    /** 构造出身标识：构造发放，clone/cloneNode 传承，不进序列化 NVP 列表 */
+    /** Construction origin identifier: issued at construction and inherited by clone/cloneNode,
+     *  it does not enter the serialization NVP list */
     uint64_t m_origin_id{nextOriginId()};
 
 public:
@@ -368,11 +456,27 @@ public:
     static void releaseEngine();
 
 protected:
+    // Process-global switch; set once at startup (not at runtime). Non-atomic for cheap reads.
     static bool ms_enable_increment_calculate;
 
 #if HKU_SUPPORT_SERIALIZATION
 private:
     friend class boost::serialization::access;
+
+    /** Serialization view of value_t: the IEEE bit pattern archived as an unsigned integer of the
+     *  same width, so that every archive type round trips NaN / Inf / the sign of zero losslessly
+     *  (a text archive cannot parse "nan" or "inf" back) */
+    using bit_t = std::conditional_t<sizeof(value_t) == sizeof(uint64_t), uint64_t, uint32_t>;
+    static_assert(sizeof(bit_t) == sizeof(value_t), "bit_t must have the width of value_t");
+
+    /** Marks the result buffers as bit pattern blocks instead of the legacy per value strings.
+     *  It is written into the first count field of the values section: a text or xml archive
+     *  matches element names on load, so that field has to keep the name it has in the legacy
+     *  layout, and the tag is told apart from a real count by its value (no buffer ever holds
+     *  that many values). This keeps the format recognizable without relying on the archive class
+     *  version, which a load does not see reliably across DLL boundaries */
+    static constexpr uint64_t BIT_PATTERN_TAG = 0x494E505F42495453ULL;  // "INP_BITS"
+
     template <class Archive>
     void save(Archive& ar, const unsigned int version) const {
         namespace bs = boost::serialization;
@@ -401,23 +505,18 @@ private:
             }
         }
         ar& BOOST_SERIALIZATION_NVP(act_result_num);
-        string nan("nan");
-        string inf;
-        string value;
-        for (size_t i = 0; i < act_result_num; ++i) {
-            size_t count = size();
-            ar& BOOST_SERIALIZATION_NVP(count);
-            const buffer_t& values = *m_pBuffer[i];
-            for (size_t j = 0; j < count; j++) {
-                if (std::isnan(values[j])) {
-                    ar& boost::serialization::make_nvp<string>("item", nan);
-                } else if (std::isinf(values[j])) {
-                    inf = values[j] > 0 ? "+inf" : "-inf";
-                    ar& boost::serialization::make_nvp<string>("item", inf);
-                } else {
-                    value = std::to_string(values[j]);
-                    ar& boost::serialization::make_nvp<string>("item", value);
-                }
+        if (act_result_num > 0) {
+            ar& boost::serialization::make_nvp("count", BIT_PATTERN_TAG);
+            // One raw bit pattern block per result: compact in a binary archive and lossless in
+            // every archive type
+            for (size_t i = 0; i < act_result_num; ++i) {
+                const buffer_t& values = *m_pBuffer[i];
+                size_t count = values.size();
+                ar& BOOST_SERIALIZATION_NVP(count);
+                std::vector<bit_t> bits(count);
+                std::memcpy(bits.data(), values.data(), count * sizeof(value_t));
+                ar& boost::serialization::make_nvp(
+                  "values", boost::serialization::make_array(bits.data(), count));
             }
         }
     }
@@ -446,23 +545,53 @@ private:
         size_t act_result_num = 0;
         ar& BOOST_SERIALIZATION_NVP(act_result_num);
         _readyBuffer(0, act_result_num);
+        if (act_result_num == 0) {
+            return;
+        }
+
+        uint64_t tag = 0;
+        ar& boost::serialization::make_nvp("count", tag);
+        if (tag != BIT_PATTERN_TAG) {
+            // The legacy format stored every value as a string of 6 decimal places, reading it
+            // back loses precision; kept only to open old archives. Its first field is the value
+            // count of the first result, which the read above already consumed
+            _loadLegacyValues(ar, 0, static_cast<size_t>(tag));
+            for (size_t i = 1; i < act_result_num; ++i) {
+                size_t count = 0;
+                ar& BOOST_SERIALIZATION_NVP(count);
+                _loadLegacyValues(ar, i, count);
+            }
+            return;
+        }
+
         for (size_t i = 0; i < act_result_num; ++i) {
             size_t count = 0;
             ar& BOOST_SERIALIZATION_NVP(count);
             buffer_t& values = *m_pBuffer[i];
             values.resize(count);
-            for (size_t j = 0; j < count; j++) {
-                std::string vstr;
-                ar >> boost::serialization::make_nvp<string>("item", vstr);
-                if (vstr == "nan") {
-                    values[j] = std::numeric_limits<double>::quiet_NaN();
-                } else if (vstr == "+inf") {
-                    values[j] = std::numeric_limits<double>::infinity();
-                } else if (vstr == "-inf") {
-                    values[j] = 0.0 - std::numeric_limits<double>::infinity();
-                } else {
-                    values[j] = std::stod(vstr);
-                }
+            std::vector<bit_t> bits(count);
+            ar& boost::serialization::make_nvp(
+              "values", boost::serialization::make_array(bits.data(), count));
+            std::memcpy(values.data(), bits.data(), count * sizeof(value_t));
+        }
+    }
+
+    /** Reads one legacy result block of count values written as strings into buffer result_idx */
+    template <class Archive>
+    void _loadLegacyValues(Archive& ar, size_t result_idx, size_t count) {
+        buffer_t& values = *m_pBuffer[result_idx];
+        values.resize(count);
+        for (size_t j = 0; j < count; j++) {
+            std::string vstr;
+            ar >> boost::serialization::make_nvp<string>("item", vstr);
+            if (vstr == "nan") {
+                values[j] = Null<value_t>();
+            } else if (vstr == "+inf") {
+                values[j] = std::numeric_limits<value_t>::infinity();
+            } else if (vstr == "-inf") {
+                values[j] = 0.0 - std::numeric_limits<value_t>::infinity();
+            } else {
+                values[j] = boost::lexical_cast<value_t>(vstr);
             }
         }
     }
@@ -490,8 +619,9 @@ public:                                                      \
         return make_shared<classname>();                     \
     }
 
-// 如果只有一个动态参数，且该参数代表计算窗口周期，则可使用该宏定义动态周期计算接口，否则需要自己重载
-// _dyn_calculate 函数实现动态参数计算
+// If there is only one dynamic parameter and it represents the calculation window period, this
+// macro can be used to define the dynamic cycle calculation interface; otherwise you need to
+// overload the _dyn_calculate function yourself to implement the dynamic parameter calculation
 #define INDICATOR_IMP_SUPPORT_DYNAMIC_CYCLE \
 public:                                     \
     virtual void _dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step) override;
@@ -503,7 +633,7 @@ public:                                                                         
         return true;                                                                    \
     }
 
-/** 获取 OPType 名称字符串 */
+/** Get the name string of OPType */
 string HKU_API getOPTypeName(IndicatorImp::OPType);
 
 typedef shared_ptr<IndicatorImp> IndicatorImpPtr;
@@ -567,15 +697,31 @@ inline bool IndicatorImp::haveIndParam(const string& name) const {
 }
 
 inline IndicatorImp::value_t* IndicatorImp::data(size_t result_idx) noexcept {
-    return m_pBuffer[result_idx] ? m_pBuffer[result_idx]->data() : nullptr;
+    return (result_idx < MAX_RESULT_NUM && m_pBuffer[result_idx]) ? m_pBuffer[result_idx]->data()
+                                                                  : nullptr;
 }
 
 inline IndicatorImp::value_t const* IndicatorImp::data(size_t result_idx) const noexcept {
-    return m_pBuffer[result_idx] ? m_pBuffer[result_idx]->data() : nullptr;
+    return (result_idx < MAX_RESULT_NUM && m_pBuffer[result_idx]) ? m_pBuffer[result_idx]->data()
+                                                                  : nullptr;
 }
 
 inline size_t IndicatorImp::_get_step_start(size_t pos, size_t step, size_t discard) {
-    return step == 0 || pos < discard + step ? discard : pos + 1 - step;
+    return pos < discard + step ? discard : pos + 1 - step;
+}
+
+inline bool IndicatorImp::equalValue(value_t v1, value_t v2) noexcept {
+    if (v1 == v2)
+        return true;
+    bool nan1 = std::isnan(v1);
+    if (nan1 || std::isnan(v2))
+        return nan1 == std::isnan(v2);
+    if (std::isinf(v1) || std::isinf(v2))
+        return false;
+    double a1 = std::abs(v1);
+    double a2 = std::abs(v2);
+    double scale = a1 > a2 ? a1 : a2;
+    return std::abs(v1 - v2) <= IND_EQ_THRESHOLD * (scale > 1.0 ? scale : 1.0);
 }
 
 inline bool IndicatorImp::isPythonObject() const noexcept {

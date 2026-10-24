@@ -7,6 +7,7 @@
  *      Author: fasiondog
  */
 
+#include <atomic>
 #include <memory>
 #include <boost/mysql.hpp>
 #include <boost/asio.hpp>
@@ -16,10 +17,11 @@
 #include "hikyuu/utilities/Parameter.h"
 #include "hikyuu/utilities/Log.h"
 #include "AsyncMySQLConnect.h"
+#include "MySQLConnect.h"
 
 namespace hku {
 
-// 辅助函数：打印 diagnostics 诊断信息（内部使用，不对外暴露）
+// Helper function: print the diagnostics information (internal use, not exposed)
 static void printAsyncMySQLDiag(const boost::mysql::error_code& ec,
                                 const boost::mysql::diagnostics& diag, const std::string& context) {
     if (!diag.server_message().empty()) {
@@ -31,24 +33,37 @@ static void printAsyncMySQLDiag(const boost::mysql::error_code& ec,
     }
 }
 
-// Pimpl 实现结构体
+// The Pimpl implementation struct
 struct AsyncMySQLConnect::Impl {
-    boost::asio::io_context* io_context_ptr = nullptr;  // 指向外部 io_context，不拥有
+    // Per-connection-generation state shared with the statement deleters, so a statement is not
+    // closed on a connection that has been destroyed by a reconnect
+    struct StatementCloseState {
+        boost::mysql::tcp_connection* conn{nullptr};
+        std::atomic_bool alive{true};
+    };
+
+    boost::asio::io_context* io_context_ptr =
+      nullptr;  // Points to the external io_context, not owned
     std::unique_ptr<boost::mysql::tcp_connection> conn;
     std::unique_ptr<LruCache<std::string, std::shared_ptr<boost::mysql::statement>>>
       statement_cache;
+    // Recreated for every new connection; the deleters hold the state of their own generation
+    std::shared_ptr<StatementCloseState> close_state;
     bool initialized = false;
 
     Impl() {}
 
     ~Impl() {
         statement_cache.reset();
+        if (close_state) {
+            close_state->alive.store(false, std::memory_order_release);
+        }
         if (conn) {
             conn->close();
         }
     }
 
-    // 从当前协程环境获取 io_context（只在首次调用时执行）
+    // Get the io_context from the current coroutine environment (at the first call only)
     net::awaitable<void> ensure_initialized() {
         if (!initialized) {
             auto executor = co_await net::this_coro::executor;
@@ -65,16 +80,19 @@ struct AsyncMySQLConnect::Impl {
             co_return ret;
         }
 
-        // 创建 statement 并准备关闭的 lambda
-        auto* connection_ptr = conn.get();
-        auto deleter = [connection_ptr](boost::mysql::statement* stmt) {
-            if (stmt && connection_ptr) {
-                connection_ptr->close_statement(*stmt);
+        // The deleter closes the statement only while its connection generation is alive
+        auto state = close_state;
+        auto deleter = [state](boost::mysql::statement* stmt) {
+            if (stmt && state->alive.load(std::memory_order_acquire)) {
+                boost::mysql::error_code close_ec;
+                boost::mysql::diagnostics close_diag;
+                state->conn->close_statement(*stmt, close_ec, close_diag);
+                // Ignore the closing error, as the connection may already have been lost
             }
             delete stmt;
         };
 
-        // 使用 async_prepare_statement
+        // Use async_prepare_statement
         boost::mysql::diagnostics prep_diag;
         try {
             boost::mysql::statement stmt =
@@ -97,7 +115,7 @@ struct AsyncMySQLConnect::Impl {
 
 AsyncMySQLConnect::AsyncMySQLConnect(const Parameter& param)
 : AsyncDBConnectBase(param), m_impl(std::make_unique<Impl>()) {
-    // 获取预处理语句缓存大小，并创建缓存
+    // Get the prepared statement cache size and create the cache
     int64_t cache_size = tryGetParam<int64_t>("statement_cache_size", 3);
     m_params.set("statement_cache_size", cache_size);
     m_impl->statement_cache =
@@ -125,7 +143,7 @@ net::awaitable<bool> AsyncMySQLConnect::tryConnect() {
 }
 
 net::awaitable<void> AsyncMySQLConnect::connect() {
-    // 确保已初始化（从协程环境获取 io_context）
+    // Make sure it is initialized (get the io_context from the coroutine environment)
     co_await m_impl->ensure_initialized();
 
     std::string host = tryGetParam<std::string>("host", "127.0.0.1");
@@ -135,6 +153,11 @@ net::awaitable<void> AsyncMySQLConnect::connect() {
     unsigned short port = static_cast<unsigned short>(tryGetParam<int>("port", 3306));
 
     m_impl->conn = std::make_unique<boost::mysql::tcp_connection>(*m_impl->io_context_ptr);
+
+    // A new connection generation starts
+    m_impl->close_state = std::make_shared<Impl::StatementCloseState>();
+    m_impl->close_state->conn = m_impl->conn.get();
+
     boost::mysql::handshake_params params(usr, pwd, database);
 
     boost::mysql::diagnostics diag;
@@ -158,9 +181,13 @@ net::awaitable<void> AsyncMySQLConnect::connect() {
 
 void AsyncMySQLConnect::close() {
     if (m_impl && m_impl->conn) {
+        // Close the cached statements while the connection is still alive, then mark this
+        // generation dead before destroying the connection
         if (m_impl->statement_cache) {
             m_impl->statement_cache->clear();
         }
+        m_impl->close_state->alive.store(false, std::memory_order_release);
+
         m_impl->conn->close();
         m_impl->conn.reset();
         m_impl->io_context_ptr = nullptr;
@@ -190,13 +217,13 @@ net::awaitable<bool> AsyncMySQLConnect::ping() {
         need_reconnect = true;
     }
 
-    // 在 try-catch 外部处理重连
+    // Handle the reconnection outside the try-catch
     if (need_reconnect) {
         bool reconnected = false;
         try {
             reconnected = co_await tryConnect();
         } catch (...) {
-            // 忽略重连异常
+            // Ignore the reconnection exception
         }
 
         if (!reconnected) {
@@ -236,13 +263,16 @@ net::awaitable<int64_t> AsyncMySQLConnect::exec(const std::string& sql_string) {
         SQL_THROW(ec.value(), "SQL error: {}! error msg: {}", sql_string, ec.message());
     }
 
-    // 如果需要重试，在 try-catch 外部执行
-    if (need_retry) {
+    // When a retry is needed, do it outside the try-catch. Only read-only statements are
+    // replayed after a lost connection: a failed write may already have been committed
+    // server-side and replaying it would apply it twice
+    if (need_retry && detail::isConnectionLostError(ec.value()) &&
+        detail::isReadOnlySql(sql_string)) {
         bool reconnected = false;
         try {
             reconnected = co_await ping();
         } catch (...) {
-            // 忽略 ping 异常
+            // Ignore the ping exception
         }
 
         if (reconnected) {
@@ -274,7 +304,8 @@ net::awaitable<AsyncSQLStatementPtr> AsyncMySQLConnect::getStatement(
 net::awaitable<bool> AsyncMySQLConnect::tableExist(const std::string& tablename) {
     bool result = false;
     try {
-        auto st = co_await getStatement(fmt::format("SELECT 1 FROM {} LIMIT 1;", tablename));
+        auto st =
+          co_await getStatement(fmt::format("SELECT 1 FROM {} LIMIT 1;", sqlIdentifier(tablename)));
         co_await st->exec();
         result = true;
     } catch (...) {
@@ -284,11 +315,11 @@ net::awaitable<bool> AsyncMySQLConnect::tableExist(const std::string& tablename)
 }
 
 net::awaitable<void> AsyncMySQLConnect::resetAutoIncrement(const std::string& tablename) {
-    int64_t count =
-      co_await queryNumber<int64_t>(fmt::format("select count(1) from {}", tablename));
+    int64_t count = co_await queryNumber<int64_t>(
+      fmt::format("select count(1) from {}", sqlIdentifier(tablename)));
     SQL_CHECK(count == 0, -1, "The ID cannot be reset when data is present in table({})",
               tablename);
-    co_await exec(fmt::format("alter {} auto_increment=1", tablename));
+    co_await exec(fmt::format("ALTER TABLE {} AUTO_INCREMENT = 1", sqlIdentifier(tablename)));
 }
 
 net::awaitable<void> AsyncMySQLConnect::transaction() {

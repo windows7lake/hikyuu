@@ -7,14 +7,20 @@
 
 #pragma once
 
+#include <atomic>
 #include <future>
 #include <forward_list>
+#include <set>
+#include <memory>
 #include "hikyuu/DataType.h"
 #include "hikyuu/StrategyContext.h"
 #include "hikyuu/global/SpotRecord.h"
 #include "hikyuu/utilities/thread/FuncWrapper.h"
 #include "hikyuu/utilities/thread/ThreadSafeQueue.h"
-#include "hikyuu/trade_sys/portfolio/Portfolio.h"
+
+#include "hikyuu/trade_sys/system/System.h"
+#include "hikyuu/trade_sys/slippage/SlippageBase.h"
+
 #include "BrokerTradeManager.h"
 
 namespace hku {
@@ -25,7 +31,15 @@ namespace hku {
  */
 
 /**
- * @brief 策略运行时
+ * @brief Strategy runtime
+ *
+ * Design notes / limitations:
+ * - One process shares a single global context: when StockManager is already initialized,
+ *   _init() adopts the process-wide context, so a context passed to the constructor is
+ *   intentionally overridden (by design, not a bug).
+ * - _init() calls stopSpotAgent() before handlers are (re)registered, so a second live
+ *   strategy cannot register on an already-running agent without restarting it. Running
+ *   multiple strategies in one process is best-effort only; prefer one strategy per process.
  */
 class HKU_API Strategy {
     CLASS_LOGGER_IMP(Strategy)
@@ -60,47 +74,67 @@ public:
     bool running() const;
 
     /**
-     * 每日开盘时间内，以 delta 为周期循环定时执行指定任务
-     * @param func 待执行的任务
-     * @param delta 间隔时间
-     * @param market 指定的市场, 用于获取开/收盘时间
-     * @param ignoreMarket 是否忽略市场时间限制，如为 true，则为定时循环不受开闭市时间限制
+     * Within the daily trading hours, execute the given task periodically with delta as the cycle
+     * @param func the task to be executed
+     * @param delta the interval time
+     * @param market the given market, used to get the opening / closing time
+     * @param ignoreMarket whether to ignore the market time limit; if it is true, the periodic
+     *                     execution is not limited by the opening and closing time
      */
     void runDaily(const std::function<void(Strategy*)>& func, const TimeDelta& delta,
                   const std::string& market = "SH", bool ignoreMarket = false);
 
     /**
-     * 每日在指定时刻执行任务
-     * @param func 待执行的任务
-     * @param delta 指定时刻
-     * @param ignoreHoliday 忽略节假日，即节假日不执行
+     * Execute the task at the given time every day
+     * @param func the task to be executed
+     * @param delta the given time
+     * @param ignoreHoliday ignore the holidays, i.e. it is not executed on holidays
      */
     void runDailyAt(const std::function<void(Strategy*)>& func, const TimeDelta& delta,
                     bool ignoreHoliday = true);
 
     /**
-     * 正确数据发生变化调用，即接收到相应行情数据变更
-     * @note 通常用于调试。且只要收到行情采集消息就会触发，不受开、闭市时间限制
-     * @param changeFunc 回调函数
+     * It is called when the correct data changes, i.e. the change of the corresponding market data
+     * is received
+     * @note It is usually used for debugging. It is triggered as long as a market data collecting
+     *       message is received, without being limited by the opening and closing time
+     * @param changeFunc the callback function
      */
     void onChange(
       const std::function<void(Strategy*, const Stock&, const SpotRecord& spot)>& changeFunc);
 
     /**
-     * 一批行情数据接受完毕后通知
-     * @note 通常仅用于调试打印，该批行情数据中不一定含有上下文中包含的 stock
-     *       且只要收到行情采集消息就会触发，不受开、闭市时间限制。
-     * @param recievedFucn 回调函数
+     * Notify after a batch of market data has been received
+     * @note It is usually used for the debugging printing only; the batch of market data does not
+     *       necessarily contain the stock contained in the context, and it is triggered as long as
+     * a market data collecting message is received, without being limited by the opening and
+     *       closing time.
+     * @param recievedFucn the callback function
      */
     void onReceivedSpot(const std::function<void(Strategy*, const Datetime&)>& recievedFucn);
 
     /**
-     * 启动策略执行，必须在已注册相关处理函数后执行
+     * Start the strategy execution; it must be executed after the related handlers have been
+     * registered
      */
     void start(bool autoRecieveSpot = true);
 
+    /** Stop the event loop and invalidate callbacks; safe to call when not started */
+    void stop();
+
+    /**
+     * Install hooks around the event-loop blocking wait; used by the Python binding to release
+     * the GIL while waiting (no-op when unset). pre_wait drops the GIL, post_wait restores it.
+     */
+    void setEventWaitHooks(std::function<void()> pre_wait, std::function<void()> post_wait) {
+        m_pre_wait_hook = std::move(pre_wait);
+        m_post_wait_hook = std::move(post_wait);
+    }
+
     //==========================================================================
-    // 以下为策略运行时对外接口，建议使用这些接口代替同名其他功能函数，已保证回测和实盘一致
+    // The following is the external interface of the strategy runtime; it is recommended to use
+    // these interfaces instead of the other functions with the same names, so that the backtest and
+    // the live trading stay consistent
     //==========================================================================
 
     TradeManagerPtr getTM() const noexcept {
@@ -111,7 +145,7 @@ public:
         m_tm = tm;
     }
 
-    /** 仅在回测状态下使用 */
+    /** Used in the backtest state only */
     SlippagePtr getSP() const noexcept {
         return m_sp;
     }
@@ -120,15 +154,15 @@ public:
         m_sp = slippage;
     }
 
-    // 获取当前价格，无效返回 Null<price_t>()
+    // Get the current price; Null<price_t>() is returned when it is invalid
     price_t getCurrentPrice(const Stock& stk, const KQuery::KType& ktype) const;
 
     /**
-     * @brief 获取当日指定时间点的价格
-     * @param stk 股票对象
-     * @param time 指定时间
-     * @param ktype K线类型，默认为分钟线
-     * @return 价格，无效时返回 Null<price_t>()
+     * @brief Get the price at the given time point of the day
+     * @param stk the stock object
+     * @param time the given time
+     * @param ktype K-line type, the minute line by default
+     * @return the price; Null<price_t>() is returned when it is invalid
      */
     price_t getPriceByTime(const Stock& stk, const TimeDelta& time,
                            const KQuery::KType& ktype = KQuery::MIN) const;
@@ -142,19 +176,19 @@ public:
                        KQuery::RecoverType recover_type = KQuery::NO_RECOVER) const;
 
     /**
-     * @brief 按股下单，+正数买入，-负数卖出
-     * @param stk 交易标的
-     * @param num 交易数量
-     * @param remark 交易备注
+     * @brief Place an order by the share number, a positive number buys and a negative number sells
+     * @param stk the trading target
+     * @param num trade quantity
+     * @param remark trade remark
      * @return TradeRecord
      */
     virtual TradeRecord order(const Stock& stk, double num, const string& remark = "");
 
     /**
-     * @brief 按价值下单，即买入指定资金数量的股票
-     * @param stk 交易标的
-     * @param value 价值
-     * @param remark 交易备注
+     * @brief Place an order by the value, i.e. buy the stocks of the given amount of funds
+     * @param stk the trading target
+     * @param value the value
+     * @param remark trade remark
      * @return TradeRecord
      */
     virtual TradeRecord orderValue(const Stock& stk, price_t value, const string& remark = "");
@@ -183,6 +217,18 @@ public:
                              SystemPart part_from = SystemPart::PART_SIGNAL,
                              const string& remark = "");
 
+    /** Open a short position (borrow + sell); used when support_short is on */
+    virtual TradeRecord sellShort(const Stock& stk, price_t price, double num,
+                                  price_t stoploss = 0.0, price_t goal_price = 0.0,
+                                  SystemPart part_from = SystemPart::PART_SIGNAL,
+                                  const string& remark = "");
+
+    /** Close a short position (buy back + return); used when support_short is on */
+    virtual TradeRecord buyShort(const Stock& stk, price_t price, double num,
+                                 price_t stoploss = 0.0, price_t goal_price = 0.0,
+                                 SystemPart part_from = SystemPart::PART_SIGNAL,
+                                 const string& remark = "");
+
     virtual bool isBacktesting() const {
         return false;
     }
@@ -194,6 +240,15 @@ protected:
     TradeManagerPtr m_tm;
     SlippagePtr m_sp;
 
+    // Cross-thread callbacks (spot agent / scheduler) capture this token and no-op once
+    // alive is false, so a stopped/destroyed strategy is never touched through a stale
+    // registration. Recreated on each start().
+    struct RunToken {
+        std::atomic_bool alive{true};
+    };
+    std::shared_ptr<RunToken> m_token;
+    std::atomic_bool m_running{false};
+
     std::function<void(Strategy*, const Datetime&)> m_on_recieved_spot;
     std::function<void(Strategy*, const Stock&, const SpotRecord& spot)> m_on_change;
 
@@ -202,10 +257,15 @@ protected:
         TimeDelta delta;
         string market;
         bool ignoreMarket{false};
+        // Two-state tracking: false until the periodic duration func is actually armed; true
+        // once armed. A one-shot alignment suppressed by stop() stays false so start() can
+        // re-schedule it instead of losing the task forever after restart.
+        std::shared_ptr<std::atomic_bool> periodic_armed;
     };
     std::forward_list<RunDailyAt> m_run_daily_at_list;
 
     std::unordered_map<TimeDelta, std::function<void()>> m_run_daily_at_funcs;
+    std::set<TimeDelta> m_registered_daily_at;  // run_daily_at tasks already armed
 
 protected:
     static std::atomic_bool ms_keep_running;
@@ -225,22 +285,42 @@ private:
     static std::atomic<bool> ms_sig_registered;
 
     typedef FuncWrapper event_type;
-    ThreadSafeQueue<event_type> m_event_queue;  // 消息队列
+    ThreadSafeQueue<event_type> m_event_queue;  // Message queue
 
-    /** 先消息队列提交任务后返回的对应 future 的类型 */
+    /** The type of the corresponding future returned after submitting a task to the message queue
+     */
     template <typename ResultType>
     using event_handle = std::future<ResultType>;
+
+    // Event-loop wait hooks (see setEventWaitHooks); empty in non-Python runtimes
+    std::function<void()> m_pre_wait_hook;
+    std::function<void()> m_post_wait_hook;
+
+    // Incremented on each stop(); a queued event task captures it and self-drops when stale,
+    // so a one-shot callback suppressed by stop() cannot run once after a restart
+    std::atomic<uint64_t> m_event_generation{0};
+
+    // Whether the event loop is actually running; stop() only wakes the loop when it is, so a
+    // stop() before start() (or during a backtest) leaves no stale wake-up task behind
+    std::atomic_bool m_event_loop_running{false};
 
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4996)
 #endif
 
-    /** 向线程池提交任务 */
+    /** Submit a task to the thread pool */
     template <typename FunctionType>
     auto event(FunctionType f) {
         typedef typename std::invoke_result<FunctionType>::type result_type;
-        std::packaged_task<result_type()> task(f);
+        uint64_t gen = m_event_generation.load(std::memory_order_acquire);
+        auto guarded = [this, gen, f = std::move(f)]() -> result_type {
+            if (gen != m_event_generation.load(std::memory_order_acquire)) {
+                return result_type();
+            }
+            return f();
+        };
+        std::packaged_task<result_type()> task(std::move(guarded));
         event_handle<result_type> res(task.get_future());
         m_event_queue.push(std::move(task));
         return res;
@@ -256,30 +336,19 @@ private:
 typedef shared_ptr<Strategy> StrategyPtr;
 
 /**
- * @brief 在策略运行时中执行系统交易 SYS
- * @note 目前仅支持 buy_delay| sell_delay 均为 false 的系统，即 close 时执行交易
- * @param sys 交易系统
- * @param stk 交易对象
- * @param query 查询条件
- * @param broker 订单代理（专用与和账户资产同步的订单代理）
- * @param costfunc 成本函数
- * @param other_brokers 其他的订单代理
+ * @brief Execute the system trading SYS in the strategy runtime
+ * @note Currently only the system with both buy_delay and sell_delay equal to false is supported,
+ *       i.e. the trade is executed at the close
+ * @param sys the trading system
+ * @param stk the trading object
+ * @param query query condition
+ * @param broker the order broker (the order broker dedicated to synchronizing with the account
+ *               assets)
+ * @param costfunc the cost function
+ * @param other_brokers the other order brokers
  */
 void HKU_API runInStrategy(const SYSPtr& sys, const Stock& stk, const KQuery& query,
                            const OrderBrokerPtr& broker, const TradeCostPtr& costfunc,
-                           const std::vector<OrderBrokerPtr>& other_brokers = {});
-
-/**
- * @brief 在策略运行时中执行组合策略 PF
- * @note 目前仅支持 buy_delay| sell_delay 均为 false 的系统，即 close 时执行交易
- * @param pf 资产组合
- * @param query 查询条件
- * @param broker 订单代理（专用与和账户资产同步的订单代理）
- * @param costfunc 成本函数
- * @param other_brokers 其他的订单代理
- */
-void HKU_API runInStrategy(const PFPtr& pf, const KQuery& query, const OrderBrokerPtr& broker,
-                           const TradeCostPtr& costfunc,
                            const std::vector<OrderBrokerPtr>& other_brokers = {});
 
 /** @} */

@@ -16,7 +16,10 @@
 namespace hku {
 
 /**
- * 变动率指标 (price / prevPrice),  N 日累积收益率 （包含本金）
+ * Rate of change indicator (price / prevPrice), the N-day cumulative return (including the
+ * principal)
+ * @note when n = 0, prevPrice is fixed to the first valid bar, i.e. the cumulative return
+ *       (including the principal) from the start
  * @ingroup Indicator
  */
 Indicator HKU_API ROCR(int n = 10);

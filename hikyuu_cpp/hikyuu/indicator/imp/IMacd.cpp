@@ -5,10 +5,8 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IMacd.h"
-#include "../crt/EMA.h"
-#include "../crt/MACD.h"
-#include "../crt/SLICE.h"
 #include "../crt/CVAL.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -27,11 +25,14 @@ IMacd::~IMacd() {}
 
 void IMacd::_checkParam(const string& name) const {
     if ("n1" == name) {
-        HKU_ASSERT(getParam<int>("n1") >= 0);
+        int v = getParam<int>("n1");
+        HKU_ASSERT(v >= 1 && v < INT_MAX);
     } else if ("n2" == name) {
-        HKU_ASSERT(getParam<int>("n2") >= 0);
+        int v = getParam<int>("n2");
+        HKU_ASSERT(v >= 1 && v < INT_MAX);
     } else if ("n3" == name) {
-        HKU_ASSERT(getParam<int>("n3") >= 0);
+        int v = getParam<int>("n3");
+        HKU_ASSERT(v >= 1 && v < INT_MAX);
     }
 }
 
@@ -50,10 +51,8 @@ void IMacd::_calculate(const Indicator& data) {
     _increment_calculate(data, m_discard + 1);
 }
 
-size_t IMacd::min_increment_start() const {
-    return 1;
-}
-
+// Not an incremental path: resuming DIF needs ema1/ema2 separately while the outputs only keep
+// their difference, so this serves as the full-series engine of _calculate.
 void IMacd::_increment_calculate(const Indicator& data, size_t start_pos) {
     int n1 = getParam<int>("n1");
     int n2 = getParam<int>("n2");
@@ -77,28 +76,80 @@ void IMacd::_increment_calculate(const Indicator& data, size_t start_pos) {
     dst2[start_pos - 1] = dea;
 
     size_t total = data.size();
+    bool seeded = false;
     for (size_t i = start_pos; i < total; ++i) {
-        ema1 = (src[i] - ema1) * m1 + ema1;
-        ema2 = (src[i] - ema2) * m2 + ema2;
-        diff = ema1 - ema2;
-        dea = diff * m3 + dea - dea * m3;
-        bar = diff - dea;
-        dst0[i] = bar;
-        dst1[i] = diff;
-        dst2[i] = dea;
+        if (std::isfinite(src[i])) {
+            if (!std::isfinite(ema1)) {
+                ema1 = src[i];
+            } else {
+                ema1 = (src[i] - ema1) * m1 + ema1;
+            }
+            if (!std::isfinite(ema2)) {
+                ema2 = src[i];
+            } else {
+                ema2 = (src[i] - ema2) * m2 + ema2;
+            }
+            diff = ema1 - ema2;
+            dea = diff * m3 + dea - dea * m3;
+            bar = diff - dea;
+            seeded = true;
+            dst0[i] = bar;
+            dst1[i] = diff;
+            dst2[i] = dea;
+        } else if (seeded) {
+            // non-finite after first valid observation: hold previous outputs, states frozen
+            dst0[i] = bar;
+            dst1[i] = diff;
+            dst2[i] = dea;
+        }
+        // leading non-finite (before any finite src): leave dst as Null from _readyBuffer
     }
 }
 
 void IMacd::_dyn_one_circle(const Indicator& ind, size_t curPos, int n1, int n2, int n3) {
     HKU_IF_RETURN(n1 <= 0 || n2 <= 0 || n3 <= 0, void());
-    Indicator slice = SLICE(ind, 0, curPos + 1);
-    Indicator macd = MACD(slice, n1, n2, n3);
-    if (macd.size() > 0) {
-        size_t index = macd.size() - 1;
-        _set(macd.get(index, 0), curPos, 0);
-        _set(macd.get(index, 1), curPos, 1);
-        _set(macd.get(index, 2), curPos, 2);
+    // Intentional: replicate the static MACD recursion on the prefix [0, curPos] in a single pass
+    // with three running scalars, bitwise identical to MACD(SLICE(ind, 0, curPos + 1)) but without
+    // per-bar allocations.
+    auto const* src = ind.data();
+    price_t m1 = 2.0 / (n1 + 1);
+    price_t m2 = 2.0 / (n2 + 1);
+    price_t m3 = 2.0 / (n3 + 1);
+    price_t ema1 = src[ind.discard()];
+    price_t ema2 = src[ind.discard()];
+    price_t diff = 0.0;
+    price_t dea = 0.0;
+    price_t bar = 0.0;
+    bool seeded = false;
+    for (size_t i = ind.discard() + 1; i <= curPos; ++i) {
+        if (std::isfinite(src[i])) {
+            if (!std::isfinite(ema1)) {
+                ema1 = src[i];
+            } else {
+                ema1 = (src[i] - ema1) * m1 + ema1;
+            }
+            if (!std::isfinite(ema2)) {
+                ema2 = src[i];
+            } else {
+                ema2 = (src[i] - ema2) * m2 + ema2;
+            }
+            diff = ema1 - ema2;
+            dea = diff * m3 + dea - dea * m3;
+            bar = diff - dea;
+            seeded = true;
+        }
+        // leading non-finite: keep scanning; hold the previous outputs once seeded
     }
+    if (curPos > ind.discard() && !seeded) {
+        // whole prefix is non-finite after the seed bar: no valid output yet
+        _set(Null<price_t>(), curPos, 0);
+        _set(Null<price_t>(), curPos, 1);
+        _set(Null<price_t>(), curPos, 2);
+        return;
+    }
+    _set(bar, curPos, 0);
+    _set(diff, curPos, 1);
+    _set(dea, curPos, 2);
 }
 
 void IMacd::_dyn_calculate(const Indicator& ind) {
@@ -112,7 +163,7 @@ void IMacd::_dyn_calculate(const Indicator& ind) {
     Indicator n3 =
       iter != m_ind_params.end() ? Indicator(iter->second) : CVAL(ind, getParam<int>("n3"));
 
-    HKU_CHECK(n1.size() == ind.size(), "ind_param(n2).size()={}, ind.size()={}!", n2.size(),
+    HKU_CHECK(n1.size() == ind.size(), "ind_param(n1).size()={}, ind.size()={}!", n1.size(),
               ind.size());
     HKU_CHECK(n2.size() == ind.size(), "ind_param(n2).size()={}, ind.size()={}!", n2.size(),
               ind.size());

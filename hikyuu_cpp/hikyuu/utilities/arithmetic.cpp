@@ -6,6 +6,8 @@
  */
 
 #include <stdexcept>
+#include <memory>
+#include <vector>
 #include <utf8proc.h>
 #include "arithmetic.h"
 
@@ -24,17 +26,21 @@ template double HKU_UTILS_API roundEx(double number, int ndigits);
 
 template <>
 float roundEx(float number, int ndigits) {
-    // 国内一般使用传统四舍五入法
-    if (ndigits < 0)
-        return number;  // 无效位数直接返回原值
+    // The traditional round-half-up is generally used in China. See the double roundEx above for
+    // the epsilon rationale and the magnitude clamping (the float range ends at 10^38)
+    const int max_digits = std::numeric_limits<float>::max_exponent10;
+    const int mag = std::min(std::max(ndigits, -max_digits), max_digits);
+    const bool to_integer_place = mag < 0;
+    const float factor = std::pow(10.0, to_integer_place ? -mag : mag);
+    const float scaled = to_integer_place ? number / factor : number * factor;
+    const float epsilon =
+      to_integer_place
+        ? std::min(std::fabs(scaled) * std::numeric_limits<float>::epsilon() * 4.0f, 0.25f)
+        : std::min(1e-10f * factor, 1e-6f);
 
-    const float factor = std::pow(10.0, ndigits);
-    const float epsilon = 1e-10 * factor;  // 动态调整epsilon避免精度误差
-
-    if (number >= 0)
-        return std::floor(number * factor + 0.5 + epsilon) / factor;
-    else
-        return std::ceil(number * factor - 0.5 - epsilon) / factor;
+    const float rounded =
+      scaled >= 0.0f ? std::floor(scaled + 0.5f + epsilon) : std::ceil(scaled - 0.5f - epsilon);
+    return to_integer_place ? rounded * factor : rounded / factor;
 }
 
 template double HKU_UTILS_API roundUp(double number, int ndigits);
@@ -44,45 +50,39 @@ template float HKU_UTILS_API roundDown(float number, int ndigits);
 
 #if defined(_MSC_VER)
 /**
- * 将UTF8编码的字符串转换为GB2312编码的字符串
- * @param szinput 待转换的原始UTF8编码的字符串
- * @return 以GB2312编码的字符串
- * @note 仅在Windows平台下生效
+ * Convert a UTF8 encoded string into a GB2312 encoded string
+ * @param szinput the original UTF8 encoded string to be converted
+ * @return the string encoded in GB2312
+ * @note It takes effect on the Windows platform only
  */
 std::string HKU_UTILS_API utf8_to_gb(const char *szinput) {
-    wchar_t *strSrc;
-    char *szRes;
     std::string nullStr;
     if (!szinput) {
         return nullStr;
     }
 
+    // RAII buffers: every failure path releases them, the conversion failure of one stage used
+    // to leak the buffer allocated by the previous stage
     int i = MultiByteToWideChar(CP_UTF8, 0, szinput, -1, NULL, 0);
     if (i == 0) {
         return nullStr;
     }
-    strSrc = new wchar_t[i + 1];
-    if (!MultiByteToWideChar(CP_UTF8, 0, szinput, -1, strSrc, i)) {
-        delete[] strSrc;
+    std::unique_ptr<wchar_t[]> strSrc(new wchar_t[i + 1]);
+    if (!MultiByteToWideChar(CP_UTF8, 0, szinput, -1, strSrc.get(), i)) {
         return nullStr;
     }
 
-    i = WideCharToMultiByte(CP_ACP, 0, strSrc, -1, NULL, 0, NULL, NULL);
+    i = WideCharToMultiByte(CP_ACP, 0, strSrc.get(), -1, NULL, 0, NULL, NULL);
     if (i == 0) {
         return nullStr;
     }
 
-    szRes = new char[i + 1];
-    if (!WideCharToMultiByte(CP_ACP, 0, strSrc, -1, szRes, i, NULL, NULL)) {
-        delete[] szRes;
+    std::unique_ptr<char[]> szRes(new char[i + 1]);
+    if (!WideCharToMultiByte(CP_ACP, 0, strSrc.get(), -1, szRes.get(), i, NULL, NULL)) {
         return nullStr;
     }
 
-    std::string result(szRes);
-
-    delete[] strSrc;
-    delete[] szRes;
-    return result;
+    return std::string(szRes.get());
 }
 
 std::string HKU_UTILS_API utf8_to_gb(const std::string &szinput) {
@@ -90,46 +90,39 @@ std::string HKU_UTILS_API utf8_to_gb(const std::string &szinput) {
 }
 
 /**
- * 将GB2312编码的字符串转换为UTF8编码的字符串
- * @param szinput 待转换的原始GB2312编码的字符串
- * @return 以UTF8编码的字符串
- * @note 仅在Windows平台下生效
+ * Convert a GB2312 encoded string into a UTF8 encoded string
+ * @param szinput the original GB2312 encoded string to be converted
+ * @return the string encoded in UTF8
+ * @note It takes effect on the Windows platform only
  */
 std::string HKU_UTILS_API gb_to_utf8(const char *szinput) {
-    wchar_t *strSrc;
-    char *szRes;
     std::string nullstr;
     if (!szinput) {
         return nullstr;
     }
 
+    // RAII buffers: every failure path releases them, the conversion failure of one stage used
+    // to leak the buffer allocated by the previous stage
     int i = MultiByteToWideChar(CP_ACP, 0, szinput, -1, NULL, 0);
     if (0 == i) {
         return nullstr;
     }
-
-    strSrc = new wchar_t[i + 1];
-    if (!MultiByteToWideChar(CP_ACP, 0, szinput, -1, strSrc, i)) {
-        delete[] strSrc;
+    std::unique_ptr<wchar_t[]> strSrc(new wchar_t[i + 1]);
+    if (!MultiByteToWideChar(CP_ACP, 0, szinput, -1, strSrc.get(), i)) {
         return nullstr;
     }
 
-    i = WideCharToMultiByte(CP_UTF8, 0, strSrc, -1, NULL, 0, NULL, NULL);
+    i = WideCharToMultiByte(CP_UTF8, 0, strSrc.get(), -1, NULL, 0, NULL, NULL);
     if (0 == i) {
         return nullstr;
     }
 
-    szRes = new char[i + 1];
-    if (!WideCharToMultiByte(CP_UTF8, 0, strSrc, -1, szRes, i, NULL, NULL)) {
-        delete[] szRes;
+    std::unique_ptr<char[]> szRes(new char[i + 1]);
+    if (!WideCharToMultiByte(CP_UTF8, 0, strSrc.get(), -1, szRes.get(), i, NULL, NULL)) {
         return nullstr;
     }
 
-    std::string result(szRes);
-
-    delete[] strSrc;
-    delete[] szRes;
-    return result;
+    return std::string(szRes.get());
 }
 
 std::string HKU_UTILS_API gb_to_utf8(const std::string &szinput) {
@@ -138,71 +131,96 @@ std::string HKU_UTILS_API gb_to_utf8(const std::string &szinput) {
 
 #else /* else for defined(_MSC_VER) */
 std::string HKU_UTILS_API utf8_to_gb(const std::string &szinput) {
-    char *inbuf = const_cast<char *>(szinput.c_str());
-    size_t inlen = strlen(inbuf);
-    size_t outlen = inlen;
-    char *outbuf = (char *)malloc(outlen);
-    if (!outbuf) [[unlikely]] {
+    if (szinput.empty()) {
         return std::string();
     }
-    memset(outbuf, 0, outlen);
-    char *in = inbuf;
-    char *out = outbuf;
+
     iconv_t cd = iconv_open("gbk", "utf-8");
-    iconv(cd, &in, &inlen, &out, &outlen);
+    if (cd == (iconv_t)-1) [[unlikely]] {
+        // a failed open yields an invalid descriptor; using it would be UB, so bail out empty
+        return std::string();
+    }
+
+    // gbk never expands beyond the utf-8 byte count, so the input size is a safe capacity; one
+    // extra byte keeps a terminating NUL that iconv itself does not write
+    size_t inlen = szinput.size();
+    const size_t outcap = inlen;
+    std::vector<char> outbuf(outcap + 1, '\0');
+    char *in = const_cast<char *>(szinput.data());
+    char *out = outbuf.data();
+    size_t outleft = outcap;
+
+    size_t rc = iconv(cd, &in, &inlen, &out, &outleft);
     iconv_close(cd);
-    std::string result(outbuf);
-    free(outbuf);
-    return result;
+    if (rc == (size_t)-1) [[unlikely]] {
+        // conversion failed or was truncated: mirror the Windows path and return empty instead of
+        // silently yielding a partial result
+        return std::string();
+    }
+
+    // build from the byte count actually written, not from the buffer as a C string
+    return std::string(outbuf.data(), outcap - outleft);
 }
 
 std::string HKU_UTILS_API gb_to_utf8(const std::string &szinput) {
-    char *inbuf = const_cast<char *>(szinput.c_str());
-    size_t inlen = strlen(inbuf);
-    size_t outlen = inlen * 2;
-    char *outbuf = (char *)malloc(outlen);
-    if (!outbuf) [[unlikely]] {
+    if (szinput.empty()) {
         return std::string();
     }
-    memset(outbuf, 0, outlen);
-    char *in = inbuf;
-    char *out = outbuf;
+
     iconv_t cd = iconv_open("utf-8", "gbk");
-    iconv(cd, &in, &inlen, &out, &outlen);
+    if (cd == (iconv_t)-1) [[unlikely]] {
+        return std::string();
+    }
+
+    // utf-8 expands a 2-byte gbk cjk to up to 3 bytes, so twice the input size is a safe
+    // capacity; one extra byte keeps the terminating NUL that iconv does not write
+    size_t inlen = szinput.size();
+    const size_t outcap = inlen * 2;
+    std::vector<char> outbuf(outcap + 1, '\0');
+    char *in = const_cast<char *>(szinput.data());
+    char *out = outbuf.data();
+    size_t outleft = outcap;
+
+    size_t rc = iconv(cd, &in, &inlen, &out, &outleft);
     iconv_close(cd);
-    std::string result(outbuf);
-    free(outbuf);
-    return result;
+    if (rc == (size_t)-1) [[unlikely]] {
+        return std::string();
+    }
+
+    return std::string(outbuf.data(), outcap - outleft);
 }
 
 #endif /* defined(_MSC_VER) */
 
 bool HKU_UTILS_API isInteger(double num) {
-    // 处理特殊值：NaN（非数值）或无穷大
+    // Handle the special values: NaN (not a number) or infinity
     if (std::isnan(num) || std::isinf(num)) {
         return false;
     }
 
-    // 计算小数部分（对 1.0 取模）
-    double fractionalPart = num - std::floor(num);  // 等价于 num % 1.0，但处理负数更稳妥
+    // Calculate the fractional part (the modulo against 1.0)
+    double fractionalPart = num - std::floor(num);  // Same as num % 1.0, but safer for negatives
 
-    // 允许微小误差（因浮点数精度问题，如 5.0000000001 应视为 5）
+    // A tiny error is allowed (due to the floating point precision, e.g. 5.0000000001 should be
+    // regarded as 5)
     const double epsilon = 1e-9;
     return std::fabs(fractionalPart) < epsilon || std::fabs(fractionalPart - 1.0) < epsilon;
 }
 
 bool HKU_UTILS_API isInteger(float num) {
-    // 处理特殊值：NaN（非数值）或无穷大（使用float专用函数）
+    // Handle the special values: NaN (not a number) or infinity (the float specific functions are
+    // used)
     if (std::isnan(num) || std::isinf(num)) {
         return false;
     }
 
-    // 计算小数部分（使用float专用的floor函数）
+    // Calculate the fractional part (the float specific floor function is used)
     float fractionalPart = num - std::floor(num);
 
-    // 调整适合float的精度误差（float精度低于double，epsilon需更大）
-    const float epsilon = 1e-5f;  // float典型精度范围内的误差阈值
-    // 判断小数部分是否接近0或1.0（处理类似5.9999997这种情况）
+    // Adjust the precision error for float (the float precision is lower than double, so a larger
+    // epsilon is needed)
+    const float epsilon = 1e-5f;  // The error threshold within the typical float precision range
+    // Judge whether the fractional part is close to 0 or 1.0 (handling the cases like 5.9999997)
     return std::fabs(fractionalPart) < epsilon || std::fabs(fractionalPart - 1.0f) < epsilon;
 }
 
@@ -297,7 +315,7 @@ std::string HKU_UTILS_API utf8_to_upper(const std::string &s) noexcept {
     return result;
 }
 
-/* UTF-8字符串大小写折叠比较 */
+/* The UTF-8 string case folding comparison */
 bool HKU_UTILS_API utf8_fold_equal(const std::string &s1, const std::string &s2) noexcept {
     if (s1.empty() && s2.empty()) {
         return true;
@@ -339,7 +357,7 @@ bool HKU_UTILS_API utf8_fold_equal(const std::string &s1, const std::string &s2)
     }
 }
 
-/* UTF-8字符串包含子字符串 */
+/* Whether the UTF-8 string contains the substring */
 bool HKU_UTILS_API utf8_contains(const std::string &s, const std::string &sub) noexcept {
     if (sub.empty()) {
         return true;

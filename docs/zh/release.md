@@ -1,0 +1,627 @@
+# release.md
+
+# 版本发布说明
+
+## Unreleased
+
+**⚠️ 破坏性变更：MM / AF 职责分离（Portfolio / AllocateFunds 体系重构）**
+
+原独立组合引擎 `Portfolio`（`SimplePortfolio` / `WithoutAFPortfolio`）由 `MultiSystem` 承接；
+组合级资金分配从 `MoneyManagerBase` 剥离，改由独立基类 `AllocateFundsBase`（AF）承载：
+
+* `PF_Simple` / `PF_WithoutAF` 工厂保留（函数名、参数名、参数顺序、默认值不变），但**返回 `MultiSystem`**，
+  其中 `af` 参数类型由 `MMPtr` 改为 `AFPtr`；
+* `AF_EqualWeight` / `AF_FixedWeight` / `AF_FixedWeightList` / `AF_FixedAmount` / `AF_MultiFactor`
+  工厂保留，但**返回 `AllocateFundsBase` 实例**（`AFPtr`）；
+* `MoneyManagerBase` **限定为单系统 / 单证券**形态：移除组合级接口
+  （`allocate` / `set_mode` / `_allocate_system_weight` / `_allocate_suggestions` / `_check_risk`
+  与 `mode` 属性）；
+* `Portfolio` 类及其方法**不再提供**；Python `crtAF` **保留**，回调契约由 `_allocateWeight(date, se_list)`
+  更新为 `_allocate(date, tm, contexts, query)`，并可选注入 `_to_targets` / `_check_risk`。
+
+迁移要点：
+
+* 位置传参调用 `PF_*` / `AF_*` 无需修改（提供 `PortfolioPtr` → `MultiSystemPtr`、
+  `AFPtr` → `AllocateFundsPtr` 兼容别名）；
+* `Portfolio` 类方法改用 `MultiSystem` 等价接口：驱动时间轴用 `set_axis_mode("calendar")` +
+  `set_date_axis(...)`；`lastSuggestion()` → `last_suggestion`（返回最后一天的交易记录与延迟请求，
+  聚合系统另提供 `to_suggestions()` 返回本层转换后的 `TradeSuggestion` 列表）；
+  `getRunningDates/getCycleEndDates/getRealSystemList` 等查询接口不再提供；
+* 自定义资产分配：`crtAF(allocate_func[, to_targets_func, check_risk_func])` 快速构建，或继承
+  `AllocateFundsBase` 并重载 `_allocate`（L1）/ `_to_targets`（L2）/ `_check_risk`（L3）；
+* 组合级分配模式（A/B/C）由聚合系统 `MultiSystem` 自身持有（`set_mode` / 只读属性 `mode`），
+  并作为末尾的 `mode` 形参传入 AF 各钩子；序列化向后兼容（旧档案中的 `m_mode` 原由 AF 持有，
+  现自动迁移至 `MultiSystem`）；
+* `sys_use_self_tm` 等在新体系无对应语义的参数将被忽略并告警；`AF_MultiFactor` 提供 `auto_adjust_weight`
+  参数（默认 `True`，评分归一化为和为 1 后分配，评分总和小于 1 也满仓分配；`False` 时评分即最终权重）。
+
+**⚠️ AF 风控默认生效**：`max_single_position` 默认 1.0，即单标的持仓市值 ≤ 净资产
+（`<=0` 不限制，`>1` 按 1.0 生效）；`max_total_position` 默认 1.0，模式 A 下所有标的聚合目标市值 ≤ 净资产、
+模式 B 下各子系统配额总和 ≤ 净资产，超出时**权重定价按比例等比缩减**、**固定额度按整数个额度截断**
+（告警并报告获配数；`<=0` 不限制）。若需超配或杠杆场景，请上调或设为 `<=0`。基类另含 `fixed_amount`
+（大于 0 时覆盖权重定价并告警；作为**绝对金额**不受等比缩减，而是只满足整数个额度，其余标的/子系统
+配额置 0）与 `adjust_running_sys`（默认 `True`，仅模式 B 生效；`False` 时已运行子系统保持现状、
+仅新子系统获配剩余现金）参数。执行端另支持 `auto_checkin`（默认 `False`：按“名义额 + 手续费”计算缺口并
+追加本金，回测资金曲线会失真，目标逐日变化时可能逐日补资）与融资购买力（`support_borrow_cash` 设在
+`MultiSystem` 上，开启后按保证金率**逐笔**折算，同一批多笔按顺序分配、靠后的腿可能被缩减）。
+
+详见文档：`trade_portfolio/portfolio`、`trade_portfolio/allocate_funds`。
+
+**⚠️ 破坏性变更：`AF_FixedWeightList` 空权重列表改为抛异常**
+
+`AF_FixedWeightList([])` 不再静默降级为 `AF_EqualWeight` 实例，而是与全零/非有限权重一致，
+在工厂与 `set_param("weights", [])` 两处均直接抛异常（空列表无法定价）。数量不等于子系统数时
+仍按原行为回退等权。
+
+**⚠️ 破坏性变更：盈利目标策略（PG）子类接口规范化**
+
+`ProfitGoalBase::getGoal` / `getShortGoal` 改为非虚公开接口，子类计算接口统一为 `_getGoal` / `_getShortGoal`
+（与 `_reset` / `_clone` / `_calculate` 的 `_xxx` 风格一致）：
+
+* C++ 自定义子类：`PROFITGOAL_IMP` 宏已同步，需将 `getGoal` 实现改名为 `_getGoal`；`getShortGoal` 可选，
+  默认返回 `constant.null_price` 表示未设置空头目标；
+* Python 自定义盈利目标策略：重载接口 `get_goal(self, datetime, price)` 改名为 `_get_goal(self, datetime, price)`，
+  可选空头接口为 `_get_short_goal`；公开查询方法 `get_goal` / `get_short_goal` 保留；
+* `crtPG(get_goal, ...)` 参数与用法不变，内部回调契约由 `get_goal` 更新为 `_get_goal`。
+
+**⚠️ 破坏性变更：Slippage 接口调整（滑点子类只算原始价，由 System 层校验并钳制）**
+
+自定义滑点基类 `SlippageBase` 的派生类（C++ / Python）原先需重载 `get_real_buy_price` / `get_real_sell_price` 直接给出实际成交价；现改为**重载 `_get_real_buy_price` / `_get_real_sell_price` 仅计算原始价**。框架内唯一的调用方 System 在成交处已持有当日**未复权**的原始 K 线记录，由其校验并钳制：
+
+* 返回值非法（非有限数或非正数）时回退计划价 —— 0 是交易管理接受的市价单占位价，绝不能从滑点路径透传；
+* 模型价按市场最小变动单位取整，成交价不会落在两个档位之间（非法值时回退的计划价与钳制到的当日上下界本身就是市场价，原样使用）；
+* 买卖两侧都钳制到当日 `[最低价, 最高价]` 区间。
+
+迁移要点：
+
+* Python 自定义滑点（`crtSP` 子类）需将 `get_real_buy_price` / `get_real_sell_price` 重命名为 `_get_real_buy_price` / `_get_real_sell_price`（仅算原始价，不再自行钳制）；`get_real_buy_price` / `get_real_sell_price` 返回模型原始价，成交所用价格为其校验钳制后的结果；
+* C++ 自定义滑点需将实现从 `getRealBuyPrice` / `getRealSellPrice` 迁移至 protected 虚函数 `_getRealBuyPrice` / `_getRealSellPrice`；
+* 若此前自定义滑点已在内部做区间钳制，移除该逻辑即可（现由 System 层统一处理）；
+* `SP_FixedPercent` 移除对计划价的有效性告警（`HKU_WARN`），与其余 5 个内置滑点实现保持一致。
+
+**⚠️ 破坏性变更：StoplossBase 接口调整（子类仅实现 _getPrice / _getShortPrice）**
+
+自定义止损/止赢基类 `StoplossBase` 的派生类原先需重载公有虚函数 `getPrice` / `getShortPrice`；现改为**重载受保护虚函数 `_getPrice` / `_getShortPrice` 仅计算原始止损价**，公有 `getPrice` / `getShortPrice` 作为非虚包装直接委托给子类钩子（与 `reset` / `_reset` 形式一致）。
+
+* C++ 自定义止损/止赢需将实现从 `getPrice` / `getShortPrice` 迁移至 `_getPrice` / `_getShortPrice`；Python 侧自定义止损/止赢亦需将重写方法从 `get_price` / `get_short_price` 改为 `_get_price` / `_get_short_price`（`crtST` 已同步）。
+
+**⚠️ 破坏性变更：资金管理公共参数重命名（统一为小写下划线风格）**
+
+资金管理基类公共参数 `auto-checkin` → `auto_checkin`、`max-stock` → `max_stock`，与各策略自有参数（`max_loss`、`risk`、`capital` 等）的小写下划线命名风格统一：
+
+* 通过 `set_param` / `get_param` 使用旧连字符参数名将抛出参数不存在异常，需改用新名称；
+* 仅上述两个公共参数受影响，各策略自有参数命名不变；
+* 示例：`mm.set_param("auto_checkin", True)`、`mm.get_param("max_stock")`。
+
+**⚠️ 破坏性变更：信号同日合并与单方向语义**
+
+`SignalBase` 同一日期的多次信号写入按数值合并为净额：净额为正时该日仅保留买入信号，为负时仅保留卖出信号（同日相反方向的记录被移除），净额约为 0 时该日不保留信号；`alternate=true` 下同日已有同向记录时只刷新数值，不视为新开仓。新增 Python 绑定 `get_value` / `get_buy_value` / `get_sell_value`，可读取信号数值幅度。
+
+**⚠️ 破坏性变更：指标参数 `out-extreme` → `out_extreme`**
+
+`ZSCORE` / `NORM_Zscore` 等使用 `out_extreme` 的指标与归一化实现统一改为小写下划线命名，旧名 `set_param` 会抛异常。
+
+**⚠️ 归档格式变化**：`SignalBase` 新增周期起止与周期日字段，算子信号不再重复序列化基类，旧 `SG_*`（以及内嵌 `m_sg` 的系统）归档需重新保存；旧归档中的连字符参数键（`auto-checkin` / `max-stock` / `out-extreme`）不会自动迁移，反序列化后取默认值，需显式 `set_param` 补齐。
+
+**🚀 新增特性**
+
+* feat(portfolio): `PF_Simple` / `PF_WithoutAF` 兼容工厂（直通 `MultiSystem`，模式 B / 模式 C）
+* feat(allocatefunds): 独立 `AllocateFundsBase` 基类与 `AF_EqualWeight` / `AF_FixedWeight` / `AF_FixedWeightList` / `AF_FixedAmount` / `AF_MultiFactor` 工厂（承载组合级 L1/L2/L3）
+* feat(allocatefunds): 恢复 Python `crtAF` 便捷构造（L1 `_allocate`，可选注入 L2 `_to_targets` / L3 `_check_risk`）
+* feat(MultiSystem): 新增 `axis_mode` / `adjust_cycle` / `adjust_mode` / `delay_to_trading_day` / `trade_on_close` / `sell_at_not_selected` 参数，运行期开关在 `readyForRun` 时快照生效，完全非法值在设置时抛异常；支持将调仓模式内化为调仓日表
+* feat(slippage): 四个随机移滑价差（`SP_Uniform` / `SP_Normal` / `SP_LogNormal` / `SP_TruncNormal`）新增 `adverse_only` 参数（默认 `true` 保持单向不利成本；`false` 直接使用带符号采样值，实现零均值执行噪声）
+* feat(slippage): 支持多空不对称滑点：`SlippageBase` 新增 `get_real_buy_short_price`（平空）与 `get_real_sell_short_price`（开空）及其可重载钩子（默认分别委托给多头侧钩子，旧实现行为不变）；`SP_FixedPercent` / `SP_FixedValue` 新增 `short_p` / `short_value`，四个随机模型新增 `short_mean` / `short_stddev` / `short_min_value` / `short_max_value`（留空 `None` 时在构造时取对应多头侧参数值）；`crtSP` 新增 `get_real_buy_short_price` / `get_real_sell_short_price` 可选参数（注意：旧版本序列化的档案不含 `short_*` 键，反序列化后空头侧取类默认值而非对应多头侧值，需显式 `set_param` 补齐）
+* feat(moneymanager): `MM_Nothing` 支持开空，开空数量按账户净权益计算（净权益 / (价格 × 单位)），与 `MM_FixedCapital` / `MM_FixedCapitalFunds` / `MM_FixedPercent` 等以净权益为空头基数的策略一致，借券货款不再膨胀开空额度；新增 `if_have_short_will_not_sell_short` 参数（默认 `False`）控制已有空头时是否禁止再次开空（此前基类默认禁止开空，行为变更为静默允许）
+
+**🐞 缺陷修复**
+
+* fix(KData): 复权修复为固定基准口径：前复权锚定数据最后一日、后复权锚定数据起点，复权结果与查询区间无关，`Stock::getKData` 与 `kdata.getKData` 结果一致；修复后复权 KData 子查询二次复权、扩区拼接尾部偏移、周线及以上聚合首日量额双计、相位同日创新高时最高价漏更新、日线缺口越界读、扩展周期误用日线复权公式、分钟线窗口首根漏调整、空 KData 访问 front()/back() 崩溃等问题；复权调整为只对价格复权，成交量与成交额保持原始值（对齐 Wind / 聚宽等主流数据源口径，详见 Query 复权口径说明）
+* fix(indicator): ADJ_FACTOR 系列复权因子指标改为固定基准计算，与 RECOVER_EQUAL_BACKWARD 同区间逐值一致；ADJ_VOL 口径调整为 VOL / ADJ_FACTOR（配合复权只调价，保持成交额不变）
+* fix(stock): 修复小写 K 线类型经预载缓冲取 K 线崩溃、getMarketValue 对早于首根 K 线的查询回退最新价（未来数据泄漏，改为返回 0）、K 线缓冲释放与查询并发竞态、blockDriver 未判空、reload 并发竞争
+* fix(block): 修复 Null Block 调 getStockList 空指针解引用崩溃；add 改为幂等语义（重复添加已存在的证券返回 true，仅 Null Stock 或无效代码返回 false），列表版 add 返回值改为 all-of（任一失败即为 false 且不短路）
+* fix(strategy): 修复 StrategyContext 股票代码与 K 线类型去重逻辑写反导致去重完全失效的问题；股票代码归一化为大写后去重并存储，stock_list 读回值为大写归一化值（混合大小写重复也能去除，并与默认必载代码正确合流）
+* fix(trade_sys): PG_FixedPercent 止盈目标价改用 buyMoney / totalNumber 计算平均成本，修复部分减仓后目标价被按比例抬高、止盈永不触发；目标价按标的价格精度取整（多头向上、空头向下，取整前先归化浮点噪声），不再返回不可成交价；补充空头目标实现；未设置账户时返回未限定目标而非空指针崩溃
+* fix(trade_sys): PG_FixedHoldDays 持有天数改为按交易对象自身的交易日统计，并在 setTO 时预建日期表，持仓每根 K 线的日线驱动查询（整轮 O(n²)、带锁与 IO）降为两次二分；标的无日线数据时不再静默失效
+* fix(trade_sys): ProfitGoalBase::clone 不再传播交易对象，克隆体经 setTO 重新计算（原先预计算型自定义子类在克隆体上静默失效）；_get_short_goal「未设置目标」的哨兵由 0 统一为 constant.null_price，与多头口径一致
+* fix(signal): 同日信号写入合并为净额并保持「一日一方向」：净额归零时不再残留旧信号（`shouldBuy`/`shouldSell` 可同时为真），`alternate=true` 下同日重复写入刷新数值而非丢弃
+* fix(KData): `operator==` / Python `==` 在 stock、query、size 相同的前提下追加比较末根记录，右开区间查询下实时尾部的修订或新增 K 线可触发下游缓存重算（仍非全量逐元素比较）
+
+## 2.8.3 - 2026年10月1日
+
+**🚀 新增特性**
+
+* feat(shm): 新增插件化共享内存数据服务，新增客户端/单机共享内存零拷贝K线视图、K线共享内存缓存、IPC客户端模式实时更新转发与基础信息共享内存快照；客户端模式权息与历史财务改为懒加载并本地缓存，主进程可直接从行情缓存服务拉取K线
+* feat(gui): 新增界面语言选择与动态切换，完成英文翻译
+* feat(i18n): 核心C++/Python注释、docstrings及文档英文化，新增英文README、快速开始指南、AI开发指南(AGENTS.md)与中英量化学术语表
+* feat(slippage): 新增seed参数支持可复现回测，截断正态拒绝采样边界化，NormalSlippage均值做nan校验
+* feat(plugin): ClickHouse/MySQL/HDF5导入器支持市场与证券类型注册，移除市场注册起始日期参数
+* feat(data): 新增单机自动协商KData数据服务；db_connect新增sqlStringLiteral安全SQL转义；hkuextra客户端模式新增clearKDataCache接口
+* feat(hub): 非中文环境默认从GitHub克隆默认hub
+* refactor: boost依赖要求提升至1.92.0
+
+
+**⚡️ 优化改进**
+
+* perf(trade_manage): getFundsList改为一次性回放交易列表，新增getRefTradeList避免只读访问时拷贝整表；修正保证金/借入/资产口径与分红重复计入(#511)
+* perf(trade_sys): 可买数量改用二分查找替代逐手递减
+* fix(trade_sys): 修正止盈价格映射至不复权坐标、空头止损方向与退出检查、止损/止盈缓存重置
+* perf(indicator): 动态参数路径用标量递归替代SLICE+rebuild
+* fix(indicator): 统一修复增量计算边界与越界读取(ADJ_FACTOR/BACKSET/BARSSINCEN/ALIGN/SAFTYLOSS/ISLIMIT/QUANTILE_TRUNC/ATR/DIFF/REF/WMA/MACD/DMA/EXIST等)
+* fix(strategy): 修正订单参考价理、totalRisk符号与单位、连续交易计数仅多头、can_allocate_cash统一扣减预留资金、WalkForward各训练区间隔离EV等
+* fix(utilities): GlobalStealThreadPool改线程局部存储，修正MQStealQueue/ResourcePool/DllLoader/PluginLoader移动语义与加载守卫
+
+**🐞 缺陷修复**
+
+* fix(data_driver): 修复SQL后端派生周期K线跨界聚合、Python自定义KDataDriver的getIndexRangeByDate返回end被错误替换为start、HDF5日期索引回退逻辑；移除冗余TMPCSV临时机制
+* fix(stock): 修复实时更新拒绝无效K线记录、客户端模式缓冲门控；shm客户端每日自动重载延迟5分钟执行
+* fix(global): 修复FlatBuffers校验范围、parseFlatSpot/StockManager初始化异常安全
+* fix(analysis): 修复组合分析入口对null tm/sys的空指针解引用、日期范围与结束于查询最后交易日；修正Portfolio延迟卖单移除条件、self-tm系统保留在WithoutAF选择器池
+* refactor(clone): 简化clone实现并增强子类异常处理，System/Portfolio/WalkForward改为异常安全
+* fix(trade): 空头Broker订单使用实际执行数量同步
+* fix(draw): payoff面板Avg Win/Avg Loss key
+* fix(stock): 增强参数验证日志可读性
+
+## 2.8.2 - 2026年8月20日
+
+**🚀 新增特性**
+
+* 新增指标：RSRS_BETA、RSRS_BULL、ADX、ADX2
+* feat(indicator): 添加origin-id用于缓存身份标识，提升指标计算缓存准确性
+* feat(draw): 更新热力图和柱状图标题以包含交易对象名称
+
+**⚡️ 优化改进**
+
+* perf(factor): MF因子复用以进一步提升多因子系统计算性能
+
+**🐞 缺陷修复**
+
+* fix(signal): 修复SignalBase::clone错误复制m_cycle_end导致周期边界损坏
+* fix(allocatefunds): 修复adjust_running_sys=false时running占用权重误用总账户资产
+* fix(indicator): 修复SPEARMAN(n=0)默认参数不产出有效结果
+* fix(multifactor): 使分数排序确定性，避免结果不一致
+* fix(multifactor): 导出calculate_style_residuals符号，修复链接问题
+* fix(multifactor): 使延迟计算线程安全，支持并发场景
+* fix(indicator): 在FACTOR身份标识中包含ktype，确保缓存准确性
+
+## 2.8.1 - 2026年7月10日
+
+**🚀 新增特性**
+
+* feat(strategy): 添加获取当日指定时间点价格的功能及其Python绑定
+* feat(extind): 添加时间采样聚合指标 AGG_SAMPLE、AGG_SAMPLE_MAX、AGG_SAMPLE_MIN、AGG_SAMPLE_MEAN 及其文档和测试
+* feat(tm_performance): 添加当前距历史最高点回撤百分比计算
+* feat(indicator): 添加 MDD_CURRENT 指标及其文档和测试
+* feat(indicator): 更新SLOPE指标以计算斜率、拟合优度R²和相对最大残差
+* feat(indicator): 添加FITR2指标以计算线性回归拟合优度R²
+* feat(matplotlib_draw): 添加对数坐标选项到系统绩效绘图函数, 年度收益率柱状图绘制功能及年月收益热力图添加年收益显示,增加热力图函数参数以显示月度最高和最低收益
+* feat(FACTOR): 添加因子名称参数支持，提供便捷版本的因子指标转换
+* feat(FactorSet): 更新构造函数以支持更多参数，添加使用因子列表创建因子集合的构造函数
+* feat(Factor): 添加has_factor函数和is_null方法以检查因子是否存在或为空
+* feat(WildcardMatch): 重构通配符匹配函数，支持UTF-8编码并优化匹配逻辑
+* feat(ITsRank): 添加增量计算支持及相关测试用例
+* feat(gui): 根据平台调整默认字体大小以改善用户体验
+* feat(ETF交易成本): 添加ETF交易成本算法及相关接口
+* feat(BaseInfoDriver): 补充Python绑定缺失的 `DataDriverFactory.regKDataDriver` 方法
+
+**⚡️ 优化改进**
+
+* refactor(IMdd/IMrr): 将方案4(O(N*n)暴力)替换为SWAG(O(N)双栈摊还)算法
+* refactor(ALIGN): 修正函数声明格式，移除多余括号
+* refactor(TS_RANK): 简化函数声明，移除不必要的增量计算支持测试
+* refactor: 移除FIXED_START_INDEX和FIXED_START_DATE函数中的factor_name参数以简化接口
+* Factor内部存储管理与计算优化
+
+**🐞 缺陷修复**
+
+* fix(trade): 导出TradeManager中 getParam 方法改名为 get_param，和文档保持一致
+* fix(parameter): 添加int64_t类型的get方法以支持64位整数的获取（之前会导致dataserver异常）
+* fix(draw): 修复 tm_heatmap 和 tm_year_profit 函数的结束日期逻辑
+* fix(strategy): 修复获取指定时间点价格时的时间限制逻辑
+* fix(extind): 调整 AGG_SAMPLE 系列函数参数顺序以保持一致性
+* fix(ISumBars): 修复 _dyn_calculate 返回值符号与静态版相反
+* fix(Indicator): 修复 operator() alike 短路返回未计算空壳导致 size=0
+* fix(IMa): n<=0 分支分母用 valid_count 而非物理跨度
+* fix(IStdev): _dyn 加窗口未满 guard，消除与静态 discard 不一致
+* fix(indicator): MA/STDEV NaN 语义统一为 Welford valid mean/std
+* fix(indicator): 在 clone 方法中添加 m_old_context 成员的复制
+* fix(indicator): ISpearman tie-handling 用 Pearson-on-ranks 替换简化公式
+* fix(multifactor): 行业中性化用组内去均值替代整数编码单变量回归，修复 ALIGN 改名导致路由静默失效
+* fix(multifactor): 修复风格因子中性化的数据竞争与数学错误
+* fix(multifactor): 恢复 Eigen 线程数以优化性能
+* fix(IMdd/IMrr): 修复增量计算 look-ahead bias (未来数据污染)
+* fix(ADVANCE/DECLINE): 修复 NaN truthy + 增量脏读双累加
+* fix(IDecline): 修复增量计算运算符反向，对齐 ADVANCE 防护
+* fix(Block): 优化相等比较逻辑，通过排序比较股票市场代码
+* fix(StockManager): 更新数据加载提示信息，明确为预加载数据
+* fix(Strategy): 添加对特殊卖出条件的处理，确保在num为-MAX_DOUBLE时执行卖出操作
+* fix(backtest): 优化回测模式 0 下的结束日期处理, mode 0 时最后一天的买入卖出处理优化
+* 修正 getBlockListByIndexStock 函数中的条件判断逻辑
+* 修正 get_belong_to_block_list 得不到板块的问题
+
+## 2.8.0 - 2026年6月10日
+
+**🚀 新增特性**
+
+* feat(HikyuuTdx): 补充 689 科创板号段
+* feat(indicator): 新增指标 BETA、KURT(超额峰度)、SKEW(总体偏度)、COV(样本协方差)
+* feat(indicator): 新增指标 TS_RANK(计算时间序列排名比例)、SIGNED_POWER(带符号乘幂运算)
+* feat(indicator): 更新 DIFF 函数以支持自定义差分周期n
+* feat(indicator): 新增固定起始日期指标 FIXED_START_DATE、固定起始索引指标 FIXED_START_INDEX
+* feat(regression): 添加多元线性回归及其完整版本的实现
+* feat(Factor): 添加保存因子时的更新选项，允许在保存前检查并更新已有因子
+* feat(Block): 添加从证券列表和证券代码列表创建临时板块的构造函数
+* feat(block): 增加内置 ETF 板块 blocketf Block("ETF", "ALL")
+* feat(stock_manager): 添加wait_data_ready方法，等待预加载数据完成
+
+**⚡️ 优化改进**
+
+* performance: windows 下切换至 clang-cl 编译，windows下综合性能提升10%~20%
+* feat(Indicator): RANK增加模式4,5(直接返回0~1表示百分位比)
+* feat(parameter): Parameter添加对 Datetime 类型的支持，int内部使用int64_t统一保存
+* feat(stock): python中预定义的内部板块移至C++内部，以便C++中亦可直接获取
+* feat(factor)优化: 因子值加载和保存时，自动尝试绑定的板块信息
+* feat(factor): 增强因子名称验证，确保因子名称符合规范并支持 UTF-8 处理
+* feat(multifactor): 改进 MF 获取因子 IC 警告信息提示
+* feat(build): 添加编译选项本地最大向量化支持
+
+**🐞 缺陷修复**
+
+* fix(IBarsLasts): 优化参数验证逻辑，确保 n <= 0 时返回全 NaN 序列
+* fix(Indicator): INDEXC 等公式在 kdata 有停牌缺少日期的时候出错的问题
+* fix(HikyuuTdx): 修复 TDX 本地日线导入 ETF/B股/LOF/REIT 等品种价格精度10倍偏差
+* fix(factor): python接口添加恢复类型参数到因子构造函数
+* fix(data import): 调整导入策略，移除非日线时对成交量和成交额为0的过滤
+* fix(indicator): 修复双输入指标计算 prepare 方法中的上下文获取逻辑
+* fix(multifactor): 修正获取 IC 时对 "save_all_factors" 参数的检查逻辑
+* fix(build): 修正查找系统 python 如果没有 python 只有 python3 的问题
+* fix(build): 修复 openssl3 依赖配置，避免在 macosx 平台上使用共享库
+
+## 2.7.9 - 2026年5月23日
+
+**🚀 新增特性**
+
+* feat(indicator): 新增 FACTOR 指标，支持将 Factor 对象转换为 Indicator，使其可以在指标系统中使用
+* feat(indicator): 新增 ADJ_FACTOR 复权因子指标，基于股票权息数据计算后复权因子序列
+* feat(indicator): 新增 ADJ_OPEN/ADJ_HIGH/ADJ_LOW/ADJ_CLOSE/ADJ_VOL 复权价格和成交量指标
+* feat(KQuery): 添加ktype到秒数转换功能
+
+**⚡️ 优化改进**
+
+* feat(factor): 改善因子值存储，直接使用 Float64。注意：无法自动升级。
+
+**🐞 缺陷修复**
+
+* fix(indicator): 修复 FINANCE 指标中季报和年报在同一天发布可能冲突的问题
+* fix(KData): 复权移除不必要的四舍五入，分钟级别除权日前一日最后一分钟后向复权计算错误
+* fix(trade_sys): 修复MultiFactorBase中变量名拼写错误
+* fix(trade_sys): 修复多因子系统中特殊标准化功能的因子名称匹配问题
+* fix(factor): update_all_factors_values 增加数据一致性检查
+
+## 2.7.8 - 2026年4月18日
+
+**🚀 新增特性**
+
+* feat(indicator): 新增STKTYPE股票类型指标，支持获取股票类型信息
+* feat(indicator): 新增CODELIKE和NAMELIKE通配符匹配函数，支持股票代码和名称的模式匹配
+* feat(indicator): 添加BARSLASTS指标, 支持动态参数
+* feat(indicator): 添加指标的一元正负运算符支持（如 -MA(CLOSE(), 20)）
+* feat(factor): 添加基于指标映射表的FactorSet构造函数，支持更灵活的因子创建方式
+* feat(factor): 添加因子重名处理逻辑，避免因子命名冲突
+* feat(trade_manage): 新增getPositionExtInfoDict方法，获取扩展持仓详情字典
+* feat(trade_manage): 添加持仓记录的买卖次数统计功能
+* feat(trade_manage): 增加买卖次数统计到CSV导出功能
+* feat(trade_manager): 添加按股票获取扩展持仓详情功能
+* feat(strategy): 为Strategy类添加动态属性支持，允许在Python中动态添加属性到Strategy实例
+* feat(strategy): 调整订单数量处理逻辑以符合最小交易单位要求
+* feat(strategy): 完善策略类文档并添加获取当前价格功能
+* feat(StockManager): 异步加载插件以提升初始化性能
+* feat(StockManager): 添加带策略上下文参数的重新加载功能
+* feat(data): 强化数据去重功能并优化代码格式
+* feat(data): 过滤无实际交易数据提升数据质量
+* feat(data): 优化pytdx数据导入时的成交额和成交量验证逻辑
+* feat(Log): 添加C++20标准支持优化断言宏性能
+
+**⚡️ 优化改进**
+
+* refactor(thread): 修改并行算法模板函数参数为右值引用，提升性能
+* refactor(thread): 调整全局任务组实现细节
+* refactor(thread): 优化线程池submit函数参数传递
+
+**🐞 缺陷修复**
+
+* fix(trade_sys): 修复多因子系统中参考股票为空时的异常处理
+* fix(indicator): 修复涨跌停判断中的精度问题
+* fix(indicator): 解决IIsLimitDown和IIsLimitUp指标中缺少StockTypeInfo头文件的问题
+* fix(strategy): 修正Strategy.order_value方法的参数名，将"price"更正为"value"
+* fix(sysinfo): 修复许可证过期提醒逻辑
+* fixed: macOS Xcode升级后编译错误及告警处理
+
+## 2.7.7 - 2026年3月5日
+
+**🚀 新增特性**
+
+* feat(factor): 新增完整的因子管理系统，支持因子的创建、存储、查询和批量计算
+  - 添加 Factor 类支持因子值存储、复权类型配置和序列化
+  - 添加 FactorSet 类支持批量管理多个因子，支持索引操作符和迭代器
+  - 支持获取单个证券或批量证券的因子计算结果
+  - 支持删除因子值数据功能
+  - 支持因子公式检查和 align_dates 日期对齐参数
+  - 支持特殊因子值保存
+  - 支持 Block 属性进行因子匹配验证
+  - 支持 FactorSet 作为多因子合成函数的输入参数
+* feat(indicator): 新增涨跌停判断指标ISLIMITUP/ISLIMITDOWN支持
+* feat(indicator): 重构 MDD/MRR指标实现，添加时间窗口参数支持和增量计算测试
+* feat(trade_manage): 新增 getPositionDict 方法用于获取当前全部持仓记录字典
+* feat(core): 添加许可证过期提醒功能
+* feat(plugin): 添加 AGG_VWAP 指标的 KData 重载版本
+* feat(hikyuu): 添加基于策略上下文的初始化函数
+* 发布版本支持 python 3.14
+
+**⚡️ 优化改进**
+
+* refactor(hikyuu/utilities/thread): 优化并行计算
+* feat(misc): 添加批量获取账户资金和性能数据的功能
+* feat(stock): StockManager 添加互斥锁防止初始化冲突，支持加载扩展指标插件
+* feat(agent): 添加多线程控制的互斥锁防止代理启停冲突
+
+**🐞 缺陷修复**
+
+* fix(trade_sys): crtST和现有接口不符无法使用
+* fix(factor): 修复 MultiFactorBase 克隆和序列化中缺失 m_norm 的问题
+* feat(HikyuuTdx): 优化板块信息下载，添加超时处理，防止卡死
+
+## 2.7.6 - 2026年2月3日
+
+紧急修复 2.7.5 版本CPU空转占用率过高
+
+## 2.7.5 - 2026年2月2日
+
+**🚀 新增特性**
+
+* feat(indicator): 支持增量计算。如新增 extend 方法，在当前已计算基础上，自动扩展只最新数据并只计算最新数据。主要用于实盘、监控等场景加速。
+* 复权增加成交量、成交金额复权
+* macosx 下序列化支持
+* feat(trade_sys): SE_MFxx 添加多因子选择器的复权方式配置参数(mf_recover_type), 指定MF使用特定的复权方式进行计算
+* feat(KData): KData增加 getKData 方法，部分情况下可加速获取
+
+**⚡️ 优化改进**
+
+* 优化 MF 内存占用过多的问题
+* 优化 windows 下数据量超过一定范围后并行计算性能可能出现的剧烈下降
+* 优化matplotlib交互模式参数设置问题, 当不在交互式会话中时，显式设置interactive参数为False，防止绘图过慢
+* 优化IC实现，使其可以作为普通指标公式使用
+* 优化全局并行计算任务
+
+**🐞 缺陷修复**
+
+* fixed 使用更安全的方式处理python临时对象类型降级问题，防止某些情况崩溃
+* fix(hikyuutdx): 初次使用下载时，板块信息下载报错
+* fixed(data): 调整科创板/北交所最小交易量配置为 100
+* fix(trade_sys): 卖出时通过MM判断卖出数量, 以便分钟级别回测时可以通过MM进行T+1控制
+* fix(allocatefunds): 修正资金分配权重计算逻辑, 确保实际分配的权重不超过可分配权重上限，避免超出预设的资金分配限制，提高资金分配的准确性和安全性
+* fixed MF_ICWeight, MF_ICIRWeight 使用标准化后的原始因子进行IC/ICIR权重计算
+* fix(trade_sys): 修复MultiFactorSelector指标设置后未重置计算状态的问题
+* fixed(importdata): 更新后出现KeyError: 'lazy_preload' error
+* fix(gui): start_qmt 用Query.get_base_ktype_list()替换Query.get_all_ktype()
+* fix(KQuery): 修正TRANS类型的时间转换参数,将g_ktype2sec映射中TRANS类型的值从60*24*3(表示3天)改为3，以确保时间转换逻辑的正确性。
+* fix(draw): 优化matplotlib中指标绘制，以便不同周期范围指标能够正确绘制
+
+## 2.7.3 - 2026年1月6日
+
+**🚀 新增特性**
+
+* feat(config): 添加 timeline 和 trans 预加载支持
+* feat(StockManager): 添加根据指数获取板块列表功能
+* feat(plugin_extind): 添加AGG_VWAP指标支持
+
+**🐞 缺陷修复**
+
+* fixed(datetime): 优化UTC偏移量计算性能，该问题导致 linux 平台下 clickhouse 数据加载比其他平台慢了10倍
+* fixed(python): Python实现的SG等子类在赋值给C++类时可能存在临时变量类型降级的问题，导致 sys.sg = B() 缺失python _clone 实现
+* fix(data): 修复本地数据导入时的可能存在结构体解包格式错误
+* fix(trade_sys): 修复安全止损指标ST_Saftyloss在调用SAFTYLOSS函数时缺少CLOSE()参数
+* feat(_Stock): 为set_kdata_from_df方法添加默认列参数（原和文档说明不符），设置默认的列名参数为["datetime", "open", "high", "low", "close", "amount", "volume"]
+
+## 2.7.2 - 2025年12月24日
+
+**🚀 新增特性**
+
+* 新增 AF_FixedAmount 等金额资产分配，对选中的资产进行等金额分配
+* 添加 lazy_preload 配置选项，预加载日线以下数据时，支持懒加载模式
+* 支持无限制预加载K线数据, 当 preload_max_num 设置为小于等于 0 时，表示不对预加载的 K 线数量做限制。
+
+**⚡️ 优化改进**
+
+* 调整ETF最小交易量默认配置为100
+* feat(trade): 支持缩扩股业务处理
+* feat(HikyuuTdx): 导入股票交易和时间数据时过滤价格为零的记录
+* feat(HikyuuTdx): 改进股票数据导入逻辑并增强错误处理
+* feat(hikyuu_cpp): 调整对 reload_time 配置的解析和验证，只有当配置正确时才启用自动重载功能
+* 优化预加载加载取消逻辑，避免无效操作
+* 优化调整全局变量初始化与清理顺序
+* 线程池及 PluginManager 优化
+
+**🐞 缺陷修复**
+
+* fix(indicator): 优化指标克隆与序列化缓冲区处理, 防止内存泄漏
+* fix(trade_sys):  crtSG 函数中遗漏将创建的信号指示器对象引入全局的功能
+* fix(data): 修复导入股票数据时交易量比较的错误日志输出，py311不支持f-str双引号嵌套
+* fix(trade_manage): 增加对缩股的处理逻辑
+* fix(mysql): 调整K线数据金额字段精度, KRecord 中的amount保持为万元(原为千元， 和其他存储引擎不一致)
+* fix(hikyuu_cpp): 调整ETF、基金和B股的分时数据价格精度
+* fix(draw): 解决matplotlib绘制指标时内部缺值或异常时无法绘图的问题
+* fix(StrategyContext): 修复 K 线类型去重逻辑中的大小写问题，以便不区分大小写
+
+## 2.7.1 - 2025年12月1日
+
+**🚀 新增特性**
+
+* 增加数据重载时间配置项, 新增 `reload_time` 配置项，用于指定每日数据重新加载的时间（格式为 HH:MM），默认值为 "00:00。需手工更改或 hikyuu.ini 或在 load 参数中指定
+* 添加crtSCFilter函数用于快速创建评分过滤器实例
+* 新增 crtNorm 函数用于快速创建标准化/归一化等算法函数
+* 取消行业板块数据下载
+
+**🐞 缺陷修复**
+
+* fixed: 修正 clickhouse 存储 K 线数据中 amount 字段的单位转换问题
+* fixed: 限制日期范围以适配 ClickHouse DateTime 类型
+* fixed: 修改Stock_Number结构体中的number类型为double，windows下容易出现精度错误
+* fixed: 更新盈利目标策略接口参数说明与实现逻辑，移除了部分子类中冗余的 `_calculate` 空实现
+* fixed: HikyuuTdx 在导入股票数据时，增加对低价股低点差异的绝对值判断，避免因价格过低导致的相对误差误判。
+
+## 2.7.0 - 2025年11月1日
+
+**🚀 新增特性**
+
+* 新增 SP系列滑点算法：截断正态分布滑点算法(ST_TruncNormal)、对数分布随机价格滑点算法(ST_LogNormal)、正态分布随机价格滑点算法(ST_Normal)、均匀分布随机价格算法(ST_Uniform)
+
+**⚡️ 优化改进**
+
+* 主包 hikyuu 去除 arrow 依赖，需要 arrow 相关功能需独立安装 pip install hikyuu-plugin，并手工引入 from hikyuu_plugin.extra import *。使用该方式，也便于自行编译的朋友，使用插件。
+* clickhouse 预加载过程中直接读取数据时，保证其读取数据和预加载完成后一致
+* 优化KData构造函数中的数据加载逻辑，避免在重加载或设置K线数据列表时出现数据无效的风险。
+* 优化板块数据下载
+
+**🐞 缺陷修复**
+
+* fixed：HikyuuTDX 首次运行时因 use_download 未初始化导致闪退
+* fixed：释放预加载K线数据时同时释放已加载的历史财务数据，保证重加载时读取最新的历史财务数据
+
+## 2.6.9 - 2025年10月19日
+
+**🚀 新增特性**
+
+* MF多因子评分板支持指定全局因子标准化、对特定因子指定特有标准化和中性化（含行业中性化与风格因子中性化)算法
+
+  ```python
+  # 创建两个因子 ma20, ma60
+  ma20 = MA(CLOSE(), 20)
+  ma20.name = 'MA20'
+
+  ma60 = MA(CLOSE(), 60)
+  ma60.name = 'MA60'
+
+  # 指定证券列表
+  stks = [s for s in blocka]
+
+  # 指定查询范围，并创建一个等权组合的 MF
+  query = Query(Datetime(20150101), Datetime(20251017))
+  mf = MF_EqualWeight([ma20, ma60], stks, query, ref_stk=sm["sh000001"])
+
+  # 添加全局标准化
+  mf.set_normalize(NORM_Zscore())
+
+  # 为 ma20 添加行业中性化以及市场中性化(即按市值风格因子中性化)
+  mf.add_special_normalize("MA20", NORM_Zscore(), category="行业板块", style_inds=[LOG(CLOSE()*LIUTONGPAN())])
+  ```
+* 增加内置因子标准化算法(NORM_Zscore/NORM_MinMax/NORM_Quantile/NORM_Quantile_Uniform)
+* 新增 SE_MultiFactor2 自行指定配置时间截面评分过滤器，内置评分过滤器(SCFilter_TopN/SCFilter_Price/SCFilter_AmountLimit/SCFilter_Group等)
+
+  ```python
+  # 如为 SE_MultiFactor2 实例，设置过滤：分值不为Nan|分成10组取第0组|价格大于等于10元|成交金额不在当日排名末尾20%之内|取前10
+  se.set_scores_filter(SCFilter_IgnoreNan()|SCFilter_Group(10, 0)SCFilter_Price(
+              10.) | SCFilter_AmountLimit(0.2) | SCFilter_TopN(10))
+  ```
+
+  如通过 SCFilter_Group 创建过滤器进行因子分组测试：
+  ![示例图片](_static/release_269.png)
+* [vip]新增 GROUP 系列指标(GROUP_MAX/GROUP_MIN/GROUP_SUM/GROUP_FUNC等)，和 AGG 系列指标对应
+* [vip]dateserver 增加 --parquet_path 方式保存 tick data，仅在 --save 同时为 yes 时生效
+* feat(KData): 添加索引方式获取子集功能
+
+**⚡️ 优化改进**
+
+* HikyuuTDX 优化板块信息下载，防止下载失败情况下板块信息丢失
+* [vip]优化 clickhouse 存储引擎，日线整体预加载优化至8秒，目前存储引擎日线整体加载速度: HDF5 6秒 -> clickhouse 8秒 -> mysql 22秒
+* HikyuuTDX 从 PyQt5 迁移至 PySide6
+* feat(hikyuu_cpp): 在 Performance 类中新增"未平仓帐户收益率%"统计项
+* feat(draw): 为 tm_performance 和 sys_performance 函数添加返回主图 axis 的功能，便于用户在绘图后对图表进行进一步的自定义操作和调整。
+* 编译工程优化，基于xmake合并编译功能，整体编译实际缩短三分之二
+
+**🐞 缺陷修复**
+
+* fix(hikyuu): 默认情况下不启动行情接收，防止在开盘后因自身合成缺失导致从 dataserver 获取行情也缺失的问题。
+* fix(datetime): 修复 UTC 偏移量计算在非 Windows 平台下的问题可能不准确。
+* fix(hikyuu): realtime_update 优化实时更新功能中的股票列表获取逻辑
+* fix(data): 修复10年债券收益率数据导入时的日期判断逻辑
+
+## 2.6.8 - 2025年9月5日
+
+**🚀 新增特性**
+
+- 新增 get_inds_view 方法，用于指定日期或范围内的系列指标结果并返回 pandas.DataFrame 结果。该方法主要用于获取系列指标结果后，使用其他 python 库，进行进一步数据处理，或日常监控打印。
+
+  ```python
+  In [3]: df = get_inds_view(blocka, [CLOSE(), OPEN(), MA(CLOSE()), AMA(CLOSE()), MA(CLOSE(),n=30)], Datetime(20250822))
+
+  In [4]: df
+  Out[4]:
+        证券代码  证券名称   交易时间  CLOSE   OPEN         MA        AMA         MA
+  0     SH600229  城市传媒 2025-08-22   5.89   7.23   7.087273   7.060143   7.034000
+  1     SH601121  宝地矿业 2025-08-22   7.21   6.01   2.482273   2.486140   6.544000
+  2     SH600227    赤天化 2025-08-22   7.97   6.41   6.292273   6.406271   2.462333
+  3     SH600390  五矿资本 2025-08-22   6.62   2.59   6.585455   6.015825   6.208000
+  4     SZ000612  焦作万方 2025-08-22   2.56   6.69   6.260000   6.334334   8.710933
+  ...        ...       ...        ...    ...    ...        ...        ...        ...
+  3467  SH603255    鼎际得 2025-08-22  32.36  32.39  31.984409  32.237558  31.445567
+  3468  SH600621  华鑫股份 2025-08-22  17.91  16.80  16.134909  16.596052  15.940933
+  3469  SH600999  招商证券 2025-08-22  19.32  18.68  18.342727  18.646812  18.188667
+  3470  SZ002301  齐心集团 2025-08-22   7.32   7.36   7.130000   7.192394   7.109333
+  3471  SH603369    今世缘 2025-08-22  42.49  42.21  40.229545  41.319146  40.089333
+
+  [3472 rows x 8 columns]
+  ```
+- 新增 AGG 系列聚合指标（捐赠用户），如日线使用分钟线聚合结果
+
+  ```python
+  #如计算：每日成交金额 / 日内分钟线最大成交金额
+  ind = AGG_MAX(AMO(), ktype=Query.MIN)/AMO()
+  s = sm['sz000001']
+  k = s.get_kdata(Query(-100, ktype=Query.DAY))
+  result = ind(k)
+  print(result.to_df()))
+  ```
+- IC 指标增加 strict 参数，strict 模式下为当前时刻的 N 日后收益，非 strict 模式下为当前时刻之前的 N 天收益
+- 新增 REFX 指标，增强 REF 指标，可进行左移（未来函数， 勿在回测中使用，通常用于其他数据处理）
+- K线添加分时和分笔数据支持, 在 KQuery 中添加 TIMELINE 和 TRANS 两种新 K 线类型，可直接使用指标计算分时和分笔数据
+
+  ```python
+  In [28]: s = sm['sz000001']
+
+  In [29]: k = s.get_kdata(Query(-100, ktype=Query.TRANS))
+
+  In [30]: MA(CLOSE())(k).to_df()
+  Out[30]:
+                datetime     value0
+  0  2025-09-04 14:52:08  11.750000
+  1  2025-09-04 14:52:11  11.750000
+  2  2025-09-04 14:52:14  11.750000
+  3  2025-09-04 14:52:17  11.750000
+  4  2025-09-04 14:52:20  11.750000
+  ..                 ...        ...
+  95 2025-09-04 14:56:53  11.730455
+  96 2025-09-04 14:56:56  11.730909
+  97 2025-09-04 14:56:59  11.731364
+  98 2025-09-04 14:57:02  11.732273
+  99 2025-09-04 15:00:00  11.732727
+
+  [100 rows x 2 columns]
+  ```
+- KData新增 get_kdata 方法获取对应时间范围内其他不同 K 线周期数据
+- 添加 Indicator 结果集转换为 numpy.array 的新方法 to_array
+- StockManager 添加 is_trading_hours 方法判断是否为交易时间段
+
+**⚡️ 优化改进**
+
+- 改进 python 中 std::share_ptr 引出对象的 clone 操作，提升 windows 下相关并行处理速度
+- Indicaotr 优化双指标等特殊指标的表达式去重，提升公式计算性能
+- 预加载模式 KData 与 Stock 共享数据、非预加载模式下捐赠用户 KData 使用LRUCache
+- CVAL、SLICE、ALIGN 支持处理多结果集指标
+- KRecord/KDataImp 使用全局 Null对象
+
+**🐞 缺陷修复**
+
+- 修复 MySQL/ClickHouse 无法按索引方式获取非预加载数据的错误
+- 修复 Indicator 类中 to_numpy 函数的内存泄漏问题
+- 修复 ALIGN 当日期超过给定范围时的对齐问题，优化了对齐算法
+- 修复非中文环境 Windows 设置终端为中文编码导致的终端崩溃

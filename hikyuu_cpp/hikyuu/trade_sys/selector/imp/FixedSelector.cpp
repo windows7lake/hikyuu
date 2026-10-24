@@ -1,7 +1,7 @@
 /*
  * FixedSelector.cpp
  *
- *  Created on: 2018年1月12日
+ *  Created on: 2018-1-12
  *      Author: fasiondog
  */
 
@@ -23,9 +23,7 @@ FixedSelector::FixedSelector(double weight) : SelectorBase("SE_Fixed") {
 
 FixedSelector::~FixedSelector() {}
 
-bool FixedSelector::isMatchAF(const AFPtr& af) {
-    return true;
-}
+
 
 SystemWeightList FixedSelector::_getSelected(Datetime date) {
     auto weight = getParam<double>("weight");

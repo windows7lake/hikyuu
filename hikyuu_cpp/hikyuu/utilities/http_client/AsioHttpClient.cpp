@@ -30,6 +30,8 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <cstring>
+#include <mutex>
 #endif
 
 namespace hku {
@@ -93,18 +95,18 @@ AsioHttpStreamResponse& AsioHttpStreamResponse::operator=(AsioHttpStreamResponse
     return *this;
 }
 
-// HttpConnection 类定义 - 用于连接池的可复用连接
+// The HttpConnection class definition - a reusable connection for the connection pool
 struct HttpConnection {
     using SocketType = tcp::socket;
 
-    std::vector<tcp::endpoint> endpoints;                  // DNS 解析结果缓存
-    std::chrono::steady_clock::time_point last_used_time;  // 最后使用时间
-    int m_version = 0;                                     // 版本号
+    std::vector<tcp::endpoint> endpoints;                  // The DNS resolution result cache
+    std::chrono::steady_clock::time_point last_used_time;  // Last used time
+    int m_version = 0;                                     // Version number
 
-    // socket 在连接被获取时创建
+    // The socket is created when the connection is acquired
     std::optional<SocketType> socket;
 
-    // 版本管理接口
+    // The version management interface
     int getVersion() const {
         return m_version;
     }
@@ -191,13 +193,13 @@ struct AsioHttpClient::SslContext {
         ssl_ctx.set_options(ssl::context::default_workarounds | ssl::context::no_sslv2 |
                             ssl::context::no_sslv3 | ssl::context::no_tlsv1 |
                             ssl::context::no_tlsv1_1);
-        // 使用 OpenSSL 原生 API 设置最低 TLS 版本
+        // Set the minimum TLS version with the native OpenSSL API
         SSL_CTX_set_min_proto_version(ssl_ctx.native_handle(), TLS1_2_VERSION);
     }
 
     /**
-     * @brief 设置自定义 CA 证书文件
-     * @param ca_file CA 证书文件路径（PEM 格式）
+     * @brief Set the custom CA certificate file
+     * @param ca_file the CA certificate file path (the PEM format)
      */
     void setCaFile(const std::string& ca_file) {
         if (!ca_file.empty()) {
@@ -209,7 +211,7 @@ struct AsioHttpClient::SslContext {
 
 AsioHttpClient::AsioHttpClient(int32_t thread_count, size_t max_concurrency)
 : m_own_ctx(std::make_unique<net::io_context>()), m_ctx(m_own_ctx.get()) {
-    // 创建工作守护，防止 io_context 在无任务时退出
+    // Create a work guard to prevent the io_context from exiting when there is no task
     m_work_guard = std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(
       m_own_ctx->get_executor());
 
@@ -217,11 +219,11 @@ AsioHttpClient::AsioHttpClient(int32_t thread_count, size_t max_concurrency)
     m_ssl_ctx = std::make_unique<SslContext>();
 #endif
 
-    // 初始化连接池
+    // Initialize the connection pool
     m_connection_pool = std::make_unique<ResourceAsioVersionPool<HttpConnection, std::mutex>>(
       Parameter(), max_concurrency);
 
-    // 使用内部 io_context，启动工作线程池运行事件循环
+    // Use the internal io_context and start the worker thread pool to run the event loop
     m_worker_threads.reserve(thread_count);
     for (int32_t i = 0; i < thread_count; ++i) {
         m_worker_threads.emplace_back([this] { m_ctx->run(); });
@@ -241,15 +243,16 @@ AsioHttpClient::AsioHttpClient(const std::string& url, int32_t timeout, int32_t 
         m_ssl_ctx = std::make_unique<SslContext>();
 #endif
 
-        // 创建工作守护，防止 io_context 在无任务时退出
+        // Create a work guard to prevent the io_context from exiting when there is no task
         m_work_guard = std::make_unique<net::executor_work_guard<net::io_context::executor_type>>(
           m_own_ctx->get_executor());
 
-        // 初始化连接池参数（AsioHttpClient 可能使用多线程，统一使用 std::mutex 保证安全）
+        // Initialize the connection pool parameters (AsioHttpClient may use multiple threads, so
+        // std::mutex is used uniformly for safety)
         m_connection_pool = std::make_unique<ResourceAsioVersionPool<HttpConnection, std::mutex>>(
           Parameter(), max_concurrency);
 
-        // 启动后台线程池运行 io_context
+        // Start the background thread pool to run the io_context
         m_worker_threads.reserve(thread_count);
         for (int32_t i = 0; i < thread_count; ++i) {
             m_worker_threads.emplace_back([this]() { m_ctx->run(); });
@@ -261,7 +264,7 @@ AsioHttpClient::AsioHttpClient(net::io_context& ctx, const std::string& url, int
                                size_t max_concurrency)
 : m_url(url),
   m_timeout(std::chrono::milliseconds(timeout <= 0 ? MAX_TIMEOUT_MS : timeout)),
-  m_ctx(&ctx),  // 使用外部 io_context，不拥有所有权
+  m_ctx(&ctx),  // Use the external io_context without taking the ownership
   m_worker_threads() {
     _parseUrl();
 
@@ -270,13 +273,20 @@ AsioHttpClient::AsioHttpClient(net::io_context& ctx, const std::string& url, int
         m_ssl_ctx = std::make_unique<SslContext>();
 #endif
 
-        // 初始化连接池参数（使用外部 io_context，由调用方保证线程安全，这里保守使用 std::mutex）
+        // Initialize the connection pool parameters (an external io_context is used and the caller
+        // guarantees the thread safety, so std::mutex is used conservatively here)
         m_connection_pool = std::make_unique<ResourceAsioVersionPool<HttpConnection, std::mutex>>(
           Parameter(), max_concurrency);
     }
 }
 
 AsioHttpClient::~AsioHttpClient() {
+    // The connection pool releases its resources only after every borrowed one came back. Stopping
+    // the io_context before destroying the pool is safe only because nothing may be in flight here
+    // anyway: the class lifetime contract forbids destroying the client while an asynchronous
+    // request runs, and the synchronous methods have already returned their connection. Breaking
+    // that contract makes the pool destructor wait for a return that the stopped io_context can
+    // never deliver
     if (m_own_ctx) {
         m_work_guard.reset();
 
@@ -286,7 +296,7 @@ AsioHttpClient::~AsioHttpClient() {
 
         m_connection_pool.reset();
 
-        // 等待所有工作线程结束
+        // Wait for all the worker threads to finish
         for (auto& thread : m_worker_threads) {
             if (thread.joinable()) {
                 thread.join();
@@ -316,7 +326,8 @@ void AsioHttpClient::setTimeout(int32_t ms) {
     auto new_timeout = std::chrono::milliseconds(ms);
     if (m_timeout != new_timeout) {
         m_timeout = new_timeout;
-        // 超时时间变更时更新连接池参数，自动递增版本号
+        // Update the connection pool parameters when the timeout changes, the version is increased
+        // automatically
         if (m_connection_pool) {
             Parameter pool_param;
             m_connection_pool->setParameter(std::move(pool_param));
@@ -327,24 +338,26 @@ void AsioHttpClient::setTimeout(int32_t ms) {
 void AsioHttpClient::setUrl(const std::string& url) {
     m_url = url;
 
-    // 保存旧的 host 和 port 用于比较
+    // Save the old host and port for the comparison
     std::string old_host = m_host;
     std::string old_port = m_port;
 
-    // 解析 URL
+    // Parse the URL
     _parseUrl();
 
-    // 如果解析失败，不更新连接池
+    // The connection pool is not updated when the parsing fails
     if (!m_is_valid_url) {
         return;
     }
 
-    // 检查 host 或 port 是否变化，如果变化则更新连接池参数（自动递增版本）
+    // Check whether the host or the port changed; if so update the connection pool parameters (the
+    // version is increased automatically)
     bool host_changed = (old_host != m_host || old_port != m_port);
 
     if (host_changed && m_connection_pool) {
         Parameter pool_param;
-        // 设置新参数，资源池会自动递增版本并释放空闲的旧版本连接
+        // Set the new parameters; the resource pool increases the version and releases the idle old
+        // version connections automatically
         m_connection_pool->setParameter(std::move(pool_param));
     }
 }
@@ -376,46 +389,142 @@ void AsioHttpClient::_parseUrl() noexcept {
     }
 
     std::string base_path;
-    std::string host = m_url.substr(pos + 3);
-    pos = host.find('/');
+    // The port of the Host header is left out when it is the default of the protocol
+    const uint16_t default_port = port;
+    std::string authority = m_url.substr(pos + 3);
+    // The authority ends at the first '/', '?' or '#' (RFC 3986): a query or a fragment may
+    // follow without a path, and neither of them may leak into the host or the port
+    pos = authority.find_first_of("/?#");
     if (pos != std::string::npos) {
-        base_path = host.substr(pos);
-        host.resize(pos);
+        base_path = authority.substr(pos);
+        authority.resize(pos);
+        // A fragment is never sent to the server (RFC 9110), so it is dropped from the target
+        const size_t fragment = base_path.find('#');
+        if (fragment != std::string::npos) {
+            base_path.resize(fragment);
+        }
+        // A query without a path still yields an origin-form target starting with '/'
+        if (!base_path.empty() && base_path.front() == '?') {
+            base_path.insert(base_path.begin(), '/');
+        }
     }
-    pos = host.find(':');
+
+    // The userinfo ("user:password@") precedes the host: strip everything up to the last '@' of
+    // the authority, whose host part cannot carry an '@' itself (RFC 3986). Without this a URL
+    // like http://trusted.com@evil.com/ would yield a host no other parser sees, breaking the
+    // whitelist decisions made on it
+    pos = authority.rfind('@');
     if (pos != std::string::npos) {
-        try {
-            port = std::stoi(host.substr(pos + 1));
-        } catch (...) {
+        authority = authority.substr(pos + 1);
+    }
+
+    // An IPv6 literal carries its own colons, so it is written inside brackets and the port
+    // separator may only be looked for after the closing bracket (RFC 3986). The brackets stay in
+    // the Host header (RFC 6874) while the bare address is what the resolution and the certificate
+    // verification need
+    std::string host;
+    std::string port_text;
+    bool is_ipv6 = false;
+    if (!authority.empty() && authority.front() == '[') {
+        is_ipv6 = true;
+        pos = authority.find(']');
+        if (pos == std::string::npos || pos == 1) {
             m_is_valid_url = false;
-            HKU_ERROR("Invalid port: {}", host.substr(pos + 1));
+            HKU_ERROR("Invalid IPv6 literal, the closing bracket is missing or empty: {}",
+                      authority);
             return;
         }
-        host.resize(pos);
+        host = authority.substr(1, pos - 1);
+        const std::string tail = authority.substr(pos + 1);
+        if (!tail.empty()) {
+            if (tail.front() != ':') {
+                m_is_valid_url = false;
+                HKU_ERROR("Invalid characters after the IPv6 literal: {}", tail);
+                return;
+            }
+            port_text = tail.substr(1);
+        }
+    } else {
+        pos = authority.find(':');
+        if (pos != std::string::npos) {
+            host = authority.substr(0, pos);
+            port_text = authority.substr(pos + 1);
+        } else {
+            host = authority;
+        }
+        // Without brackets the colons of an address cannot be told apart from the port separator
+        if (!host.empty() && host.find(':') != std::string::npos) {
+            m_is_valid_url = false;
+            HKU_ERROR("An IPv6 address has to be written inside brackets: {}", authority);
+            return;
+        }
     }
+
+    if (host.empty()) {
+        m_is_valid_url = false;
+        HKU_ERROR("The url has no host part: {}", m_url);
+        return;
+    }
+
+    if (!port_text.empty()) {
+        // std::stoi accepts a leading number followed by any junk and overflows silently, so the
+        // port is validated as a whole
+        if (port_text.find_first_not_of("0123456789") != std::string::npos) {
+            m_is_valid_url = false;
+            HKU_ERROR("Invalid port: {}", port_text);
+            return;
+        }
+        try {
+            const unsigned long parsed = std::stoul(port_text);
+            if (parsed == 0 || parsed > 65535) {
+                m_is_valid_url = false;
+                HKU_ERROR("Port out of range: {}", port_text);
+                return;
+            }
+            port = static_cast<uint16_t>(parsed);
+        } catch (...) {
+            m_is_valid_url = false;
+            HKU_ERROR("Invalid port: {}", port_text);
+            return;
+        }
+    }
+
+    // An address literal must not be sent as the TLS server name and is matched against the IP
+    // subject alternative names instead of the DNS ones
+    net::error_code ec;
+    (void)net::ip::make_address(host, ec);
+    m_host_is_ip = !ec;
 
     m_base_path = std::move(base_path);
     m_host = std::move(host);
     m_port = std::to_string(port);
+    // The Host header keeps the brackets of an IPv6 literal and carries the port unless it is the
+    // default one of the protocol (RFC 6874 / RFC 9110)
+    m_host_header = is_ipv6 ? "[" + m_host + "]" : m_host;
+    if (port != default_port) {
+        m_host_header += ":" + m_port;
+    }
 }
 
-// URI 构建辅助方法
+// The URI construction helper method
 std::string AsioHttpClient::_buildURI(const std::string& path, const HttpParams& params) {
     std::ostringstream uri_stream;
 
-    // 处理 base_path：如果为空或仅为 "/"，则不添加
+    // Handle base_path: it is not added when it is empty or just "/"
     if (!m_base_path.empty() && m_base_path != "/") {
         uri_stream << m_base_path;
     }
 
     if (!path.empty()) {
-        // 判断是否需要添加分隔符 /
+        // Judge whether the separator / needs to be added
         bool need_separator = false;
         if (!m_base_path.empty() && m_base_path != "/") {
-            // base_path 不为空且不是单斜杠时，检查是否需要添加分隔符
+            // When base_path is not empty and is not a single slash, check whether the separator
+            // needs to be added
             need_separator = (m_base_path.back() != '/' && path.front() != '/');
         } else {
-            // base_path 为空或单斜杠时，仅当 path 不以 '/' 开头才需要添加
+            // When base_path is empty or a single slash, it is needed only when path does not start
+            // with '/'
             need_separator = (path.front() != '/');
         }
 
@@ -423,46 +532,44 @@ std::string AsioHttpClient::_buildURI(const std::string& path, const HttpParams&
             uri_stream << '/';
         }
 
-        // 对 path 进行分段 URL 编码（保持 / 作为路径分隔符不编码）
-        // 例如："ipquery/index" → 编码为 "ipquery/index"
-        //      "/api/v1/users" → 编码为 "/api/v1/users"
+        // URL encode the path segment by segment (keeping / as a path separator, not encoded)
+        // For example: "ipquery/index" -> encoded as "ipquery/index"
+        //      "/api/v1/users" -> encoded as "/api/v1/users"
         std::string_view path_view = path;
         size_t pos = 0;
 
         while (pos < path_view.size()) {
-            // 找到下一个 / 的位置
+            // Find the position of the next /
             size_t slash_pos = path_view.find('/', pos);
 
             if (slash_pos == std::string_view::npos) {
-                // 最后一个段（或整个 path 没有 /）
+                // The last segment (or the whole path has no /)
                 std::string segment = std::string(path_view.substr(pos));
                 if (!segment.empty()) {
                     uri_stream << url_escape(segment.c_str());
                 }
                 break;
             } else {
-                // 提取并编码当前段（不包括 /）
+                // Extract and encode the current segment (excluding the /)
                 if (slash_pos > pos) {
                     std::string segment = std::string(path_view.substr(pos, slash_pos - pos));
                     uri_stream << url_escape(segment.c_str());
                 }
-                // 保留原始的 / 分隔符
+                // Keep the original / separator
                 uri_stream << '/';
                 pos = slash_pos + 1;
             }
         }
 
-        // 处理末尾的 /
-        if (!path.empty() && path.back() == '/') {
-            uri_stream << '/';
-        }
+        // The loop above already keeps every '/' of the path, a trailing one included: an
+        // extra one here would double it (get("/") used to send "//")
     }
 
-    // 添加查询参数
+    // Add the query parameters
     bool first = true;
     for (const auto& [key, value] : params) {
         uri_stream << (first ? "?" : "&");
-        // 对 key 和 value 分别进行 URL 编码
+        // URL encode the key and the value separately
         uri_stream << url_escape(key.c_str()) << "=" << url_escape(value.c_str());
         first = false;
     }
@@ -470,13 +577,14 @@ std::string AsioHttpClient::_buildURI(const std::string& path, const HttpParams&
     return uri_stream.str();
 }
 
-// 异步 DNS 解析方法
+// The asynchronous DNS resolution method
 net::awaitable<std::vector<tcp::endpoint>> AsioHttpClient::_resolveDNS() {
-    // 先判断host是否为IP地址，是的话直接构造endpoint返回，避免不必要的DNS查询
+    // First judge whether the host is an IP address; if so construct the endpoint and return
+    // directly, avoiding an unnecessary DNS query
     net::error_code ec;
     auto addr = net::ip::make_address(m_host, ec);
     if (!ec) {
-        // host是有效的IP地址，直接构造endpoint
+        // The host is a valid IP address, construct the endpoint directly
         std::vector<tcp::endpoint> endpoints;
         uint16_t port_num = static_cast<uint16_t>(std::stoi(m_port));
         if (addr.is_v4()) {
@@ -488,44 +596,105 @@ net::awaitable<std::vector<tcp::endpoint>> AsioHttpClient::_resolveDNS() {
     }
 
 #if HKU_OS_OSX || HKU_OS_IOS
-    // macOS 使用原生 getaddrinfo 方式（beast 解析存在已知问题会卡死）
-    struct addrinfo hints, *res = nullptr;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_ADDRCONFIG;  // 只查本机支持的地址类型
+    // The lookup runs in its own thread and the coroutine waits on the timeout timer only:
+    // Boost.ASIO cannot interrupt a getaddrinfo that is already in flight, so waiting for its
+    // resolver thread would also wait for the system resolver and the timeout would not be
+    // enforced, while calling getaddrinfo in place would block the io_context worker thread
+    struct ResolveState {
+        std::mutex m_lock;
+        std::vector<tcp::endpoint> endpoints;
+        int gai_ret = 0;  // The raw getaddrinfo return code, not an errno value
+        bool done = false;
+    };
 
-    int ret = getaddrinfo(m_host.c_str(), m_port.c_str(), &hints, &res);
-    HKU_CHECK(ret == 0, "DNS resolve failed! {}:{}", m_host, m_port);
+    auto state = std::make_shared<ResolveState>();
+    auto timer = std::make_shared<net::steady_timer>(*m_ctx);
+    timer->expires_after(m_timeout);
 
-    std::vector<tcp::endpoint> dns_endpoints;
-    for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
-        if (ai->ai_family == AF_INET) {
-            auto* sin = reinterpret_cast<sockaddr_in*>(ai->ai_addr);
-            net::ip::address_v4::bytes_type v4_bytes;
-            memcpy(&v4_bytes, &(sin->sin_addr.s_addr), sizeof(v4_bytes));
-            dns_endpoints.push_back(
-              tcp::endpoint(net::ip::make_address_v4(v4_bytes), ntohs(sin->sin_port)));
-        } else if (ai->ai_family == AF_INET6) {
-            auto* sin6 = reinterpret_cast<sockaddr_in6*>(ai->ai_addr);
-            net::ip::address_v6::bytes_type v6_bytes;
-            memcpy(&v6_bytes, &(sin6->sin6_addr.s6_addr), sizeof(v6_bytes));
-            dns_endpoints.push_back(
-              tcp::endpoint(net::ip::make_address_v6(v6_bytes), ntohs(sin6->sin6_port)));
+    // Only copies and shared pointers cross the thread boundary, and the first capture keeps the
+    // internal io_context itself alive: a detached lookup may outlive the client, so a later
+    // net::post on the timer executor would otherwise touch a destroyed context. With an external
+    // io_context its lifetime has to cover the lookup instead (see the class lifetime contract)
+    const std::string host = m_host;
+    const std::string port = m_port;
+    std::thread worker([ctx = m_own_ctx, state, timer, host, port]() {
+        struct addrinfo hints, *res = nullptr;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_flags = AI_ADDRCONFIG;  // Query the address types supported by this machine only
+
+        std::vector<tcp::endpoint> endpoints;
+        const int ret = getaddrinfo(host.c_str(), port.c_str(), &hints, &res);
+        if (ret != 0) {
+            state->gai_ret = ret;
+        } else {
+            for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+                if (ai->ai_family == AF_INET) {
+                    auto* sin = reinterpret_cast<sockaddr_in*>(ai->ai_addr);
+                    net::ip::address_v4::bytes_type v4_bytes;
+                    memcpy(&v4_bytes, &(sin->sin_addr.s_addr), sizeof(v4_bytes));
+                    endpoints.push_back(
+                      tcp::endpoint(net::ip::make_address_v4(v4_bytes), ntohs(sin->sin_port)));
+                } else if (ai->ai_family == AF_INET6) {
+                    auto* sin6 = reinterpret_cast<sockaddr_in6*>(ai->ai_addr);
+                    net::ip::address_v6::bytes_type v6_bytes;
+                    memcpy(&v6_bytes, &(sin6->sin6_addr.s6_addr), sizeof(v6_bytes));
+                    endpoints.push_back(
+                      tcp::endpoint(net::ip::make_address_v6(v6_bytes), ntohs(sin6->sin6_port)));
+                }
+            }
+            freeaddrinfo(res);
         }
+
+        {
+            std::lock_guard<std::mutex> guard(state->m_lock);
+            state->endpoints = std::move(endpoints);
+            state->done = true;
+        }
+        // Wake the waiting coroutine up before its timeout does
+        net::post(timer->get_executor(), [timer]() { timer->cancel(); });
+    });
+
+    // An instant answer (a hosts-file hit) may be ready before the wait is even armed
+    bool finished = false;
+    {
+        std::lock_guard<std::mutex> guard(state->m_lock);
+        finished = state->done;
     }
 
-    freeaddrinfo(res);
-    HKU_CHECK(!dns_endpoints.empty(), "DNS resolve failed! {}:{}", m_host, m_port);
-    co_return dns_endpoints;
+    if (!finished) {
+        net::error_code timer_ec;
+        co_await timer->async_wait(net::redirect_error(net::use_awaitable, timer_ec));
+        std::lock_guard<std::mutex> guard(state->m_lock);
+        finished = state->done;
+    }
+
+    if (!finished) {
+        // The timeout came first: let the lookup finish in the background. It owns copies and
+        // shared pointers only, so it cannot touch anything the coroutine has already released
+        worker.detach();
+        HKU_THROW_EXCEPTION(HttpTimeoutException, "DNS resolve timeout");
+    }
+
+    worker.join();
+    if (state->gai_ret != 0) {
+        // The EAI_* codes are no errno values, so gai_strerror is the only honest text for them
+        HKU_THROW("DNS resolve failed! {}:{}: {}", m_host, m_port, gai_strerror(state->gai_ret));
+    }
+    if (state->endpoints.empty()) {
+        HKU_THROW("No valid endpoints from DNS resolve");
+    }
+    co_return state->endpoints;
 
 #else
-    // 其他平台使用 Boost.ASIO 异步 DNS解析
-    // 注意：resolver 必须与 op 有相同的生命周期，避免悬空引用导致卡死
+    // The other platforms use the Boost.ASIO asynchronous DNS resolution
+    // Note: the resolver must have the same lifetime as op, avoiding a dangling reference and a
+    // hang
     auto resolver = std::make_shared<tcp::resolver>(*m_ctx);
 
     struct ResolveOp {
-        std::shared_ptr<tcp::resolver> resolver;  // 改为 shared_ptr，延长生命周期
+        std::shared_ptr<tcp::resolver> resolver;  // Changed to a shared_ptr to extend the lifetime
         std::string host, port;
         tcp::resolver::results_type endpoints;
         net::error_code ec;
@@ -546,24 +715,25 @@ net::awaitable<std::vector<tcp::endpoint>> AsioHttpClient::_resolveDNS() {
 
     auto op = std::make_shared<ResolveOp>(resolver, m_host, m_port);
 
-    // 启动定时器和 DNS解析
+    // Start the timer and the DNS resolution
     auto timer = net::steady_timer{*m_ctx};
     timer.expires_after(m_timeout);
 
     timer.async_wait([resolver, op](const net::error_code& ec) {
         if (!ec && !op->done) {
-            // 超时后取消 resolver 的所有异步操作
-            // 现在 resolver 是 shared_ptr，确保 lifetime 安全
+            // Cancel all the asynchronous operations of the resolver on a timeout
+            // The resolver is a shared_ptr now, ensuring the lifetime safety
             resolver->cancel();
         }
     });
 
     auto resolve_result = co_await op->run();
 
-    // 取消定时器
+    // Cancel the timer
     timer.cancel();
 
-    // 检查是否因超时而取消（operation_aborted 表示被 cancel() 取消）
+    // Check whether it was cancelled due to a timeout (operation_aborted means it was cancelled by
+    // cancel())
     if (resolve_result == boost::asio::error::operation_aborted) {
         HKU_THROW_EXCEPTION(HttpTimeoutException, "DNS resolve timeout");
     }
@@ -572,7 +742,7 @@ net::awaitable<std::vector<tcp::endpoint>> AsioHttpClient::_resolveDNS() {
         HKU_THROW("DNS resolve failed: {}", resolve_result.message());
     }
 
-    // 转换为 endpoint 列表
+    // Convert to the endpoint list
     std::vector<tcp::endpoint> dns_endpoints;
     for (const auto& ep : op->endpoints) {
         dns_endpoints.push_back(ep.endpoint());
@@ -586,11 +756,53 @@ net::awaitable<std::vector<tcp::endpoint>> AsioHttpClient::_resolveDNS() {
 #endif
 }
 
-// 从连接池获取已连接的连接（带 DNS 缓存）
+void AsioHttpClient::setMaxResponseSize(size_t bytes) {
+    m_max_response_size = (bytes == 0) ? DEFAULT_MAX_RESPONSE_SIZE : bytes;
+}
+
+void AsioHttpClient::setMaxHeaderSize(size_t bytes) {
+    m_max_header_size = (bytes == 0) ? DEFAULT_MAX_HEADER_SIZE : bytes;
+}
+
+namespace {
+/**
+ * @brief Closes the pooled connection unless the exchange finished cleanly and may be reused
+ *
+ * A timeout or a failed write/read leaves the socket with octets the peer still has to send (or
+ * that it never sent), and the resource pool hands the very same socket to the next request,
+ * which then parses those leftovers as its response. A peer ending the keep-alive with a
+ * Connection: close response is a second way to get a connection that cannot be reused, because
+ * the local socket still reports itself open. Keeping a connection therefore has to be marked
+ * explicitly, every other exit path closes it before the pool takes it back.
+ */
+class ConnectionGuard {
+public:
+    explicit ConnectionGuard(const std::shared_ptr<HttpConnection>& conn) : m_conn(conn) {}
+    ConnectionGuard(const ConnectionGuard&) = delete;
+    ConnectionGuard& operator=(const ConnectionGuard&) = delete;
+
+    ~ConnectionGuard() {
+        if (!m_clean) {
+            m_conn->close();
+        }
+    }
+
+    void markClean() {
+        m_clean = true;
+    }
+
+private:
+    std::shared_ptr<HttpConnection> m_conn;
+    bool m_clean{false};
+};
+}  // namespace
+
+// Get a connected connection from the connection pool (with the DNS cache)
 net::awaitable<std::pair<std::shared_ptr<HttpConnection>, bool>> AsioHttpClient::_getConnection() {
     HKU_ASSERT(m_connection_pool != nullptr);
 
-    // 从池中获取连接（资源池自动进行版本检查，旧版本连接会被自动淘汰）
+    // Get a connection from the pool (the resource pool checks the version automatically and the
+    // old version connections are eliminated)
     auto conn_result = co_await m_connection_pool->asyncGet();
     if (!conn_result) {
         HKU_THROW_EXCEPTION(HttpTimeoutException, "Failed to get connection from pool: {}",
@@ -599,14 +811,18 @@ net::awaitable<std::pair<std::shared_ptr<HttpConnection>, bool>> AsioHttpClient:
     auto conn_ptr = std::move(conn_result.value());
     HKU_CHECK(conn_ptr != nullptr, "Failed to get connection from pool");
 
+    // A failed DNS resolve, connect or handshake leaves the socket half used: it may not go back
+    // to the pool as if it were idle
+    ConnectionGuard guard(conn_ptr);
+
     bool is_new_connection = false;
 
-    // 检查连接是否需要重新创建
+    // Check whether the connection needs to be recreated
     if (!conn_ptr->is_open()) {
-        // 连接已关闭，需要重新创建
+        // The connection is closed and needs to be recreated
         is_new_connection = true;
 
-        // 如果 DNS 缓存为空或超时（5 分钟），重新解析 DNS
+        // Re-resolve the DNS when the DNS cache is empty or expired (5 minutes)
         auto now = std::chrono::steady_clock::now();
         bool need_dns_resolve = conn_ptr->endpoints.empty();
 
@@ -620,25 +836,34 @@ net::awaitable<std::pair<std::shared_ptr<HttpConnection>, bool>> AsioHttpClient:
         }
 
         if (need_dns_resolve) {
-            // DNS 解析（带超时）
+            // The DNS resolution (with a timeout)
             conn_ptr->endpoints = co_await _resolveDNS();
         }
 
-        // 关闭旧连接（如果有）
+        // Close the old connection (if there is one)
         conn_ptr->close();
 
         if (m_is_https) {
 #if HKU_ENABLE_HTTP_CLIENT_SSL
-            // 连接到服务器
+            // Connect to the server
             bool connected = false;
             for (const auto& endpoint : conn_ptr->endpoints) {
                 conn_ptr->ssl_socket.emplace(*m_ctx, m_ssl_ctx->ssl_ctx);
-                SSL_set_tlsext_host_name(conn_ptr->ssl_socket->native_handle(), m_host.c_str());
+                // RFC 6066: an address literal must not be sent as the server name, and no server
+                // could route on it either; the certificate verification matches the IP subject
+                // alternative names without needing the server name
+                if (!m_host_is_ip) {
+                    SSL_set_tlsext_host_name(conn_ptr->ssl_socket->native_handle(), m_host.c_str());
+                }
+
+                // Verify the server certificate chain and the hostname (anti-MITM)
+                conn_ptr->ssl_socket->set_verify_mode(ssl::verify_peer);
+                conn_ptr->ssl_socket->set_verify_callback(ssl::host_name_verification(m_host));
 
                 auto timer = net::steady_timer{*m_ctx};
                 timer.expires_after(m_timeout);
 
-                bool connect_completed = false;
+                auto connect_completed = std::make_shared<bool>(false);
                 net::error_code captured_ec;
 
                 struct ConnectOp {
@@ -659,32 +884,32 @@ net::awaitable<std::pair<std::shared_ptr<HttpConnection>, bool>> AsioHttpClient:
                     }
                 };
 
-                // 启动定时器和连接操作
-                timer.async_wait([&connect_completed, &conn_ptr](const net::error_code& ec) {
-                    if (!ec && !connect_completed && conn_ptr->ssl_socket.has_value()) {
+                // Start the timer and the connection operation
+                timer.async_wait([connect_completed, &conn_ptr](const net::error_code& ec) {
+                    if (!ec && !*connect_completed && conn_ptr->ssl_socket.has_value()) {
                         conn_ptr->ssl_socket->lowest_layer().cancel();
                     }
                 });
 
                 ConnectOp connect_op{&conn_ptr->ssl_socket->next_layer(), endpoint,
-                                     connect_completed, captured_ec};
+                                     *connect_completed, captured_ec};
                 co_await connect_op.run();
 
-                // 取消定时器
+                // Cancel the timer
                 timer.cancel();
 
-                // 检查是否因超时而取消
+                // Check whether it was cancelled due to a timeout
                 if (captured_ec == boost::asio::error::operation_aborted) {
-                    break;  // 超时后不再尝试其他 endpoint
+                    break;  // Do not try the other endpoints after a timeout
                 }
 
-                // 检查连接是否成功
+                // Check whether the connection succeeded
                 if (!captured_ec && conn_ptr->ssl_socket->lowest_layer().is_open()) {
                     connected = true;
                     break;
                 }
 
-                // 连接失败，重置并继续尝试下一个 endpoint
+                // The connection failed, reset it and continue trying the next endpoint
                 conn_ptr->ssl_socket.reset();
             }
 
@@ -693,15 +918,15 @@ net::awaitable<std::pair<std::shared_ptr<HttpConnection>, bool>> AsioHttpClient:
                                     m_port);
             }
 
-            // 设置 socket 选项
+            // Set the socket options
             conn_ptr->ssl_socket->lowest_layer().set_option(tcp::no_delay(true));
 
-            // SSL 握手（带超时）
+            // The SSL handshake (with a timeout)
             {
                 auto timer = net::steady_timer{*m_ctx};
                 timer.expires_after(m_timeout);
 
-                bool handshake_completed = false;
+                auto handshake_completed = std::make_shared<bool>(false);
                 net::error_code captured_ec;
 
                 struct SslHandshakeOp {
@@ -718,40 +943,43 @@ net::awaitable<std::pair<std::shared_ptr<HttpConnection>, bool>> AsioHttpClient:
                     }
                 };
 
-                // 启动定时器和握手操作
-                timer.async_wait([&handshake_completed, &conn_ptr](const net::error_code& ec) {
-                    if (!ec && !handshake_completed && conn_ptr->ssl_socket.has_value()) {
+                // Start the timer and the handshake operation
+                timer.async_wait([handshake_completed, &conn_ptr](const net::error_code& ec) {
+                    if (!ec && !*handshake_completed && conn_ptr->ssl_socket.has_value()) {
                         conn_ptr->ssl_socket->lowest_layer().cancel();
                     }
                 });
 
-                SslHandshakeOp handshake_op{&conn_ptr->ssl_socket.value(), handshake_completed,
+                SslHandshakeOp handshake_op{&conn_ptr->ssl_socket.value(), *handshake_completed,
                                             captured_ec};
                 co_await handshake_op.run();
 
-                // 取消定时器
+                // Cancel the timer
                 timer.cancel();
 
-                // 检查是否因超时而取消
+                // Check whether it was cancelled due to a timeout
                 if (captured_ec == boost::asio::error::operation_aborted) {
                     HKU_THROW_EXCEPTION(HttpTimeoutException, "SSL handshake timeout");
                 }
 
                 if (captured_ec) {
-                    HKU_THROW("SSL handshake failed: {}", captured_ec.message());
+                    HKU_THROW(
+                      "SSL handshake failed: {} (the server certificate may be untrusted "
+                      "or the hostname mismatched; a trusted CA can be set via setCaFile)",
+                      captured_ec.message());
                 }
             }
 #endif
         } else {
             bool connected = false;
             for (const auto& endpoint : conn_ptr->endpoints) {
-                // 普通 HTTP 连接（SSL 已启用但当前使用 HTTP）
+                // An ordinary HTTP connection (SSL is enabled but HTTP is used currently)
                 conn_ptr->socket.emplace(*m_ctx);
 
                 auto timer = net::steady_timer{*m_ctx};
                 timer.expires_after(m_timeout);
 
-                bool connect_completed = false;
+                auto connect_completed = std::make_shared<bool>(false);
                 net::error_code captured_ec;
 
                 struct ConnectOp {
@@ -772,34 +1000,34 @@ net::awaitable<std::pair<std::shared_ptr<HttpConnection>, bool>> AsioHttpClient:
                     }
                 };
 
-                // 启动定时器和连接操作
-                timer.async_wait([&connect_completed, &conn_ptr](const net::error_code& ec) {
-                    if (!ec && !connect_completed && conn_ptr->socket.has_value()) {
+                // Start the timer and the connection operation
+                timer.async_wait([connect_completed, &conn_ptr](const net::error_code& ec) {
+                    if (!ec && !*connect_completed && conn_ptr->socket.has_value()) {
                         conn_ptr->socket->cancel();
                     }
                 });
 
-                ConnectOp connect_op{&conn_ptr->socket.value(), endpoint, connect_completed,
+                ConnectOp connect_op{&conn_ptr->socket.value(), endpoint, *connect_completed,
                                      captured_ec};
                 co_await connect_op.run();
 
-                // 取消定时器
+                // Cancel the timer
                 timer.cancel();
 
-                // 检查是否因超时而取消
+                // Check whether it was cancelled due to a timeout
                 if (captured_ec == boost::asio::error::operation_aborted) {
-                    break;  // 超时后不再尝试其他 endpoint
+                    break;  // Do not try the other endpoints after a timeout
                 }
 
-                // 检查连接是否成功
+                // Check whether the connection succeeded
                 if (!captured_ec && conn_ptr->socket->is_open()) {
                     connected = true;
                     break;
                 }
 
-                // 连接失败但未超时，继续尝试下一个 endpoint
+                // The connection failed without a timeout, continue trying the next endpoint
 
-                // 关闭并重置 socket 以便下一次尝试
+                // Close and reset the socket for the next attempt
                 net::error_code ec;
                 conn_ptr->socket->close(ec);
                 conn_ptr->socket.reset();
@@ -810,25 +1038,28 @@ net::awaitable<std::pair<std::shared_ptr<HttpConnection>, bool>> AsioHttpClient:
                                     m_port);
             }
 
-            // 设置 socket 选项
+            // Set the socket options
             conn_ptr->socket->set_option(tcp::no_delay(true));
         }
 
-        // 更新最后使用时间
+        // Update the last used time
         conn_ptr->last_used_time = std::chrono::steady_clock::now();
     }
-    // 复用已有连接，无需额外操作，连接池会自动管理其生命周期
-    // 只需在每次使用后更新 last_used_time 即可
+    // The existing connection is reused with no extra operation; the connection pool manages its
+    // lifetime automatically It is enough to update last_used_time after every use
     conn_ptr->last_used_time = std::chrono::steady_clock::now();
 
-    // 复用的连接不需要在此处再次设置 socket 选项，
-    // 因为它们在 _connect 或之前的连接建立时已经设置过。
-    // 如果连接被复用，其 socket 状态是保持的。
+    // A reused connection does not need the socket options to be set here again,
+    // because they were already set in _connect or when the connection was established before.
+    // When a connection is reused its socket state is preserved.
+
+    // The connection is connected and ready to be used by the caller
+    guard.markClean();
 
     co_return std::make_pair(conn_ptr, is_new_connection);
 }
 
-// 创建 socket（使用 variant 存储普通 socket 或 SSL socket）
+// Create the socket (a variant is used to store an ordinary socket or an SSL socket)
 struct AsioHttpClient::SocketVariant {
     std::optional<tcp::socket> plain;
 #if HKU_ENABLE_HTTP_CLIENT_SSL
@@ -872,7 +1103,7 @@ struct AsioHttpClient::SocketVariant {
 
 net::awaitable<void> AsioHttpClient::_connect(SocketVariant& socket_variant,
                                               const std::vector<tcp::endpoint>& dns_endpoints) {
-    // 连接（带超时）
+    // Connect (with a timeout)
     net::error_code connect_ec;
     bool connected = false;
 
@@ -880,14 +1111,14 @@ net::awaitable<void> AsioHttpClient::_connect(SocketVariant& socket_variant,
         socket_variant.close(connect_ec);
 
         {
-            // 先创建普通 socket
+            // Create an ordinary socket first
             socket_variant.plain.emplace(*m_ctx);
 
-            // 使用事件驱动异步连接配合超时
+            // Use the event driven asynchronous connection with a timeout
             auto timer = net::steady_timer{*m_ctx};
             timer.expires_after(m_timeout);
 
-            bool connect_completed = false;
+            auto connect_completed = std::make_shared<bool>(false);
             net::error_code captured_ec;
 
             struct ConnectOp {
@@ -908,34 +1139,34 @@ net::awaitable<void> AsioHttpClient::_connect(SocketVariant& socket_variant,
                 }
             };
 
-            // 启动定时器和连接操作
-            timer.async_wait([&connect_completed, &socket_variant](const net::error_code& ec) {
-                if (!ec && !connect_completed && socket_variant.plain.has_value()) {
+            // Start the timer and the connection operation
+            timer.async_wait([connect_completed, &socket_variant](const net::error_code& ec) {
+                if (!ec && !*connect_completed && socket_variant.plain.has_value()) {
                     socket_variant.plain->cancel();
                 }
             });
 
-            ConnectOp connect_op{&socket_variant.plain.value(), endpoint, connect_completed,
+            ConnectOp connect_op{&socket_variant.plain.value(), endpoint, *connect_completed,
                                  captured_ec};
 
-            // 等待连接完成
+            // Wait for the connection to complete
             co_await connect_op.run();
 
-            // 取消定时器
+            // Cancel the timer
             timer.cancel();
 
-            // 检查是否因超时而取消
+            // Check whether it was cancelled due to a timeout
             if (captured_ec == boost::asio::error::operation_aborted) {
-                continue;  // 尝试下一个端点
+                continue;  // Try the next endpoint
             }
 
-            // 检查连接是否成功
+            // Check whether the connection succeeded
             if (!captured_ec && socket_variant.plain->is_open()) {
                 connected = true;
                 break;
             }
 
-            // 连接失败，关闭 socket
+            // The connection failed, close the socket
             socket_variant.close(connect_ec);
         }
     }
@@ -944,24 +1175,30 @@ net::awaitable<void> AsioHttpClient::_connect(SocketVariant& socket_variant,
         HKU_THROW_EXCEPTION(HttpTimeoutException, "Connect timeout to {}:{}", m_host, m_port);
     }
 
-    // 设置 socket 选项
+    // Set the socket options
     socket_variant.socket().set_option(tcp::no_delay(true));
 
 #if HKU_ENABLE_HTTP_CLIENT_SSL
-    // 如果是 HTTPS，进行 SSL 握手（带超时）
+    // For HTTPS perform the SSL handshake (with a timeout)
     if (m_is_https) {
-        // 移动到 SSL socket
+        // Move to the SSL socket
         socket_variant.ssl.emplace(std::move(*socket_variant.plain), m_ssl_ctx->ssl_ctx);
         socket_variant.plain.reset();
 
-        // 设置 SNI（Server Name Indication）
-        SSL_set_tlsext_host_name(socket_variant.ssl->native_handle(), m_host.c_str());
+        // Set the SNI (Server Name Indication), which an address literal must not use
+        if (!m_host_is_ip) {
+            SSL_set_tlsext_host_name(socket_variant.ssl->native_handle(), m_host.c_str());
+        }
 
-        // 使用事件驱动的 SSL 握手配合超时
+        // Verify the server certificate chain and the hostname (anti-MITM)
+        socket_variant.ssl->set_verify_mode(ssl::verify_peer);
+        socket_variant.ssl->set_verify_callback(ssl::host_name_verification(m_host));
+
+        // Use the event driven SSL handshake with a timeout
         auto timer = net::steady_timer{*m_ctx};
         timer.expires_after(m_timeout);
 
-        bool handshake_completed = false;
+        auto handshake_completed = std::make_shared<bool>(false);
         net::error_code captured_ec;
 
         struct SslHandshakeOp {
@@ -978,26 +1215,29 @@ net::awaitable<void> AsioHttpClient::_connect(SocketVariant& socket_variant,
             }
         };
 
-        // 启动定时器和握手操作
-        timer.async_wait([&handshake_completed, &socket_variant](const net::error_code& ec) {
-            if (!ec && !handshake_completed && socket_variant.ssl.has_value()) {
+        // Start the timer and the handshake operation
+        timer.async_wait([handshake_completed, &socket_variant](const net::error_code& ec) {
+            if (!ec && !*handshake_completed && socket_variant.ssl.has_value()) {
                 socket_variant.ssl->lowest_layer().cancel();
             }
         });
 
-        SslHandshakeOp handshake_op{&socket_variant.ssl.value(), handshake_completed, captured_ec};
+        SslHandshakeOp handshake_op{&socket_variant.ssl.value(), *handshake_completed, captured_ec};
         co_await handshake_op.run();
 
-        // 取消定时器
+        // Cancel the timer
         timer.cancel();
 
-        // 检查是否因超时而取消
+        // Check whether it was cancelled due to a timeout
         if (captured_ec == boost::asio::error::operation_aborted) {
             HKU_THROW_EXCEPTION(HttpTimeoutException, "SSL handshake timeout");
         }
 
         if (captured_ec) {
-            HKU_THROW("SSL handshake failed: {}", captured_ec.message());
+            HKU_THROW(
+              "SSL handshake failed: {} (the server certificate may be untrusted or the "
+              "hostname mismatched; a trusted CA can be set via setCaFile)",
+              captured_ec.message());
         }
     }
 #endif
@@ -1010,7 +1250,11 @@ net::awaitable<AsioHttpResponse> AsioHttpClient::async_request(
   const HttpHeaders& headers, const char* body, size_t body_len, const std::string& content_type) {
     HKU_CHECK(m_is_valid_url, "Invalid url: {}", m_url);
 
-    // 确保 io_context 已设置（默认构造函数可能没有初始化）
+    // Reject CRLF in headers before any connection is opened
+    validateHttpHeaders(m_default_headers);
+    validateHttpHeaders(headers);
+
+    // Make sure the io_context is set (the default constructor may not initialize it)
     if (m_ctx == nullptr) {
         auto exec = co_await net::this_coro::executor;
         m_ctx = &static_cast<net::io_context&>(exec.context());
@@ -1021,38 +1265,43 @@ net::awaitable<AsioHttpResponse> AsioHttpClient::async_request(
               "HTTPS is not supported. Please enable SSL support with --http_client_ssl=y");
 #endif
 
-    // 构建完整的 URI
+    // Build the complete URI
     std::string uri = _buildURI(path, params);
 
     AsioHttpResponse response;
 
     try {
-        // 从连接池获取连接（自动处理 DNS 缓存和连接复用）
+        // Get a connection from the connection pool (the DNS cache and the connection reuse are
+        // handled automatically)
         auto [conn, is_new] = co_await _getConnection();
         HKU_CHECK(conn != nullptr, "Failed to get connection from pool");
 
-        // 创建 HTTP 请求
+        // The connection goes back to the pool only when the whole exchange is complete and the
+        // peer allows keep-alive, otherwise it is closed here
+        ConnectionGuard guard(conn);
+
+        // Create the HTTP request
         http::request<http::string_body> req;
         req.method(http::string_to_verb(method));
         req.target(uri);
         req.version(11);  // HTTP/1.1
 
-        // 添加默认头
+        // Add the default headers
         for (const auto& [key, value] : m_default_headers) {
             req.set(key, value);
         }
 
-        // 添加额外头
+        // Add the extra headers
         for (const auto& [key, value] : headers) {
             req.set(key, value);
         }
 
-        // 添加 User-Agent
+        // Add the User-Agent
         req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
-        req.set(http::field::host, m_host);
-        // 注意：不使用 "close"，允许连接复用
+        req.set(http::field::host, m_host_header);
+        // Note: "close" is not used, allowing the connection reuse
 
-        // 添加请求体
+        // Add the request body
         if (body != nullptr && body_len > 0) {
 #if HKU_ENABLE_HTTP_CLIENT_ZIP
             req.set(http::field::content_type, content_type);
@@ -1073,12 +1322,12 @@ net::awaitable<AsioHttpResponse> AsioHttpClient::async_request(
 #endif
         }
 
-        // 发送请求（带超时）
+        // Send the request (with a timeout)
         {
             auto timer = net::steady_timer{*m_ctx};
             timer.expires_after(m_timeout);
 
-            bool write_completed = false;
+            auto write_completed = std::make_shared<bool>(false);
 
 #if HKU_ENABLE_HTTP_CLIENT_SSL
             if (conn->ssl_socket) {
@@ -1095,20 +1344,21 @@ net::awaitable<AsioHttpResponse> AsioHttpClient::async_request(
                     }
                 };
 
-                // 启动定时器和写操作
-                timer.async_wait([&write_completed, &conn](const net::error_code& ec) {
-                    if (!ec && !write_completed && conn->is_open()) {
+                // Start the timer and the write operation
+                timer.async_wait([write_completed, &conn](const net::error_code& ec) {
+                    if (!ec && !*write_completed && conn->is_open()) {
                         conn->lowest_layer().cancel();
                     }
                 });
 
-                auto write_op = WriteOp{*conn->ssl_socket, req, write_completed};
+                auto write_op = WriteOp{*conn->ssl_socket, req, *write_completed};
                 auto [write_ec, bytes_transferred] = co_await write_op.run();
 
-                // 取消定时器
+                // Cancel the timer
                 timer.cancel();
 
-                // 检查是否因超时而取消（operation_aborted 表示被 cancel() 取消）
+                // Check whether it was cancelled due to a timeout (operation_aborted means it was
+                // cancelled by cancel())
                 if (write_ec == boost::asio::error::operation_aborted) {
                     HKU_THROW_EXCEPTION(HttpTimeoutException, "HTTP write timeout");
                 }
@@ -1131,20 +1381,21 @@ net::awaitable<AsioHttpResponse> AsioHttpClient::async_request(
                     }
                 };
 
-                // 启动定时器和写操作
-                timer.async_wait([&write_completed, &conn](const net::error_code& ec) {
-                    if (!ec && !write_completed) {
+                // Start the timer and the write operation
+                timer.async_wait([write_completed, &conn](const net::error_code& ec) {
+                    if (!ec && !*write_completed) {
                         conn->lowest_layer().cancel();
                     }
                 });
 
-                auto write_op = WriteOp{conn->socket.value(), req, write_completed};
+                auto write_op = WriteOp{conn->socket.value(), req, *write_completed};
                 auto [write_ec, bytes_transferred] = co_await write_op.run();
 
-                // 取消定时器
+                // Cancel the timer
                 timer.cancel();
 
-                // 检查是否因超时而取消（operation_aborted 表示被 cancel() 取消）
+                // Check whether it was cancelled due to a timeout (operation_aborted means it was
+                // cancelled by cancel())
                 if (write_ec == boost::asio::error::operation_aborted) {
                     HKU_THROW_EXCEPTION(HttpTimeoutException, "HTTP write timeout");
                 }
@@ -1157,15 +1408,20 @@ net::awaitable<AsioHttpResponse> AsioHttpClient::async_request(
 #endif
         }
 
-        // 读取响应（带超时）
+        // Read the response (with a timeout)
         beast::flat_buffer buffer;
-        http::response<http::string_body> res;
+
+        // The body is accumulated in memory here, so both the declared Content-Length and the
+        // bytes actually read are bounded by the configured limits
+        http::response_parser<http::string_body> parser;
+        parser.body_limit(m_max_response_size);
+        parser.header_limit(static_cast<std::uint32_t>(m_max_header_size));
 
         {
             auto timer = net::steady_timer{*m_ctx};
             timer.expires_after(m_timeout);
 
-            bool read_completed = false;
+            auto read_completed = std::make_shared<bool>(false);
             net::error_code captured_ec;
 
 #if HKU_ENABLE_HTTP_CLIENT_SSL
@@ -1173,33 +1429,49 @@ net::awaitable<AsioHttpResponse> AsioHttpClient::async_request(
                 struct ReadOp {
                     ssl::stream<tcp::socket>& stream;
                     beast::flat_buffer& buffer;
-                    http::response<http::string_body>& response;
+                    http::response_parser<http::string_body>& parser;
                     bool& completed_flag;
                     net::error_code& captured_ec;
 
                     net::awaitable<std::pair<net::error_code, std::size_t>> run() {
                         auto [ec, bytes] = co_await http::async_read(
-                          stream, buffer, response, net::as_tuple(net::use_awaitable));
+                          stream, buffer, parser, net::as_tuple(net::use_awaitable));
                         completed_flag = true;
                         captured_ec = ec;
                         co_return std::make_pair(ec, bytes);
                     }
                 };
 
-                // 启动定时器和读操作
-                timer.async_wait([&read_completed, &conn](const net::error_code& ec) {
-                    if (!ec && !read_completed && conn->is_open()) {
+                // Start the timer and the read operation
+                timer.async_wait([read_completed, &conn](const net::error_code& ec) {
+                    if (!ec && !*read_completed && conn->is_open()) {
                         conn->lowest_layer().cancel();
                     }
                 });
 
-                auto read_op = ReadOp{*conn->ssl_socket, buffer, res, read_completed, captured_ec};
+                auto read_op =
+                  ReadOp{*conn->ssl_socket, buffer, parser, *read_completed, captured_ec};
                 co_await read_op.run();
 
-                // 取消定时器
+                // Cancel the timer
                 timer.cancel();
 
-                // 检查是否因超时而取消（operation_aborted 表示被 cancel() 取消）
+                // A response over the limit is abandoned by the parser while the peer still has
+                // bytes to send, so the connection cannot be reused (the guard closes it)
+                if (captured_ec == http::error::body_limit ||
+                    captured_ec == http::error::header_limit) {
+                    if (captured_ec == http::error::body_limit) {
+                        HKU_THROW_EXCEPTION(HttpResponseTooLargeException,
+                                            "HTTP response body exceeds the limit ({} bytes)",
+                                            m_max_response_size);
+                    }
+                    HKU_THROW_EXCEPTION(HttpResponseTooLargeException,
+                                        "HTTP response header exceeds the limit ({} bytes)",
+                                        m_max_header_size);
+                }
+
+                // Check whether it was cancelled due to a timeout (operation_aborted means it was
+                // cancelled by cancel())
                 if (captured_ec == boost::asio::error::operation_aborted) {
                     HKU_THROW_EXCEPTION(HttpTimeoutException, "HTTP read timeout");
                 }
@@ -1212,34 +1484,49 @@ net::awaitable<AsioHttpResponse> AsioHttpClient::async_request(
                 struct ReadOp {
                     tcp::socket& sock;
                     beast::flat_buffer& buffer;
-                    http::response<http::string_body>& response;
+                    http::response_parser<http::string_body>& parser;
                     bool& completed_flag;
                     net::error_code& captured_ec;
 
                     net::awaitable<std::pair<net::error_code, std::size_t>> run() {
                         auto [ec, bytes] = co_await http::async_read(
-                          sock, buffer, response, net::as_tuple(net::use_awaitable));
+                          sock, buffer, parser, net::as_tuple(net::use_awaitable));
                         completed_flag = true;
                         captured_ec = ec;
                         co_return std::make_pair(ec, bytes);
                     }
                 };
 
-                // 启动定时器和读操作
-                timer.async_wait([&read_completed, &conn](const net::error_code& ec) {
-                    if (!ec && !read_completed) {
+                // Start the timer and the read operation
+                timer.async_wait([read_completed, &conn](const net::error_code& ec) {
+                    if (!ec && !*read_completed) {
                         conn->lowest_layer().cancel();
                     }
                 });
 
                 auto read_op =
-                  ReadOp{conn->socket.value(), buffer, res, read_completed, captured_ec};
+                  ReadOp{conn->socket.value(), buffer, parser, *read_completed, captured_ec};
                 co_await read_op.run();
 
-                // 取消定时器
+                // Cancel the timer
                 timer.cancel();
 
-                // 检查是否因超时而取消（operation_aborted 表示被 cancel() 取消）
+                // A response over the limit is abandoned by the parser while the peer still has
+                // bytes to send, so the connection cannot be reused (the guard closes it)
+                if (captured_ec == http::error::body_limit ||
+                    captured_ec == http::error::header_limit) {
+                    if (captured_ec == http::error::body_limit) {
+                        HKU_THROW_EXCEPTION(HttpResponseTooLargeException,
+                                            "HTTP response body exceeds the limit ({} bytes)",
+                                            m_max_response_size);
+                    }
+                    HKU_THROW_EXCEPTION(HttpResponseTooLargeException,
+                                        "HTTP response header exceeds the limit ({} bytes)",
+                                        m_max_header_size);
+                }
+
+                // Check whether it was cancelled due to a timeout (operation_aborted means it was
+                // cancelled by cancel())
                 if (captured_ec == boost::asio::error::operation_aborted) {
                     HKU_THROW_EXCEPTION(HttpTimeoutException, "HTTP read timeout");
                 }
@@ -1252,15 +1539,40 @@ net::awaitable<AsioHttpResponse> AsioHttpClient::async_request(
 #endif
         }
 
-        // 填充响应对象
+        // Fill the response object
+        http::response<http::string_body> res = parser.release();
         response.m_status = res.result_int();
         response.m_reason = std::string(res.reason());
 
 #if HKU_ENABLE_HTTP_CLIENT_ZIP
-        // 正确获取 Content-Encoding 头部
+        // Get the Content-Encoding header correctly
         auto encoding_it = res.find("Content-Encoding");
         if (encoding_it != res.end() && encoding_it->value() == "gzip") {
-            response.m_body = gzip::decompress(res.body().data(), res.body().size());
+            // A compressed body can expand far beyond its own size, so the size of the received
+            // bytes is not a bound by itself: the decompression is limited by the same value
+            if (res.body().size() * 2 > m_max_response_size) {
+                HKU_THROW_EXCEPTION(
+                  HttpResponseTooLargeException,
+                  "HTTP gzip response may exceed the decompressed limit ({} bytes)",
+                  m_max_response_size);
+            }
+            gzip::Decompressor decomp(m_max_response_size);
+            std::string output;
+            try {
+                decomp.decompress(output, res.body().data(), res.body().size());
+            } catch (const std::runtime_error& e) {
+                // gzip-hpp reports both the size cap and the corrupt data failures as
+                // std::runtime_error; the "more memory than intended" messages are the size cap,
+                // which is part of the HttpResponseTooLargeException contract
+                if (std::strstr(e.what(), "more memory") != nullptr) {
+                    HKU_THROW_EXCEPTION(
+                      HttpResponseTooLargeException,
+                      "HTTP gzip response exceeds the decompressed limit ({} bytes)",
+                      m_max_response_size);
+                }
+                HKU_THROW("HTTP gzip decompress failed: {}", e.what());
+            }
+            response.m_body = std::move(output);
         } else {
             response.m_body = std::move(res.body());
         }
@@ -1272,7 +1584,11 @@ net::awaitable<AsioHttpResponse> AsioHttpClient::async_request(
             response.m_headers.emplace(std::string(it->name_string()), std::string(it->value()));
         }
 
-        // 不关闭连接，让连接池自动管理
+        // Reuse the connection only when the peer allows it: it may have answered with
+        // Connection: close, in which case the socket is ended on the peer side already
+        if (res.keep_alive()) {
+            guard.markClean();
+        }
 
     } catch (const net::system_error&) {
         // HKU_DEBUG("HTTP request system error! {}", e.what());
@@ -1292,7 +1608,11 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
     HKU_CHECK(m_is_valid_url, "Invalid url: {}", m_url);
     HKU_CHECK(chunk_callback != nullptr, "Chunk callback must not be null");
 
-    // 确保 io_context 已设置（默认构造函数可能没有初始化）
+    // Reject CRLF in headers before any connection is opened
+    validateHttpHeaders(m_default_headers);
+    validateHttpHeaders(headers);
+
+    // Make sure the io_context is set (the default constructor may not initialize it)
     if (m_ctx == nullptr) {
         auto exec = co_await net::this_coro::executor;
         m_ctx = &static_cast<net::io_context&>(exec.context());
@@ -1303,17 +1623,22 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
               "HTTPS is not supported. Please enable SSL support with --http_client_ssl=y");
 #endif
 
-    // 构建完整的 URI
+    // Build the complete URI
     std::string uri = _buildURI(path, params);
 
     AsioHttpStreamResponse response;
 
     try {
-        // 从连接池获取连接（自动处理 DNS 缓存和连接复用）
+        // Get a connection from the connection pool (the DNS cache and the connection reuse are
+        // handled automatically)
         auto [conn, is_new] = co_await _getConnection();
         HKU_CHECK(conn != nullptr, "Failed to get connection from pool");
 
-        // 创建 HTTP 请求
+        // The connection goes back to the pool only when the whole exchange is complete and the
+        // peer allows keep-alive, otherwise it is closed here
+        ConnectionGuard guard(conn);
+
+        // Create the HTTP request
         http::request<http::string_body> req;
         req.method(http::string_to_verb(method));
         req.target(uri);
@@ -1328,13 +1653,13 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
         }
 
         req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
-        req.set(http::field::host, m_host);
-        // 注意：不使用 "close"，允许连接复用
+        req.set(http::field::host, m_host_header);
+        // Note: "close" is not used, allowing the connection reuse
 
         if (body != nullptr && body_len > 0) {
 #if HKU_ENABLE_HTTP_CLIENT_ZIP
             req.set(http::field::content_type, content_type);
-            auto content_encoding = req["Content-Type"];
+            auto content_encoding = req["Content-Encoding"];
             if (content_encoding == "gzip") {
                 gzip::Compressor comp(Z_DEFAULT_COMPRESSION);
                 std::string output;
@@ -1351,12 +1676,12 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
 #endif
         }
 
-        // 发送请求 - 使用事件驱动方式
+        // Send the request - use the event driven way
         {
             auto timer = net::steady_timer{*m_ctx};
             timer.expires_after(m_timeout);
 
-            bool write_completed = false;
+            auto write_completed = std::make_shared<bool>(false);
 
 #if HKU_ENABLE_HTTP_CLIENT_SSL
             if (conn->ssl_socket) {
@@ -1373,11 +1698,22 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
                     }
                 };
 
-                auto write_op = WriteOp{*conn->ssl_socket, req, write_completed};
+                // Start the timer and the write operation
+                timer.async_wait([write_completed, &conn](const net::error_code& ec) {
+                    if (!ec && !*write_completed && conn->is_open()) {
+                        conn->lowest_layer().cancel();
+                    }
+                });
+
+                auto write_op = WriteOp{*conn->ssl_socket, req, *write_completed};
                 auto [write_ec, bytes_transferred] = co_await write_op.run();
 
-                // 检查是否因超时而取消
-                if (!write_completed && write_ec == boost::asio::error::operation_aborted) {
+                // Cancel the timer
+                timer.cancel();
+
+                // Check whether it was cancelled due to a timeout (operation_aborted means it was
+                // cancelled by cancel())
+                if (write_ec == boost::asio::error::operation_aborted) {
                     HKU_THROW_EXCEPTION(HttpTimeoutException, "HTTP write timeout");
                 }
 
@@ -1399,11 +1735,22 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
                     }
                 };
 
-                auto write_op = WriteOp{conn->socket.value(), req, write_completed};
+                // Start the timer and the write operation
+                timer.async_wait([write_completed, &conn](const net::error_code& ec) {
+                    if (!ec && !*write_completed) {
+                        conn->lowest_layer().cancel();
+                    }
+                });
+
+                auto write_op = WriteOp{conn->socket.value(), req, *write_completed};
                 auto [write_ec, bytes_transferred] = co_await write_op.run();
 
-                // 检查是否因超时而取消
-                if (!write_completed && write_ec == boost::asio::error::operation_aborted) {
+                // Cancel the timer
+                timer.cancel();
+
+                // Check whether it was cancelled due to a timeout (operation_aborted means it was
+                // cancelled by cancel())
+                if (write_ec == boost::asio::error::operation_aborted) {
                     HKU_THROW_EXCEPTION(HttpTimeoutException, "HTTP write timeout");
                 }
 
@@ -1415,11 +1762,18 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
 #endif
         }
 
-        // 流式读取响应 - 使用 buffer_body
+        // Read the response in a streaming way - use buffer_body
         beast::flat_buffer buffer;
         http::response_parser<http::buffer_body> parser;
 
-        // 设置缓冲区大小（8KB 块）
+        // The header is bounded, but the body deliberately is not: every chunk is handed over to
+        // the callback and the same fixed buffer is reused, so the total size does not bound the
+        // memory. Without clearing the beast default body limit a stream longer than that default
+        // would be cut off
+        parser.header_limit(static_cast<std::uint32_t>(m_max_header_size));
+        parser.body_limit(boost::none);
+
+        // Set the buffer size (8KB chunks)
         constexpr size_t BUFFER_SIZE = 8192;
         std::vector<char> chunk_buffer(BUFFER_SIZE);
 
@@ -1427,15 +1781,17 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
         parser.get().body().size = BUFFER_SIZE;
 
         {
-            // 读取响应头 - 使用事件驱动方式
+            // Read the response header - use the event driven way
             {
-                // 设置超时定时器
+                // Set the timeout timer
                 auto timer = net::steady_timer{*m_ctx};
                 timer.expires_after(m_timeout);
 
-                // 启动定时器，超时则取消底层 socket
-                timer.async_wait([&conn](const net::error_code& ec) {
-                    if (!ec) {
+                // Start the timer; the flag is set when the read finishes, so a queued handler
+                // never extends the connection lifetime and cannot pin it in the pool
+                auto read_completed = std::make_shared<bool>(false);
+                timer.async_wait([read_completed, &conn](const net::error_code& ec) {
+                    if (!ec && !*read_completed && conn->is_open()) {
                         conn->lowest_layer().cancel();
                     }
                 });
@@ -1456,9 +1812,18 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
 
                     auto read_header_op = ReadHeaderOp{*conn->ssl_socket, buffer, parser};
                     auto [read_ec, bytes_transferred] = co_await read_header_op.run();
+                    *read_completed = true;
 
-                    // 取消定时器
+                    // Cancel the timer
                     timer.cancel();
+
+                    // A header over the limit leaves the peer with bytes still to send, so the
+                    // connection cannot be reused (the guard closes it)
+                    if (read_ec == http::error::header_limit) {
+                        HKU_THROW_EXCEPTION(HttpResponseTooLargeException,
+                                            "HTTP response header exceeds the limit ({} bytes)",
+                                            m_max_header_size);
+                    }
 
                     if (read_ec && read_ec != http::error::end_of_stream) {
                         HKU_THROW("HTTP read header failed: {}", read_ec.message());
@@ -1479,9 +1844,18 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
 
                     auto read_header_op = ReadHeaderOp{conn->socket.value(), buffer, parser};
                     auto [read_ec, bytes_transferred] = co_await read_header_op.run();
+                    *read_completed = true;
 
-                    // 取消定时器
+                    // Cancel the timer
                     timer.cancel();
+
+                    // A header over the limit leaves the peer with bytes still to send, so the
+                    // connection cannot be reused (the guard closes it)
+                    if (read_ec == http::error::header_limit) {
+                        HKU_THROW_EXCEPTION(HttpResponseTooLargeException,
+                                            "HTTP response header exceeds the limit ({} bytes)",
+                                            m_max_header_size);
+                    }
 
                     if (read_ec && read_ec != http::error::end_of_stream) {
                         HKU_THROW("HTTP read header failed: {}", read_ec.message());
@@ -1491,7 +1865,7 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
 #endif
             }
 
-            // 填充响应对象
+            // Fill the response object
             response.m_status = static_cast<int>(parser.get().result_int());
             response.m_reason = std::string(parser.get().reason());
             for (auto it = parser.get().begin(); it != parser.get().end(); ++it) {
@@ -1499,18 +1873,19 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
                                            std::string(it->value()));
             }
 
-            // 循环读取响应体数据块
+            // Read the response body data chunks in a loop
             while (!parser.is_done()) {
-                std::size_t bytes_transferred = 0;
                 net::error_code read_ec;
 
-                // 设置超时定时器（每次读取块都重置）
+                // Set the timeout timer (reset on every chunk read)
                 auto timer = net::steady_timer{*m_ctx};
                 timer.expires_after(m_timeout);
 
-                // 启动定时器，超时则取消底层 socket
-                timer.async_wait([&conn](const net::error_code& ec) {
-                    if (!ec) {
+                // Start the timer; the flag is set when the read finishes, so a queued handler
+                // never extends the connection lifetime and cannot pin it in the pool
+                auto read_completed = std::make_shared<bool>(false);
+                timer.async_wait([read_completed, &conn](const net::error_code& ec) {
+                    if (!ec && !*read_completed && conn->is_open()) {
                         conn->lowest_layer().cancel();
                     }
                 });
@@ -1522,19 +1897,20 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
                         beast::flat_buffer& buffer;
                         http::response_parser<http::buffer_body>& parser;
 
-                        net::awaitable<std::pair<net::error_code, std::size_t>> run() {
+                        net::awaitable<net::error_code> run() {
                             auto [ec, bytes] = co_await http::async_read(
                               stream, buffer, parser, net::as_tuple(net::use_awaitable));
-                            co_return std::make_pair(ec, bytes);
+                            (void)bytes;
+                            co_return ec;
                         }
                     };
 
                     auto read_op = ReadOp{*conn->ssl_socket, buffer, parser};
-                    auto [ec, bytes] = co_await read_op.run();
+                    auto ec = co_await read_op.run();
+                    *read_completed = true;
                     read_ec = ec;
-                    bytes_transferred = bytes;
 
-                    // 取消定时器
+                    // Cancel the timer
                     timer.cancel();
 
                     if (read_ec && read_ec != http::error::need_buffer &&
@@ -1548,19 +1924,20 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
                         beast::flat_buffer& buffer;
                         http::response_parser<http::buffer_body>& parser;
 
-                        net::awaitable<std::pair<net::error_code, std::size_t>> run() {
+                        net::awaitable<net::error_code> run() {
                             auto [ec, bytes] = co_await http::async_read(
                               sock, buffer, parser, net::as_tuple(net::use_awaitable));
-                            co_return std::make_pair(ec, bytes);
+                            (void)bytes;
+                            co_return ec;
                         }
                     };
 
                     auto read_op = ReadOp{conn->socket.value(), buffer, parser};
-                    auto [ec, bytes] = co_await read_op.run();
+                    auto ec = co_await read_op.run();
+                    *read_completed = true;
                     read_ec = ec;
-                    bytes_transferred = bytes;
 
-                    // 取消定时器
+                    // Cancel the timer
                     timer.cancel();
 
                     if (read_ec && read_ec != http::error::need_buffer &&
@@ -1571,19 +1948,37 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
                 }
 #endif
 
-                // 调用回调处理数据块
-                if (bytes_transferred > 0) {
-                    response.m_total_bytes_read += bytes_transferred;
-                    chunk_callback(chunk_buffer.data(), bytes_transferred);
+                // Get the payload length stored into chunk_buffer: while parsing, buffer_body
+                // advances data and decrements size, so the written bytes are the size decreased.
+                // Do not use the bytes transferred of the read operation as the chunk length - it
+                // counts the wire bytes (including the header leftovers and the chunked encoding
+                // framing), which is not the payload size
+                const size_t chunk_size = BUFFER_SIZE - parser.get().body().size;
+
+                // A peer closing the connection with an incomplete body must not spin in this loop
+                if (read_ec == http::error::end_of_stream && !parser.is_done()) {
+                    HKU_THROW(
+                      "HTTP stream read failed: the connection closed before the response body was "
+                      "complete, {} bytes read",
+                      response.totalBytesRead());
                 }
 
-                // 重置缓冲区供下一次读取使用
+                // Call the callback to process the data chunk
+                if (chunk_size > 0) {
+                    response.m_total_bytes_read += chunk_size;
+                    chunk_callback(chunk_buffer.data(), chunk_size);
+                }
+
+                // Reset the buffer for the next read
                 parser.get().body().data = chunk_buffer.data();
                 parser.get().body().size = BUFFER_SIZE;
             }
         }
 
-        // 不关闭连接，让连接池自动管理（连接会被归还到池中）
+        // Reuse the connection only when the peer allows it, the same way as in async_request
+        if (parser.get().keep_alive()) {
+            guard.markClean();
+        }
 
     } catch (const net::system_error&) {
         // HKU_DEBUG("HTTP stream request system error! {}", e.what());
@@ -1597,28 +1992,29 @@ net::awaitable<AsioHttpStreamResponse> AsioHttpClient::async_requestStream(
 }
 
 // ============================================================================
-// 同步方法实现 - 阻塞直到异步操作完成
+// The synchronous method implementation - it blocks until the asynchronous operation completes
 // ============================================================================
 
 AsioHttpResponse AsioHttpClient::request(const std::string& method, const std::string& path,
                                          const HttpParams& params, const HttpHeaders& headers,
                                          const char* body, size_t body_len,
                                          const std::string& content_type) {
-    // 提前验证 URL，避免进入异步协程后才发现问题
+    // Validate the URL in advance, avoiding discovering the problem after entering the asynchronous
+    // coroutine
     HKU_CHECK(m_is_valid_url, "Invalid url: {}", m_url);
     HKU_ASSERT(m_ctx);
 
-    // 确保 io_context 处于运行状态
+    // Make sure the io_context is running
     if (m_ctx->stopped()) {
         m_ctx->restart();
     }
 
-    // 使用 use_future 将协程结果转换为 std::future
+    // Convert the coroutine result into a std::future with use_future
     auto future =
       co_spawn(*m_ctx, async_request(method, path, params, headers, body, body_len, content_type),
                boost::asio::use_future);
 
-    // 获取结果，如果协程中抛出了异常，这里会重新抛出
+    // Get the result; an exception thrown in the coroutine is rethrown here
     return future.get();
 }
 
@@ -1626,23 +2022,23 @@ AsioHttpStreamResponse AsioHttpClient::requestStream(
   const std::string& method, const std::string& path, const HttpParams& params,
   const HttpHeaders& headers, const char* body, size_t body_len, const std::string& content_type,
   const HttpChunkCallback& chunk_callback) {
-    // 提前验证 URL 和回调函数
+    // Validate the URL and the callback function in advance
     HKU_CHECK(m_is_valid_url, "Invalid url: {}", m_url);
     HKU_CHECK(chunk_callback != nullptr, "Chunk callback must not be null");
     HKU_ASSERT(m_ctx);
 
-    // 确保 io_context 处于运行状态
+    // Make sure the io_context is running
     if (m_ctx->stopped()) {
         m_ctx->restart();
     }
 
-    // 使用 use_future 将协程结果转换为 std::future
+    // Convert the coroutine result into a std::future with use_future
     auto future = co_spawn(*m_ctx,
                            async_requestStream(method, path, params, headers, body, body_len,
                                                content_type, chunk_callback),
                            boost::asio::use_future);
 
-    // 获取结果，如果协程中抛出了异常，这里会重新抛出
+    // Get the result; an exception thrown in the coroutine is rethrown here
     return future.get();
 }
 

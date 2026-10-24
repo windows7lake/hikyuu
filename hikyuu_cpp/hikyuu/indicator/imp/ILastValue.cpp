@@ -14,13 +14,14 @@ BOOST_CLASS_EXPORT(hku::ILastValue)
 namespace hku {
 
 ILastValue::ILastValue() : IndicatorImp("LASTVALUE", 1) {
-    setParam<bool>("ignore_discard", false);  // 忽略输入指标的 discard
+    setParam<bool>("ignore_discard", false);  // Ignore the discard of the input indicator
 }
 
 ILastValue::~ILastValue() {}
 
 void ILastValue::_calculate(const Indicator &data) {
     size_t total = data.size();
+    m_discard = 0;
     HKU_IF_RETURN(total == 0, void());
 
     bool ignore_discard = getParam<bool>("ignore_discard");

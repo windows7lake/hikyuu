@@ -20,9 +20,9 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_ISLASTBAR") {
-    /** @arg 正常执行 */
+    /** @arg The normal execution */
     Indicator data = PRICELIST({1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
     Indicator result = ISLASTBAR(data);
     CHECK_EQ(result.name(), "ISLASTBAR");
@@ -41,7 +41,7 @@ TEST_CASE("test_ISLASTBAR") {
     }
     CHECK_EQ(result[9], 1.);
 
-    /** @arg 输入数据全部需抛弃 */
+    /** @arg All the input data needs to be discarded */
     PriceList src;
     for (size_t i = 0; i < 10; ++i) {
         src.push_back(Null<PriceList::value_type>());
@@ -59,7 +59,7 @@ TEST_CASE("test_ISLASTBAR") {
         CHECK_UNARY(std::isnan(result[i]));
     }
 
-    /** @arg 输入参数为 kdata */
+    /** @arg The input parameter is a kdata */
     auto kdata = getKData("sh000001", KQuery(-10));
     CHECK_EQ(kdata.size(), 10);
     result = ISLASTBAR(kdata);
@@ -79,6 +79,34 @@ TEST_CASE("test_ISLASTBAR") {
     CHECK_EQ(result[9], 1.);
 }
 
+/** @par Test points */
+TEST_CASE("test_ISLASTBAR_discard_offset") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh600000");
+    KData k_full = stock.getKData(KQuery(0, 20));
+    CHECK_EQ(k_full.size(), 20);
+
+    /** @arg a non-leaf input with a discard marks the last bar of the whole series */
+    Indicator r = ISLASTBAR()(MA(CLOSE(), 5));
+    r.setContext(k_full);
+    CHECK_EQ(r.size(), 20);
+    CHECK_EQ(r.discard(), 4);
+    for (size_t i = r.discard(); i < 19; ++i) {
+        CHECK_EQ(r[i], 0.0);
+    }
+    CHECK_EQ(r[19], 1.0);
+
+    /** @arg a non-leaf input without a discard keeps the whole series valid */
+    Indicator r0 = ISLASTBAR()(CLOSE());
+    r0.setContext(k_full);
+    CHECK_EQ(r0.size(), 20);
+    CHECK_EQ(r0.discard(), 0);
+    for (size_t i = 0; i < 19; ++i) {
+        CHECK_EQ(r0[i], 0.0);
+    }
+    CHECK_EQ(r0[19], 1.0);
+}
+
 //-----------------------------------------------------------------------------
 // benchmark
 //-----------------------------------------------------------------------------
@@ -87,7 +115,7 @@ TEST_CASE("test_ISLASTBAR_benchmark") {
     // Stock stock = getStock("sh000001");
     // KData kdata = stock.getKData(KQuery(0));
     // Indicator c = kdata.close();
-    // int cycle = 1000;  // 测试循环次数
+    // int cycle = 1000;  // Test loop count
 
     // {
     //     BENCHMARK_TIME_MSG(test_ABS_benchmark, cycle, fmt::format("data len: {}", c.size()));
@@ -105,7 +133,7 @@ TEST_CASE("test_ISLASTBAR_benchmark") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_ISLASTBAR_export") {
     // StockManager& sm = StockManager::instance();
     // string filename(sm.tmpdir());

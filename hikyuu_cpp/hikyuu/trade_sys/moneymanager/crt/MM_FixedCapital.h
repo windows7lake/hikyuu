@@ -1,7 +1,7 @@
 /*
  * MM_FixedCapital.h
  *
- *  Created on: 2016年5月3日
+ *  Created on: 2016-5-3
  *      Author: Administrator
  */
 
@@ -14,9 +14,10 @@
 namespace hku {
 
 /**
- * 固定资金管理策略
- * 公式: 买入数量 = 当前现金 / capital
- * @param capital
+ * Fixed capital money management strategy
+ * Formula: buy quantity = current cash / capital
+ * @param capital the fixed amount allocated per tranche; does not adapt to price, so it must be
+ *         tuned to the account scale and instrument price range
  * @return MoneyManagerPtr
  */
 MoneyManagerPtr HKU_API MM_FixedCapital(double capital = 10000.00);

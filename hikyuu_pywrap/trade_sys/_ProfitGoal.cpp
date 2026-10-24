@@ -7,6 +7,7 @@
 
 #include <hikyuu/trade_sys/profitgoal/build_in.h>
 #include "../pybind_utils.h"
+#include "../gil_policy.h"
 
 namespace py = pybind11;
 using namespace hku;
@@ -35,12 +36,13 @@ public:
         PYBIND11_OVERLOAD_NAME(void, ProfitGoalBase, "sell_notify", sellNotify, tr);
     }
 
-    price_t getGoal(const Datetime& datetime, price_t price) override {
-        PYBIND11_OVERLOAD_PURE_NAME(price_t, ProfitGoalBase, "get_goal", getGoal, datetime, price);
+    price_t _getGoal(const Datetime& datetime, price_t price) override {
+        PYBIND11_OVERLOAD_PURE_NAME(price_t, ProfitGoalBase, "_get_goal", _getGoal, datetime,
+                                    price);
     }
 
-    price_t getShortGoal(const Datetime& date, price_t price) override {
-        PYBIND11_OVERLOAD_NAME(price_t, ProfitGoalBase, "get_short_goal", getShortGoal, date,
+    price_t _getShortGoal(const Datetime& date, price_t price) override {
+        PYBIND11_OVERLOAD_NAME(price_t, ProfitGoalBase, "_get_short_goal", _getShortGoal, date,
                                price);
     }
 
@@ -55,102 +57,135 @@ public:
 
 void export_ProfitGoal(py::module& m) {
     py::class_<ProfitGoalBase, PGPtr, PyProfitGoalBase>(m, "ProfitGoalBase", py::dynamic_attr(),
-                                                        R"(盈利目标策略基类
+                                                        R"(The profit goal strategy base class
     
-自定义盈利目标策略接口：
+The custom profit goal strategy interfaces:
 
-- getGoal : 【必须】获取目标价格
-- _calculate : 【必须】子类计算接口
-- _clone : 【必须】克隆接口
-- _reset : 【可选】重载私有变量
-- buyNotify : 【可选】接收实际买入通知，预留用于多次增减仓处理
-- sellNotify : 【可选】接收实际卖出通知，预留用于多次增减仓处理)")
+- _get_goal : [Required] Get the target price
+- _get_short_goal : [Optional] Get the short target price; returning constant.null_price means no short target is set
+- _calculate : [Optional] The subclass calculation interface (called when the trading object is set)
+- _clone : [Required] The clone interface
+- _reset : [Optional] Reload the private variables
+- buy_notify : [Optional] Receive the actual buy notification, reserved for the multiple position increase/decrease processing
+- sell_notify : [Optional] Receive the actual sell notification, reserved for the multiple position increase/decrease processing)")
 
       .def(py::init<>())
       .def(py::init<const ProfitGoalBase&>())
-      .def(py::init<const string&>(), R"(初始化构造函数
+      .def(py::init<const string&>(), R"(The initialization constructor
         
-    :param str name: 名称)")
+    :param str name: the name)")
 
       .def("__str__", to_py_str<ProfitGoalBase>)
       .def("__repr__", to_py_str<ProfitGoalBase>)
 
       .def_property("name", py::overload_cast<>(&ProfitGoalBase::name, py::const_),
                     py::overload_cast<const string&>(&ProfitGoalBase::name),
-                    py::return_value_policy::copy, "名称")
-      .def_property("to", &ProfitGoalBase::getTO, &ProfitGoalBase::setTO, "设置或获取交易对象")
-      .def_property("tm", &ProfitGoalBase::getTM, &ProfitGoalBase::setTM, "设置或获取交易管理账户")
+                    py::return_value_policy::copy, "Name")
+      .def_property(
+        "to", &ProfitGoalBase::getTO,
+        [](ProfitGoalBase* self, const KData& kdata) {
+            ScopeGilRelease gil(!self->isPythonObject());
+            self->setTO(kdata);
+        },
+        "Set or get the trading object")
+      .def_property("tm", &ProfitGoalBase::getTM, &ProfitGoalBase::setTM,
+                    "Set or get the trade manager account")
 
       .def("get_param", &ProfitGoalBase::getParam<boost::any>, R"(get_param(self, name)
 
-    获取指定的参数
+    Get the specified parameter
 
-    :param str name: 参数名称
-    :return: 参数值
-    :raises out_of_range: 无此参数)")
+    :param str name: the parameter name
+    :return: the parameter value
+    :raises out_of_range: no such parameter)")
 
       .def("set_param",
            static_cast<void (ProfitGoalBase::*)(const std::string&, const boost::any&)>(
              &ProfitGoalBase::setParam),
            R"(set_param(self, name, value)
 
-    设置参数
+    Set the parameter
 
-    :param str name: 参数名称
-    :param value: 参数值
-    :raises logic_error: Unsupported type! 不支持的参数类型)")
+    :param str name: the parameter name
+    :param value: the parameter value
+    :raises logic_error: Unsupported type! The parameter type is not supported)")
 
-      .def("have_param", &ProfitGoalBase::haveParam, "是否存在指定参数")
+      .def("have_param", &ProfitGoalBase::haveParam, "Whether the specified parameter exists")
 
       .def("buy_notify", &ProfitGoalBase::buyNotify,
            R"(buy_notify(self, trade_record)
     
-    【重载接口】交易系统发生实际买入操作时，通知交易变化情况，一般存在多次增减仓的情况才需要重载
+    [Overload interface] When the trading system performs the actual buy operation, notify the trade changes; it only needs to be overloaded when there are multiple position increases/decreases
 
-    :param TradeRecord trade_record: 发生实际买入时的实际买入交易记录)")
+    :param TradeRecord trade_record: the actual buy trade record when the actual buying occurs)")
 
       .def("sell_notify", &ProfitGoalBase::sellNotify,
            R"(sell_notify(self, trade_record)
     
-    【重载接口】交易系统发生实际卖出操作时，通知实际交易变化情况，一般存在多次增减仓的情况才需要重载
+    [Overload interface] When the trading system performs the actual sell operation, notify the actual trade changes; it only needs to be overloaded when there are multiple position increases/decreases
         
-    :param TradeRecord trade_record: 发生实际卖出时的实际卖出交易记录)")
+    :param TradeRecord trade_record: the actual sell trade record when the actual selling occurs)")
 
       .def("get_goal", &ProfitGoalBase::getGoal, R"(get_goal(self, datetime, price)
 
-    【重载接口】获取盈利目标价格，返回constant.null_price时，表示未限定目标；返回0意味着需要卖出
+    Get the profit goal price. The system sells the long position when the current price >= the
+    goal price. Returning constant.null_price means the goal is not limited; returning 0 means a
+    sell is needed; a positive value is the target price. A negative or non-finite return is
+    clamped to no goal
 
-    :param Datetime datetime: 当前时间
-    :param float price: 当前价格
-    :return: 目标价格
+    :param Datetime datetime: the current time
+    :param float price: the current price
+    :return: the target price
     :rtype: float)")
 
-      //.def("getShortGoal", &ProfitGoalBase::getShortGoal, &ProfitGoalWrap::default_getShortGoal)
+      .def("get_short_goal", &ProfitGoalBase::getShortGoal,
+           R"(get_short_goal(self, datetime, price)
 
-      .def("reset", &ProfitGoalBase::reset, "复位操作")
-      .def("clone", &ProfitGoalBase::clone, "克隆操作")
-      .def("_calculate", &ProfitGoalBase::_calculate, "【重载接口】子类计算接口")
-      .def("_reset", &ProfitGoalBase::_reset, "【重载接口】子类复位接口，复位内部私有变量")
+    Get the short profit goal price. The system closes the short position when the current price
+    <= the goal price. Returning constant.null_price means no short goal is set; a positive value
+    is the target price. To force a close regardless of price, return the current price. A negative
+    or non-finite return is clamped to no goal
+
+    :param Datetime datetime: the current time
+    :param float price: the current price
+    :return: the short goal price
+    :rtype: float)")
+
+      .def("reset", &ProfitGoalBase::reset, "The reset operation")
+      .def("clone", &ProfitGoalBase::clone,
+           R"(clone(self)
+
+    Clone the profit goal strategy. The returned instance does not carry the trading object (to),
+    so to must be set before it is used)
+      .def("_calculate", &ProfitGoalBase::_calculate, "[Overload interface] The subclass calculation interface")
+      .def("_reset", &ProfitGoalBase::_reset, "[Overload interface] The subclass reset interface, resetting the internal private variables")
+      .def("_get_goal", &ProfitGoalBase::_getGoal,
+           "[Overload interface] The subclass goal price interface")
+      .def("_get_short_goal", &ProfitGoalBase::_getShortGoal,
+           "[Overload interface] The subclass short goal price interface")
 
         DEF_PICKLE(PGPtr);
 
     m.def("PG_NoGoal", PG_NoGoal, R"(PG_NoGoal()
 
-    无盈利目标策略，通常为了进行测试或对比。
+    The no profit goal strategy, usually for testing or comparison.
     
-    :return: 盈利目标策略实例)");
+    :return: the profit goal strategy instance)");
 
     m.def("PG_FixedPercent", PG_FixedPercent, py::arg("p") = 0.2, R"(PG_FixedPercent([p = 0.2])
 
-    固定百分比盈利目标，目标价格 = 买入价格 * (1 + p)
+    The fixed percentage profit goal; the target price is the average cost (with the current price when there is no position yet) multiplied by (1 + p) for a long or (1 - p) for a short, rounded to the price precision
     
-    :param float p: 百分比
-    :return: 盈利目标策略实例)");
+    :param float p: the percentage
+    :return: the profit goal strategy instance)");
 
     m.def("PG_FixedHoldDays", PG_FixedHoldDays, py::arg("days") = 5, R"(PG_FixedHoldDays([days=5])
 
-    固定持仓天数盈利目标策略
+    The fixed holding days profit goal strategy. Once a long or short position has been held for
+    at least the given trading days, it forces an exit on the next bar regardless of price. The
+    trading object (to) must be set, otherwise there is no trading-day list and the rule never
+    takes effect
     
-    :param int days: 允许持仓天数（按交易日算）,默认5天
-    :return: 盈利目标策略实例)");
+    :param int days: the allowed holding days (counted by the trading days), defaulting to 5 days
+    :return: the profit goal strategy instance)");
 }

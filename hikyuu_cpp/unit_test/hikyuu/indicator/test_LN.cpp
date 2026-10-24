@@ -1,7 +1,7 @@
 /*
  * test_LN.cpp
  *
- *  Created on: 2019年4月2日
+ *  Created on: 2019-4-2
  *      Author: fasiondog
  */
 
@@ -20,7 +20,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_LN") {
     Indicator result;
 
@@ -36,7 +36,8 @@ TEST_CASE("test_LN") {
     CHECK_EQ(result.name(), "LN");
     CHECK_EQ(result.size(), 11);
     CHECK_EQ(result.discard(), 0);
-    CHECK_EQ(result[0], -std::numeric_limits<price_t>::infinity());
+    /** @arg LN(0) -> null (was -inf, which leaked downstream and polluted later bars) */
+    CHECK_UNARY(std::isnan(result[0]));
     for (int i = 1; i < 10; ++i) {
         CHECK_EQ(result[i], doctest::Approx(std::log(i)));
     }
@@ -53,7 +54,7 @@ TEST_CASE("test_LN") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_LN_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

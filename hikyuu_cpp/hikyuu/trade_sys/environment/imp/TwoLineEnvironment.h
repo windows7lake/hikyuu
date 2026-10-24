@@ -1,7 +1,7 @@
 /*
  * TwoLineEnviroment.h
  *
- *  Created on: 2016年5月17日
+ *  Created on: 2016-5-17
  *      Author: Administrator
  */
 
@@ -24,12 +24,16 @@ public:
     virtual void _calculate() override;
     virtual EnvironmentPtr _clone() override;
 
+    virtual bool hasPythonPart() const noexcept override {
+        return m_is_python_object || m_fast.hasPythonPart() || m_slow.hasPythonPart();
+    }
+
 private:
     Indicator m_fast;
     Indicator m_slow;
 
 //============================================
-// 序列化支持
+// Serialization support
 //============================================
 #if HKU_SUPPORT_SERIALIZATION
     friend class boost::serialization::access;

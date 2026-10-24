@@ -12,32 +12,38 @@
 
 namespace hku {
 
-/** SQL 处理异常, 主要用于封装具体数据库引擎内部错误 */
-class SQLException : public hku::exception {
+/** SQL handling exception, it is mainly used to encapsulate the internal error of a concrete
+ * database engine */
+class HKU_UTILS_API SQLException : public hku::exception {
 public:
-    /** 默认构造函数 */
+    /** Default constructor */
     SQLException() : SQLException(0, "Unknow error!") {}
 
     /**
-     * 构造 SQLite 异常
-     * @param errcode SQLite错误码
-     * @param msg SQLite错误信息
+     * Construct a SQLite exception
+     * @param errcode SQLite error code
+     * @param msg SQLite error message
      */
     SQLException(int errcode, const std::string& msg)
     : hku::exception(fmt::format("{} (errcode: {})", msg, errcode)), m_errcode(errcode) {}
 
     /**
-     * 构造 SQLite 异常
-     * @param errcode SQLite错误码
-     * @param msg SQLite错误信息
+     * Construct a SQLite exception
+     * @param errcode SQLite error code
+     * @param msg SQLite error message
      */
     SQLException(int errcode, const char* msg)
     : hku::exception(fmt::format("{} (errcode: {})", msg, errcode)), m_errcode(errcode) {}
 
-    /** 获取 SQLite 错误码 */
+    /** Get the SQLite error code */
     int errcode() const {
         return m_errcode;
     }
+
+    // The out-of-line destructor is the key function, see null_blob_exception in
+    // SQLStatementBase.h: the drivers throw this type inside the library while the guards of
+    // DBConnectBase.h catch it in the binary of the caller
+    ~SQLException() noexcept override;
 
 private:
     int m_errcode;

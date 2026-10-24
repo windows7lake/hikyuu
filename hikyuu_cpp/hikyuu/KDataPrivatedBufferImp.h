@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <mutex>
 #include "KDataImp.h"
 
 namespace hku {
@@ -15,7 +16,12 @@ class HKU_API KDataPrivatedBufferImp : public KDataImp {
 public:
     KDataPrivatedBufferImp();
     KDataPrivatedBufferImp(const Stock& stock, const KQuery& query);
+    
+    // Used by the affiliated projects: the krecords are taken as-is, the recovery is NOT applied,
+    // and startPos/endPos are recomputed from the query, so the caller must ensure krecords
+    // correspond to the query range.
     KDataPrivatedBufferImp(const Stock& stock, const KQuery& query, const KRecordList& krecords);
+    
     virtual ~KDataPrivatedBufferImp() override;
 
     virtual bool empty() const noexcept override {
@@ -33,22 +39,18 @@ public:
     virtual size_t getPos(const Datetime& datetime) const noexcept override;
 
     virtual const KRecord& getKRecord(size_t pos) const noexcept override {
-        return m_buffer[pos];
+        return pos < m_buffer.size() ? m_buffer[pos] : KRecord::NullKRecord;
     }
 
     virtual const KRecord& front() const override {
-        return m_buffer.front();
+        return m_buffer.empty() ? KRecord::NullKRecord : m_buffer.front();
     }
 
     virtual const KRecord& back() const override {
-        return m_buffer.back();
+        return m_buffer.empty() ? KRecord::NullKRecord : m_buffer.back();
     }
 
     virtual const KRecord* data() const noexcept override {
-        return m_buffer.data();
-    }
-
-    virtual KRecord* data() noexcept override {
         return m_buffer.data();
     }
 
@@ -58,6 +60,8 @@ public:
 
 private:
     void _getPosInStock() const;
+    // All the types are anchored at a fixed baseline: backward at the stock's data start, forward
+    // at its last data day. The equal-ratio multipliers come from the cached factor table of Stock.
     void _recover();
     void _recoverForward();
     void _recoverBackward();
@@ -72,7 +76,7 @@ private:
     KRecordList m_buffer;
     mutable size_t m_start{0};
     mutable size_t m_end{0};
-    mutable bool m_have_pos_in_stock{false};
+    mutable std::once_flag m_pos_once;
 };
 
 // typedef shared_ptr<KDataPrivatedBufferImp> KDataPrivatedBufferImpPtr;

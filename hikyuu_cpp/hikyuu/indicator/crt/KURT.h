@@ -16,8 +16,9 @@
 namespace hku {
 
 /**
- * 计算N周期内的超额峰度（未调整的总体峰度 - 3）
- * @param n N日时间窗口（大于等于4或等于0），等于0时使用输入的ind实际长度
+ * Calculate the excess kurtosis within N periods (unadjusted population kurtosis - 3)
+ * @param n N-day time window (>= 4); when it is 0 an expanding window is used, i.e. dst[i] is the
+ *          excess kurtosis over [discard(), i] (discard becomes discard()+3, first three nan)
  * @ingroup Indicator
  */
 Indicator HKU_API KURT(int n = 10);

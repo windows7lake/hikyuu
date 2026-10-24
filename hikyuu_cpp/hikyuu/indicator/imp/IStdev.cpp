@@ -5,6 +5,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IStdev.h"
 #include "../crt/MA.h"
 
@@ -23,7 +24,7 @@ IStdev::~IStdev() {}
 void IStdev::_checkParam(const string& name) const {
     if ("n" == name) {
         int n = getParam<int>("n");
-        HKU_ASSERT(n == 0 || n >= 2);
+        HKU_ASSERT(n == 0 || (n >= 2 && n < INT_MAX));
     }
 }
 
@@ -34,9 +35,12 @@ void IStdev::_calculate(const Indicator& data) {
     auto const* src = data.data();
     auto* dst = this->data();
 
-    // n == 0：全量累计标准差（expand-all 语义，每个位置输出到当前位置的累计 std）
+    // n == 0: the full accumulated standard deviation (the expand-all semantics; every position
+    // outputs the accumulated std up to the current position)
     if (0 == n) {
-        m_discard = data.discard();
+        // the sample deviation needs at least two observations, the first bar carries no deviation
+        size_t start = data.discard();
+        m_discard = start + 1;
         if (m_discard >= total) {
             m_discard = total;
             return;
@@ -44,8 +48,8 @@ void IStdev::_calculate(const Indicator& data) {
         size_t valid_count = 0;
         price_t mean = 0.0;
         price_t M2 = 0.0;
-        for (size_t i = m_discard; i < total; ++i) {
-            if (!std::isnan(src[i])) {
+        for (size_t i = start; i < total; ++i) {
+            if (std::isfinite(src[i])) {
                 valid_count++;
                 if (valid_count == 1) {
                     mean = src[i];
@@ -63,10 +67,12 @@ void IStdev::_calculate(const Indicator& data) {
         return;
     }
 
-    // n > 0：滚动窗口 Welford 方差，状态 (valid_count, mean, M2)，O(1) 出入队。
-    // 与 IMa 共用相同的 valid_count/mean 更新逻辑，保证 MA/STDEV 基于一致样本集。
-    // 离群值离开窗口时 M2 可能因灾难性相消变为负值或丢失低位精度，
-    // 此时触发 O(k) 单趟重算（k=窗口长度 n）重建精确状态。
+    // n > 0: the rolling window Welford variance, the state is (valid_count, mean, M2), the
+    // enqueue / dequeue is O(1). It shares the same valid_count/mean update logic with IMa,
+    // guaranteeing that MA/STDEV are based on a consistent sample set. When an outlier leaves the
+    // window, M2 may become negative or lose the low order precision due to the catastrophic
+    // cancellation; in that case an O(k) single pass recalculation (k = the window length n) is
+    // triggered to rebuild the exact state.
     m_discard = data.discard() + n - 1;
     if (m_discard >= total) {
         m_discard = total;
@@ -78,24 +84,27 @@ void IStdev::_calculate(const Indicator& data) {
     price_t mean = 0.0;
     price_t M2 = 0.0;
     for (size_t i = startPos; i < total; ++i) {
-        // 移除 leaving
+        // Remove the leaving value
         if (i >= static_cast<size_t>(startPos) + static_cast<size_t>(n)) {
             price_t leaving = src[i - n];
-            if (!std::isnan(leaving)) {
+            if (std::isfinite(leaving)) {
                 if (valid_count > 1) {
                     price_t old_M2 = M2;
                     price_t delta = leaving - mean;
                     mean -= delta / (valid_count - 1);
                     M2 -= delta * (leaving - mean);
                     valid_count--;
-                    // 灾难性相消检测：M2 变负或较 remove 前缩减 10^9 倍（float64 有效位坍塌）时重算
+                    // Catastrophic cancellation detection: recalculate when M2 becomes negative or
+                    // shrinks by a factor of 10^9 compared with the value before remove (the
+                    // float64 significant digits collapse)
                     if (M2 < 0.0 || M2 < 1e-9 * old_M2) {
-                        // O(n) 单趟 Welford 重算 [i-n+1, i-1]（已移除 leaving，未加入 entering）
+                        // An O(n) single pass Welford recalculation of [i-n+1, i-1] (leaving has
+                        // been removed and entering has not been added)
                         size_t vc_r = 0;
                         price_t mean_r = 0.0, M2_r = 0.0;
                         size_t lo = i - static_cast<size_t>(n) + 1;
                         for (size_t j = lo; j < i; ++j) {
-                            if (!std::isnan(src[j])) {
+                            if (std::isfinite(src[j])) {
                                 vc_r++;
                                 if (vc_r == 1) {
                                     mean_r = src[j];
@@ -111,16 +120,16 @@ void IStdev::_calculate(const Indicator& data) {
                         M2 = M2_r;
                     }
                 } else {
-                    // valid_count == 1，移除后窗口归零
+                    // valid_count == 1, the window becomes empty after the removal
                     mean = 0.0;
                     M2 = 0.0;
                     valid_count = 0;
                 }
             }
         }
-        // 加入 entering
+        // Add the entering value
         price_t entering = src[i];
-        if (!std::isnan(entering)) {
+        if (std::isfinite(entering)) {
             valid_count++;
             if (valid_count == 1) {
                 mean = entering;
@@ -131,7 +140,8 @@ void IStdev::_calculate(const Indicator& data) {
                 M2 += delta * (entering - mean);
             }
         }
-        // 窗口未满或有效值不足时不写输出（缓冲区已是 NaN）
+        // Write no output when the window is not full or the valid values are not enough (the
+        // buffer is already NaN)
         if (i >= m_discard && valid_count > 1) {
             dst[i] = std::sqrt(std::max(0.0, M2 / (valid_count - 1)));
         }
@@ -153,7 +163,8 @@ void IStdev::_increment_calculate(const Indicator& data, size_t start_pos) {
     auto* dst = this->data();
     HKU_ASSERT(start_pos + 1 >= (size_t)n);
 
-    // 从窗口起点 start_pos+1-n 单趟重建 Welford 状态，再滚动至 total
+    // Rebuild the Welford state with a single pass from the window start start_pos+1-n, then roll
+    // to total
     size_t start = start_pos + 1 - n;
     size_t valid_count = 0;
     price_t mean = 0.0;
@@ -161,7 +172,7 @@ void IStdev::_increment_calculate(const Indicator& data, size_t start_pos) {
     for (size_t i = start; i < total; ++i) {
         if (i > start_pos) {
             price_t leaving = src[i - n];
-            if (!std::isnan(leaving)) {
+            if (std::isfinite(leaving)) {
                 if (valid_count > 1) {
                     price_t old_M2 = M2;
                     price_t delta = leaving - mean;
@@ -173,7 +184,7 @@ void IStdev::_increment_calculate(const Indicator& data, size_t start_pos) {
                         price_t mean_r = 0.0, M2_r = 0.0;
                         size_t lo = i - static_cast<size_t>(n) + 1;
                         for (size_t j = lo; j < i; ++j) {
-                            if (!std::isnan(src[j])) {
+                            if (std::isfinite(src[j])) {
                                 vc_r++;
                                 if (vc_r == 1) {
                                     mean_r = src[j];
@@ -196,7 +207,7 @@ void IStdev::_increment_calculate(const Indicator& data, size_t start_pos) {
             }
         }
         price_t entering = src[i];
-        if (!std::isnan(entering)) {
+        if (std::isfinite(entering)) {
             valid_count++;
             if (valid_count == 1) {
                 mean = entering;
@@ -214,16 +225,18 @@ void IStdev::_increment_calculate(const Indicator& data, size_t start_pos) {
 }
 
 void IStdev::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step) {
+    HKU_IF_RETURN(step < 2, void());
     if (curPos + 1 < ind.discard() + step) {
         return;
     }
     size_t start = _get_step_start(curPos, step, ind.discard());
-    // 单趟 Welford（动态窗口左边界跳变，不用 remove，无重算需求）
+    // A single pass Welford (the left boundary of the dynamic window jumps, remove is not used and
+    // no recalculation is needed)
     size_t valid_count = 0;
     price_t mean = 0.0;
     price_t M2 = 0.0;
     for (size_t i = start; i <= curPos; i++) {
-        if (!std::isnan(ind[i])) {
+        if (std::isfinite(ind[i])) {
             valid_count++;
             if (valid_count == 1) {
                 mean = ind[i];

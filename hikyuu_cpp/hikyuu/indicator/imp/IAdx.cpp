@@ -1,3 +1,11 @@
+/*
+ *  Copyright (c) 2026 hikyuu.org
+ *
+ *  Created on: 2026-07-12
+ *      Author: fasiondog
+ */
+
+#include <climits>
 #include "IAdx.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -15,7 +23,7 @@ IAdx::~IAdx() {}
 
 void IAdx::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 2);
+        HKU_ASSERT(getParam<int>("n") >= 2 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -30,6 +38,7 @@ void IAdx::_calculate(const Indicator& data) {
     _readyBuffer(total, 3);
 
     if (total < 2) {
+        m_discard = total;
         return;
     }
 
@@ -89,39 +98,7 @@ void IAdx::_calculate(const Indicator& data) {
         mdi[period] = 0.0;
     }
 
-    for (size_t i = period + 1; i < adx_start; i++) {
-        const KRecord& r = k[i];
-        const KRecord& prev_r = k[i - 1];
-
-        value_t h = r.highPrice;
-        value_t l = r.lowPrice;
-        value_t prev_c = prev_r.closePrice;
-
-        value_t tr1 = h - l;
-        value_t tr2 = std::abs(h - prev_c);
-        value_t tr3 = std::abs(l - prev_c);
-        value_t tr_i = std::max({tr1, tr2, tr3});
-
-        value_t up_move = h - prev_r.highPrice;
-        value_t down_move = prev_r.lowPrice - l;
-
-        value_t pdm_i = (up_move > down_move && up_move > 0) ? up_move : 0.0;
-        value_t mdm_i = (down_move > up_move && down_move > 0) ? down_move : 0.0;
-
-        tr_smooth = tr_smooth * prev_factor + tr_i * smooth_factor;
-        pdm_smooth = pdm_smooth * prev_factor + pdm_i * smooth_factor;
-        mdm_smooth = mdm_smooth * prev_factor + mdm_i * smooth_factor;
-
-        if (tr_smooth != 0.0) {
-            pdi[i] = 100.0 * pdm_smooth / tr_smooth;
-            mdi[i] = 100.0 * mdm_smooth / tr_smooth;
-        } else {
-            pdi[i] = 0.0;
-            mdi[i] = 0.0;
-        }
-    }
-
-    for (size_t i = adx_start; i < total; i++) {
+    for (size_t i = period + 1; i < total; i++) {
         const KRecord& r = k[i];
         const KRecord& prev_r = k[i - 1];
 
@@ -155,19 +132,17 @@ void IAdx::_calculate(const Indicator& data) {
 
     m_discard = adx_start;
 
-    if (adx_start < total) {
-        value_t dx_sum = 0.0;
-        for (size_t i = period; i < adx_start; i++) {
-            value_t sum = pdi[i] + mdi[i];
-            dx_sum += (sum != 0.0) ? 100.0 * std::abs(pdi[i] - mdi[i]) / sum : 0.0;
-        }
-        adx[adx_start] = dx_sum / (n - 1);
+    value_t dx_sum = 0.0;
+    for (size_t i = period; i < adx_start; i++) {
+        value_t sum = pdi[i] + mdi[i];
+        dx_sum += (sum != 0.0) ? 100.0 * std::abs(pdi[i] - mdi[i]) / sum : 0.0;
+    }
+    adx[adx_start] = dx_sum / (n - 1);
 
-        for (size_t i = adx_start + 1; i < total; i++) {
-            value_t sum = pdi[i] + mdi[i];
-            value_t dx = (sum != 0.0) ? 100.0 * std::abs(pdi[i] - mdi[i]) / sum : 0.0;
-            adx[i] = adx[i - 1] * prev_factor + dx * smooth_factor;
-        }
+    for (size_t i = adx_start + 1; i < total; i++) {
+        value_t sum = pdi[i] + mdi[i];
+        value_t dx = (sum != 0.0) ? 100.0 * std::abs(pdi[i] - mdi[i]) / sum : 0.0;
+        adx[i] = adx[i - 1] * prev_factor + dx * smooth_factor;
     }
 
     for (size_t i = 0; i < period; i++) {

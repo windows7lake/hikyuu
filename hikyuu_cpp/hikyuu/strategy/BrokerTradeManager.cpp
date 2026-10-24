@@ -6,12 +6,21 @@
  */
 
 #include <nlohmann/json.hpp>
+#include <cmath>
 #include "hikyuu/trade_manage/crt/TC_Zero.h"
 #include "BrokerTradeManager.h"
 
 namespace hku {
 
 using json = nlohmann::json;
+
+namespace {
+// The accounting reference for market orders; the true fill price is known broker-side only
+price_t getLatestClosePrice(const Stock& stock) {
+    KData k = stock.getKData(KQuery(-1));
+    return k.empty() ? 0.0 : k.back().closePrice;
+}
+}  // namespace
 
 BrokerTradeManager::BrokerTradeManager(const OrderBrokerPtr& broker, const TradeCostPtr& costfunc,
                                        const string& name)
@@ -37,26 +46,37 @@ void BrokerTradeManager::fetchAssetInfoFromBroker(const OrderBrokerPtr& broker,
                                                   const Datetime& datetime) {
     HKU_CHECK(broker, "broker is null!");
 
-    auto brk_asset = broker->getAssetInfo();
+    // A failed fetch must NOT wipe the local account: keep the last known state and skip the
+    // synchronization. Otherwise a single network hiccup would zero the cash and drop all
+    // positions.
+    string brk_asset;
+    try {
+        brk_asset = broker->getAssetInfo();
+    } catch (const std::exception& e) {
+        HKU_WARN(
+          "Failed fetch asset info from the broker (error: \"{}\")! Keep the last known "
+          "account state and skip the synchronization",
+          e.what());
+        return;
+    }
     if (brk_asset.empty()) {
-        HKU_WARN("Failed fetch asset info from broker!");
-        m_datetime = firstDatetime().isNull() && !datetime.isNull() ? datetime : Datetime::now();
-        m_cash = 0.0;
-        m_position.clear();
+        HKU_WARN(
+          "The broker returned an empty asset info! Keep the last known account state "
+          "and skip the synchronization");
         return;
     }
 
     try {
         json asset = json::parse(brk_asset);
-        m_datetime = asset.contains("datetime")
-                       ? m_datetime = Datetime(asset["datetime"].get<string>())
-                       : m_datetime = Datetime::now();
+        Datetime new_datetime =
+          asset.contains("datetime") ? Datetime(asset["datetime"].get<string>()) : Datetime::now();
         if (firstDatetime().isNull() && !datetime.isNull()) {
-            m_datetime = datetime;
+            new_datetime = datetime;
         }
-        m_cash = asset["cash"].get<price_t>();
+        price_t new_cash = asset["cash"].get<price_t>();
 
-        m_position.clear();
+        int precision = getParam<int>("precision");
+        position_map_type new_position;
         auto& positions = asset["positions"];
         for (auto iter = positions.cbegin(); iter != positions.cend(); ++iter) {
             try {
@@ -71,24 +91,31 @@ void BrokerTradeManager::fetchAssetInfoFromBroker(const OrderBrokerPtr& broker,
 
                 PositionRecord pos;
                 pos.stock = stock;
-                pos.takeDatetime = m_datetime;
+                pos.takeDatetime = new_datetime;
                 pos.number = jpos["number"].get<double>();
                 pos.stoploss = jpos["stoploss"].get<price_t>();
                 pos.goalPrice = jpos["goal_price"].get<price_t>();
                 pos.totalNumber = pos.number;
                 price_t cost_price = jpos["cost_price"].get<price_t>();
-                pos.buyMoney = pos.number * cost_price;
-                pos.totalRisk = (pos.stoploss - cost_price) * pos.number;
-                m_position[stock.id()] = pos;
+                pos.buyMoney = roundEx(pos.number * cost_price * stock.unit(), precision);
+                pos.totalRisk =
+                  roundEx((cost_price - pos.stoploss) * pos.number * stock.unit(), precision);
+                new_position[stock.id()] = pos;
             } catch (const std::exception& e) {
                 HKU_ERROR(e.what());
             }
         }
-    } catch (const std::exception& e) {
-        HKU_ERROR(e.what());
-    }
 
-    m_broker_last_datetime = m_datetime;
+        m_datetime = new_datetime;
+        m_cash = new_cash;
+        m_position = std::move(new_position);
+        m_broker_last_datetime = m_datetime;
+    } catch (const std::exception& e) {
+        HKU_ERROR(
+          "Failed parse the asset info from the broker (error: \"{}\")! Keep the last "
+          "known account state and skip the synchronization",
+          e.what());
+    }
 }
 
 PositionRecordList BrokerTradeManager::getPositionList() const {
@@ -107,7 +134,22 @@ PositionRecord BrokerTradeManager::getPosition(const Datetime& date, const Stock
 }
 
 bool BrokerTradeManager::checkin(const Datetime& datetime, price_t cash) {
+    HKU_WARN_IF_RETURN(!std::isfinite(cash) || cash <= 0.0, false,
+                       "{} Invalid checkin cash({})!", datetime, cash);
     m_cash += cash;
+    return true;
+}
+
+bool BrokerTradeManager::checkout(const Datetime& datetime, price_t cash) {
+    HKU_WARN_IF_RETURN(!std::isfinite(cash) || cash <= 0.0, false,
+                       "{} Invalid checkout cash({})!", datetime, cash);
+    if (cash > m_cash) {
+        HKU_WARN("{} {} checkout cash({}) exceeds the current cash({}), clamped!",
+                 datetime, name(), cash, m_cash);
+        m_cash = 0.0;
+    } else {
+        m_cash -= cash;
+    }
     return true;
 }
 
@@ -126,41 +168,56 @@ TradeRecord BrokerTradeManager::buy(const Datetime& datetime, const Stock& stock
     HKU_ERROR_IF_RETURN(number > stock.maxTradeNumber(), result,
                         "{} {} Buy number({}) must be <= maxTradeNumber({})!", datetime,
                         stock.market_code(), number, stock.maxTradeNumber());
+    HKU_ERROR_IF_RETURN(!std::isfinite(realPrice) || realPrice < 0.0, result,
+                        "{} {} Buy price({}) is invalid!", datetime, stock.market_code(),
+                        realPrice);
 
-    CostRecord cost = getBuyCost(datetime, stock, realPrice, number);
+    price_t acc_price = realPrice;
+    if (acc_price == 0.0) {
+        acc_price = getLatestClosePrice(stock);
+        HKU_WARN_IF_RETURN(acc_price <= 0.0, result,
+                           "{} {} No available reference price for the market order buy!", datetime,
+                           stock.market_code());
+    }
 
-    // 实际交易需要的现金＝交易数量＊实际交易价格＋交易总成本
+    CostRecord cost = getBuyCost(datetime, stock, acc_price, number);
+
+    // The cash needed by the actual trade = the trade quantity * the actual trade price + the total
+    // trade cost
     int precision = getParam<int>("precision");
     // price_t money = roundEx(realPrice * number * stock.unit() + cost.total, precision);
     price_t money = roundEx(realPrice * number * stock.unit(), precision);
+    price_t acc_money = roundEx(acc_price * number * stock.unit(), precision);
 
     HKU_WARN_IF_RETURN(m_cash < roundEx(money + cost.total, precision), result,
                        "{} {} Can't buy, need cash({:<.4f}) > current cash({:<.4f})!", datetime,
                        stock.market_code(), roundEx(money + cost.total, precision), m_cash);
 
-    // 更新现金
-    m_cash = roundEx(m_cash - money - cost.total, precision);
+    // Update the cash; market orders sync the real cash flow from the broker
+    if (realPrice > 0.0) {
+        m_cash = roundEx(m_cash - money - cost.total, precision);
+    }
 
-    // 加入交易记录
+    // Add it to the trade records
     result = TradeRecord(stock, datetime, BUSINESS_BUY, planPrice, realPrice, goalPrice, number,
                          cost, stoploss, m_cash, from, remark);
 
-    // 更新当前持仓记录
+    // Update the current position record
     position_map_type::iterator pos_iter = m_position.find(stock.id());
     if (pos_iter == m_position.end()) {
         m_position[stock.id()] = PositionRecord(
-          stock, datetime, Null<Datetime>(), number, stoploss, goalPrice, number, money, cost.total,
-          roundEx((realPrice - stoploss) * number * stock.unit(), precision), 0.0);
+          stock, datetime, Null<Datetime>(), number, stoploss, goalPrice, number, acc_money,
+          cost.total, roundEx((acc_price - stoploss) * number * stock.unit(), precision), 0.0);
     } else {
         PositionRecord& position = pos_iter->second;
         position.number += number;
         position.stoploss = stoploss;
         position.goalPrice = goalPrice;
         position.totalNumber += number;
-        position.buyMoney = roundEx(money + position.buyMoney, precision);
+        position.buyMoney = roundEx(acc_money + position.buyMoney, precision);
         position.totalCost = roundEx(cost.total + position.totalCost, precision);
         position.totalRisk =
-          roundEx(position.totalRisk + (realPrice - stoploss) * number * stock.unit(), precision);
+          roundEx(position.totalRisk + (acc_price - stoploss) * number * stock.unit(), precision);
     }
 
     list<OrderBrokerPtr>::const_iterator broker_iter = m_broker_list.begin();
@@ -187,7 +244,9 @@ TradeRecord BrokerTradeManager::sell(const Datetime& datetime, const Stock& stoc
     HKU_ERROR_IF_RETURN(number == 0.0, result, "{} {} number is zero!", datetime,
                         stock.market_code());
 
-    // 对于分红扩股造成不满足最小交易量整数倍的情况，只能通过number=MAX_DOUBLE的方式全仓卖出
+    // For the case where the dividend and the capital increase make the quantity not an integer
+    // multiple of the minimum trade quantity, the whole position can only be sold with
+    // number=MAX_DOUBLE
     HKU_ERROR_IF_RETURN(number < stock.minTradeNumber(), result,
                         "{} {} Sell number({}) must be >= minTradeNumber({})!", datetime,
                         stock.market_code(), number, stock.minTradeNumber());
@@ -195,7 +254,7 @@ TradeRecord BrokerTradeManager::sell(const Datetime& datetime, const Stock& stoc
                         "{} {} Sell number({}) must be <= maxTradeNumber({})!", datetime,
                         stock.market_code(), number, stock.maxTradeNumber());
 
-    // 未持仓
+    // There is no position
     position_map_type::iterator pos_iter = m_position.find(stock.id());
     HKU_TRACE_IF_RETURN(pos_iter == m_position.end(), result,
                         "{} {} This stock was not bought never! ({}, {:<.4f}, {}, {})", datetime,
@@ -203,36 +262,50 @@ TradeRecord BrokerTradeManager::sell(const Datetime& datetime, const Stock& stoc
 
     PositionRecord& position = pos_iter->second;
 
-    // 调整欲卖出的数量，如果卖出数量等于MAX_DOUBLE，则表示卖出全部
+    // Adjust the quantity to be sold; a sell quantity equal to MAX_DOUBLE means selling everything
     double real_number = number == MAX_DOUBLE ? position.number : number;
 
-    // 欲卖出的数量大于当前持仓的数量
+    // The quantity to be sold is greater than the current position quantity
     HKU_ERROR_IF_RETURN(position.number < real_number, result,
                         "{} {} Try to sell number({}) > number of position({})!", datetime,
                         stock.market_code(), real_number, position.number);
+    HKU_ERROR_IF_RETURN(!std::isfinite(realPrice) || realPrice < 0.0, result,
+                        "{} {} Sell price({}) is invalid!", datetime, stock.market_code(),
+                        realPrice);
 
-    CostRecord cost = getSellCost(datetime, stock, realPrice, real_number);
+    price_t acc_price = realPrice;
+    if (acc_price == 0.0) {
+        acc_price = getLatestClosePrice(stock);
+        HKU_WARN_IF_RETURN(acc_price <= 0.0, result,
+                           "{} {} No available reference price for the market order sell!", datetime,
+                           stock.market_code());
+    }
+
+    CostRecord cost = getSellCost(datetime, stock, acc_price, real_number);
 
     int precision = getParam<int>("precision");
     price_t money = roundEx(realPrice * real_number * stock.unit(), precision);
+    price_t acc_money = roundEx(acc_price * real_number * stock.unit(), precision);
 
-    // 更新现金余额
-    m_cash = roundEx(m_cash + money - cost.total, precision);
+    // Update the cash balance; market orders sync the real cash flow from the broker
+    if (realPrice > 0.0) {
+        m_cash = roundEx(m_cash + money - cost.total, precision);
+    }
 
-    // 更新交易记录
+    // Update the trade records
     result = TradeRecord(stock, datetime, BUSINESS_SELL, planPrice, realPrice, goalPrice,
                          real_number, cost, stoploss, m_cash, from, remark);
 
-    // 更新当前持仓情况
+    // Update the current position
     position.number -= real_number;
     position.stoploss = stoploss;
     position.goalPrice = goalPrice;
     // position.buyMoney = position.buyMoney;
     position.totalCost = roundEx(position.totalCost + cost.total, precision);
-    position.sellMoney = roundEx(position.sellMoney + money, precision);
+    position.sellMoney = roundEx(position.sellMoney + acc_money, precision);
 
     if (position.number == 0) {
-        // 删除当前持仓
+        // Delete the current position
         m_position.erase(stock.id());
     }
 
@@ -256,7 +329,7 @@ FundsRecord BrokerTradeManager::getFunds(KQuery::KType inktype) const {
     string ktype(inktype);
     to_upper(ktype);
 
-    price_t value{0.0};  // 当前市值
+    price_t value{0.0};  // Current market value
     position_map_type::const_iterator iter = m_position.begin();
     for (; iter != m_position.end(); ++iter) {
         const PositionRecord& record = iter->second;
@@ -275,7 +348,34 @@ FundsRecord BrokerTradeManager::getFunds(KQuery::KType inktype) const {
 }
 
 FundsRecord BrokerTradeManager::getFunds(const Datetime& datetime, KQuery::KType ktype) {
-    return (datetime >= m_datetime) ? getFunds(ktype) : FundsRecord();
+    // The snapshot only records the cash and the position quantities at the bookkeeping time;
+    // the market value of those holdings drifts with the price as time flows. A dated query must
+    // revalue the current positions at `datetime` (the aggregate layer asks by the bar time to
+    // size the rebalancing), instead of returning the snapshot-time value or zeros. A Null
+    // datetime falls back to the current snapshot time.
+    FundsRecord funds;
+    int precision = getParam<int>("precision");
+
+    string kt(ktype);
+    to_upper(kt);
+    const Datetime& dt = datetime.isNull() ? m_datetime : datetime;
+
+    price_t value{0.0};  // Market value of the holdings at the queried moment
+    position_map_type::const_iterator iter = m_position.begin();
+    for (; iter != m_position.end(); ++iter) {
+        const PositionRecord& record = iter->second;
+        auto price = record.stock.getMarketValue(dt, kt);
+        value = roundEx((value + record.number * price * record.stock.unit()), precision);
+    }
+
+    funds.cash = m_cash;
+    funds.market_value = value;
+    funds.short_market_value = 0.0;
+    funds.base_cash = m_cash;
+    funds.base_asset = 0.0;
+    funds.borrow_cash = 0.0;
+    funds.borrow_asset = 0.0;
+    return funds;
 }
 
 string BrokerTradeManager::str() const {
@@ -300,6 +400,11 @@ string BrokerTradeManager::str() const {
     for (; iter != position.end(); ++iter) {
         price_t invest = iter->buyMoney - iter->sellMoney + iter->totalCost;
         KData k = iter->stock.getKData(query);
+        if (k.empty() || invest == 0.0) {
+            os << "    " << iter->stock.market_code() << " " << iter->stock.name() << " "
+               << iter->number << " invest(" << invest << ")\n";
+            continue;
+        }
         price_t cur_val = k[0].closePrice * iter->number;
         price_t bonus = cur_val - invest;
         DatetimeList date_list =

@@ -14,31 +14,27 @@
 namespace hku {
 
 /**
- * 沪深A股交易成本算法,计算每次买入或卖出的成本
+ * Trade cost algorithm for the Shanghai, Shenzhen and Beijing A-share at the current rates; it is
+ * the rolling default and always reflects the latest regime
  * @details
  * <pre>
- * 计算规则为：
- *   1）上证交易所
- *      买入：佣金＋过户费
- *      卖出：佣金＋过户费＋印花税
- *   2）深证交易所：
- *      买入：佣金
- *      卖出：佣金＋印花税
- *   其中：佣金和过户费均有最低值，当前佣金比例为千分之1.8（最低5元），印花税为千分之一
- *         上证过户费为交易数量的千分之一，不足1元，按一元计
+ *   1) transfer fee: since 2022-04-29, 0.01 per mille of the turnover amount, charged in both
+ *      directions on all markets
+ *   2) stamp duty: since 2023-08-28, 0.5 per mille, charged on sells only
+ *   3) commission: charged in both directions, 5 yuan minimum
+ * When the fees are cut again, update this model's defaults; the year-named models
+ * (TC_FixedAPre2015 / 2015 / 2017) stay frozen for historical backtests.
  * </pre>
  *
- * @param commission 佣金比例，默认千分之1.8，即0.0018
- * @param lowestCommission 最低佣金值，默认5元
- * @param stamptax 印花税，默认千分之一，即0.001
- * @param transferfee 过户费，默认每股千分之一，即0.001
- * @param lowestTransferfee 最低过户费，默认1元
+ * @param commission commission ratio, 1.8 per mille by default, i.e. 0.0018
+ * @param lowestCommission minimum commission value, 5 yuan by default
+ * @param stamptax stamp duty, 0.5 per mille by default, i.e. 0.0005
+ * @param transferfee transfer fee, 0.01 per mille of turnover by default, i.e. 0.00001
  * @see FixedATradeCost
  * @ingroup TradeCost
  */
 TradeCostPtr HKU_API TC_FixedA(price_t commission = 0.0018, price_t lowestCommission = 5.0,
-                               price_t stamptax = 0.001, price_t transferfee = 0.001,
-                               price_t lowestTransferfee = 1.0);
+                               price_t stamptax = 0.0005, price_t transferfee = 0.00001);
 
 }  // namespace hku
 

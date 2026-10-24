@@ -5,14 +5,14 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "hikyuu/Block.h"
 #include "hikyuu/indicator/crt/ALIGN.h"
 #include "hikyuu/indicator/crt/REF.h"
 #include "hikyuu/indicator/crt/ROCP.h"
 #include "hikyuu/indicator/crt/PRICELIST.h"
-#include "hikyuu/indicator/crt/SPEARMAN.h"
-#include "hikyuu/indicator/crt/CORR.h"
 #include "hikyuu/indicator/crt/KDATA.h"
+#include "../utils.h"
 #include "IIc.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -23,12 +23,15 @@ namespace hku {
 
 IIc::IIc() : IndicatorImp("IC", 1) {
     m_need_self_alike_compare = true;
-    setParam<int>("n", 1);  // 调仓周期
-    // 对齐时是否以 nan 值进行填充，否则以小于当前日期的最后值作为填充
+    setParam<int>("n", 1);  // Position adjustment cycle
+    // Whether to fill with nan during the alignment, otherwise the last value earlier than the
+    // current date is used as the fill
     setParam<bool>("fill_null", true);
-    setParam<bool>("use_spearman", true);  // 默认使用SPEARMAN计算相关系数, 否则使用pearson相关系数
+    setParam<bool>("use_spearman",
+                   true);  // Use SPEARMAN by default, otherwise the pearson correlation
 
-    // 严格IC计算，即未来收益不知道时填充NA，相当于非严格情况下左移n
+    // Strict IC calculation, i.e. fill NA when the future return is unknown; it is equivalent to
+    // shifting left by n in the non-strict case
     setParam<bool>("strict", false);
 }
 
@@ -45,7 +48,7 @@ IIc::~IIc() {}
 
 void IIc::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 1);
+        HKU_ASSERT(getParam<int>("n") >= 1 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -73,12 +76,12 @@ bool IIc::selfAlike(const IndicatorImp& other) const noexcept {
 }
 
 void IIc::_calculate(const Indicator& inputInd) {
-    // 先申请内存，保持和参考日期等长
+    // Allocate the memory first, keeping the same length as the reference dates
     auto ref_dates = getContext().getDatetimeList();
     size_t days_total = ref_dates.size();
     _readyBuffer(days_total, 1);
 
-    // 检测异常输入数据
+    // Detect the abnormal input data
     m_discard = days_total;
     HKU_IF_RETURN(days_total < 2, void());
 
@@ -95,50 +98,51 @@ void IIc::_calculate(const Indicator& inputInd) {
 
     bool fill_null = getParam<bool>("fill_null");
 
-    // 计算每支证券对齐后的因子值与 n 日收益率
-    vector<Indicator> all_inds(stk_count);     // 保存每支证券对齐后的因子值
-    vector<Indicator> all_returns(stk_count);  // 保存每支证券对齐后的 n 日收益率
+    // Calculate the aligned factor value and the n-day return of every security
+    vector<Indicator> all_inds(stk_count);     // Save the aligned factor value of every security
+    vector<Indicator> all_returns(stk_count);  // Save the aligned n-day return of every security
 
     KQuery query = getContext().getQuery();
 
-    // 注：使用超额收益和绝对收益计算最终结果无差异（理论推导无差异，如多一步超额计算收益引入的为计算误差，基本可以忽略）
+    // Note: using the excess return and the absolute return gives the same final result (they are
+    // identical in theory; an extra excess return calculation only introduces a negligible
+    // calculation error)
     global_parallel_for_index_void(
       0, stk_count, [&, n, fill_null, ind = inputInd.clone()](size_t i) {
           auto k = m_stks[i].getKData(query);
-          // 假设 IC 原本需要 “t 时刻因子值→t+1 时刻收益”，改为计算 “t 时刻因子值→t 时刻之前 N
-          // 天的收益”（比如过去 5 天的收益），并称之为 “当前 IC”。(否则当前值都会是缺失NA)
+          // Cross-section pair at index t: factor observed at t-n and the n-day return that
+          // just completed at t. Reading it at t requires no future data.
           all_inds[i] = ALIGN(REF(ind, n), ref_dates, fill_null)(k).getResult(0)();
 
-          // 计算绝对收益
+          // Calculate the absolute return
           all_returns[i] = ALIGN(ROCP(CLOSE(), n), ref_dates, fill_null)(k).getResult(0)();
       });
 
     m_discard = n;
 
-    Indicator (*spearman)(const Indicator&, const Indicator&, int, bool) = hku::SPEARMAN;
-    if (!getParam<bool>("use_spearman")) {
-        spearman = hku::CORR;
-    }
+    bool use_spearman = getParam<bool>("use_spearman");
 
     auto* dst = this->data();
-    global_parallel_for_index_void(m_discard, days_total, [&, stk_count, dst](size_t i) {
-        // 计算日截面 spearman 相关系数即 ic 值
-        PriceList tmp(stk_count, Null<price_t>());
-        PriceList tmp_return(stk_count, Null<price_t>());
-        for (size_t j = 0; j < stk_count; j++) {
-            tmp[j] = all_inds[j][i];
-            tmp_return[j] = all_returns[j][i];
-        }
-        auto a = PRICELIST(tmp);
-        auto b = PRICELIST(tmp_return);
-        auto ic = spearman(a, b, stk_count, true);
-        if (ic.size() > 0) {
-            dst[i] = ic[ic.size() - 1];
-        }
-    });
+    global_parallel_for_index_void(
+      m_discard, days_total, [&, stk_count, dst, use_spearman](size_t i) {
+          // Cross-section rank/Pearson correlation over this day's factor and return values.
+          thread_local std::vector<value_t> buf_a, buf_b;
+          if (buf_a.size() < stk_count) {
+              buf_a.resize(stk_count);
+              buf_b.resize(stk_count);
+          }
+          for (size_t j = 0; j < stk_count; j++) {
+              buf_a[j] = all_inds[j][i];
+              buf_b[j] = all_returns[j][i];
+          }
+          dst[i] = use_spearman
+                     ? detail::cross_section_spearman(buf_a.data(), buf_b.data(), stk_count)
+                     : detail::cross_section_pearson(buf_a.data(), buf_b.data(), stk_count);
+      });
 
     if (getParam<bool>("strict")) {
-        // 严格模式，即当前时刻对应未来收益计算结果
+        // The strict mode, i.e. the calculation result of the current moment corresponding to the
+        // future return
         for (size_t i = m_discard; i < days_total; i++) {
             dst[i - n] = dst[i];
         }
@@ -152,6 +156,28 @@ void IIc::_calculate(const Indicator& inputInd) {
 
     updateDiscard();
 }
+
+namespace {
+
+/* Extracted from the exported IC function: thread_local locals are not allowed
+   inside a dllexport function body on msvc/clang-cl */
+price_t calc_day_ic(const IndicatorList& ref_inds, const IndicatorList& returns, size_t i,
+                    size_t stk_count, bool use_spearman) {
+    thread_local std::vector<Indicator::value_t> buf_a, buf_b;
+    if (buf_a.size() < stk_count) {
+        buf_a.resize(stk_count);
+        buf_b.resize(stk_count);
+    }
+    for (size_t j = 0; j < stk_count; j++) {
+        buf_a[j] = ref_inds[j][i];
+        buf_b[j] = returns[j][i];
+    }
+    return use_spearman
+             ? detail::cross_section_spearman(buf_a.data(), buf_b.data(), stk_count)
+             : detail::cross_section_pearson(buf_a.data(), buf_b.data(), stk_count);
+}
+
+}  // namespace
 
 Indicator HKU_API IC(const StockList& stks, int n, bool spearman, bool strict) {
     return Indicator(make_shared<IIc>(stks, n, spearman, strict));
@@ -185,34 +211,18 @@ Indicator HKU_API IC(IndicatorList inds, IndicatorList returns, int n, bool use_
                   days_total, returns[i].size());
     }
 
-    Indicator (*spearman)(const Indicator&, const Indicator&, int, bool) = hku::SPEARMAN;
-    if (!use_spearman) {
-        spearman = hku::CORR;
-    }
-
     IndicatorList ref_inds(stk_count);
     global_parallel_for_index_void(0, stk_count, [&](size_t i) { ref_inds[i] = REF(inds[i], n); });
 
     PriceList ret(days_total, Null<price_t>());
     auto* dst = ret.data();
-    global_parallel_for_index_void(0, days_total, [&, stk_count, dst](size_t i) {
-        // 计算日截面 spearman 相关系数即 ic 值
-        PriceList tmp(stk_count, Null<price_t>());
-        PriceList tmp_return(stk_count, Null<price_t>());
-        for (size_t j = 0; j < stk_count; j++) {
-            tmp[j] = ref_inds[j][i];
-            tmp_return[j] = returns[j][i];
-        }
-        auto a = PRICELIST(tmp);
-        auto b = PRICELIST(tmp_return);
-        auto ic = spearman(a, b, stk_count, true);
-        if (ic.size() > 0) {
-            dst[i] = ic[ic.size() - 1];
-        }
+    global_parallel_for_index_void(0, days_total, [&, stk_count, dst, use_spearman](size_t i) {
+        dst[i] = calc_day_ic(ref_inds, returns, i, stk_count, use_spearman);
     });
 
     if (strict) {
-        // 严格模式，即当前时刻对应未来收益计算结果
+        // The strict mode, i.e. the calculation result of the current moment corresponding to the
+        // future return
         for (size_t i = n; i < days_total; i++) {
             dst[i - n] = dst[i];
         }
@@ -225,7 +235,7 @@ Indicator HKU_API IC(IndicatorList inds, IndicatorList returns, int n, bool use_
 
     size_t discard = days_total;
     for (size_t i = 0; i < days_total; i++) {
-        if (!std::isnan(dst[i])) {
+        if (std::isfinite(dst[i])) {
             discard = i;
             break;
         }

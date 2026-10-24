@@ -16,9 +16,9 @@
 namespace hku {
 
 /**
- * 向上舍入 (向数值增大方向舍入)
- * 用法：CEILING(A)返回沿A数值增大方向最接近的整数
- * 例如：CEILING(12.3)求得13；CEILING(-3.5)求得-3
+ * Get the integer part (truncate toward zero, discarding the fractional part)
+ * Usage: INTPART(A) returns the integer part of A, rounded toward zero
+ * For example: INTPART(12.3) gives 12; INTPART(-3.5) gives -3
  * @ingroup Indicator
  */
 Indicator HKU_API INTPART();

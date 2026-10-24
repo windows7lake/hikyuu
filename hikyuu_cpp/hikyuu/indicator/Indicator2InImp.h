@@ -11,7 +11,7 @@
 
 namespace hku {
 
-/* note: 双输入但同一上下文*/
+/* note: two inputs but the same context */
 class Indicator2InImp : public IndicatorImp {
 public:
     Indicator2InImp();
@@ -24,6 +24,10 @@ public:
 
     virtual bool selfAlike(const IndicatorImp& other) const noexcept override;
 
+    virtual bool hasPythonPart() const noexcept override {
+        return IndicatorImp::hasPythonPart() || m_ref_ind.hasPythonPart();
+    }
+
     virtual void getSelfInnerNodesWithInputConext(vector<IndicatorImpPtr>& nodes) const override;
 
 protected:
@@ -33,7 +37,7 @@ protected:
     Indicator m_ref_ind;
 
 //============================================
-// 序列化支持
+// Serialization support
 //============================================
 #if HKU_SUPPORT_SERIALIZATION
 private:

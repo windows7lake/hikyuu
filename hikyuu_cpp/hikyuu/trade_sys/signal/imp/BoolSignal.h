@@ -1,7 +1,7 @@
 /*
  * BoolSignal.h
  *
- *  Created on: 2017年7月2日
+ *  Created on: 2017-7-2
  *      Author: fasiondog
  */
 
@@ -23,12 +23,16 @@ public:
     virtual SignalPtr _clone() override;
     virtual void _calculate(const KData& kdata) override;
 
+    virtual bool hasPythonPart() const noexcept override {
+        return m_is_python_object || m_bool_buy.hasPythonPart() || m_bool_sell.hasPythonPart();
+    }
+
 private:
     Indicator m_bool_buy;
     Indicator m_bool_sell;
 
 //============================================
-// 序列化支持
+// Serialization support
 //============================================
 #if HKU_SUPPORT_SERIALIZATION
     friend class boost::serialization::access;

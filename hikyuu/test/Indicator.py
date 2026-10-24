@@ -3,10 +3,13 @@
 # gb18030
 
 # ===============================================================================
-# 作者：fasiondog
-# 历史：1）20130220, Added by fasiondog
+# Author: fasiondog
+# History: 1)20130220, Added by fasiondog
 # ===============================================================================
 
+import os
+import subprocess
+import sys
 import unittest
 
 from test_init import *
@@ -27,6 +30,20 @@ class AddIndicator(IndicatorImp):
         self.set_discard(0)
         for i in range(len(ind)):
             self._set(ind[i] + 1, i)
+
+
+class PartialReadyIndicator(IndicatorImp):
+    """Claims two result sets but never allocates their buffers, so data(i) is nullptr"""
+
+    def __init__(self, indicator):
+        super(PartialReadyIndicator, self).__init__("PartialReadyIndicator", 2)
+        self.set_discard(0)
+
+    def _clone(self):
+        return PartialReadyIndicator(Indicator())
+
+    def _calculate(self, ind):
+        pass
 
 
 class IndicatorTest(unittest.TestCase):
@@ -124,7 +141,7 @@ class IndicatorTest(unittest.TestCase):
         self.assertEqual(a[3], 6)
 
         a = x2 / x1
-        self.assertTrue(isinf(a[0]))
+        self.assertTrue(isnan(a[0]))
         self.assertEqual(a[1], 2)
         self.assertEqual(a[2], 1.5)
         self.assertTrue(abs(a[3] - 4.0 / 3.0) < 0.0001)
@@ -136,7 +153,7 @@ class IndicatorTest(unittest.TestCase):
         self.assertEqual(a[3], 6)
 
         a = 2. / x1
-        self.assertTrue(isinf(a[0]))
+        self.assertTrue(isnan(a[0]))
         self.assertEqual(a[1], 2.0)
         self.assertEqual(a[2], 1.)
         self.assertTrue(abs(a[3] - 2.0/3.0) < 0.0001)
@@ -208,7 +225,7 @@ class IndicatorTest(unittest.TestCase):
         if not constant.pickle_support:
             return
 
-        # TODO Python3出错，暂未解决
+        # TODO: fails on Python3, not resolved yet
         """
         import pickle as pl
         filename = sm.tmpdir() + '/Indicator.plk'
@@ -231,123 +248,123 @@ class IndicatorTest(unittest.TestCase):
         data = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
         ind = PRICELIST(data)
 
-        # 测试N=1，应该与BARSLAST一致
+        # Test N=1, should be consistent with BARSLAST
         result1 = BARSLASTS(ind, 1)
         expected1 = BARSLAST(ind)
 
-        # print(f"数据: {data}")
+        # print(f"data: {data}")
         # print(f"BARSLASTS(ind, 1): {[result1[i] for i in range(len(result1))]}")
         # print(f"BARSLAST(ind):     {[expected1[i] for i in range(len(expected1))]}")
 
-        # 验证N=1时与BARSLAST一致
+        # Verify that N=1 is consistent with BARSLAST
         for i in range(len(result1)):
             if np.isnan(expected1[i]):
                 self.assertTrue(np.isnan(result1[i]))
             else:
                 self.assertTrue(result1[i] == expected1[i])
 
-        # print("✓ N=1时与BARSLAST一致")
+        # print("✓ N=1 is consistent with BARSLAST")
 
-        # 测试N=2
+        # Test N=2
         result2 = BARSLASTS(ind, 2)
         # print(f"BARSLASTS(ind, 2): {[result2[i] for i in range(len(result2))]}")
         # print(f"BARSLASTS(ind, 2) discard: {result2.discard}")
 
-        # 验证N=2的结果
-        # 位置0-3：条件只成立1次，不足2次，应为NaN
+        # Verify the N=2 result
+        # Positions 0-3: the condition holds only once, less than 2 times, should be NaN
         for i in range(4):
             self.assertTrue(np.isnan(result2[i]))
 
-        # 位置4：条件第2次成立，距离第1次成立(位置0)为4
+        # Position 4: the condition holds for the 2nd time, 4 bars from the 1st hold (position 0)
         self.assertTrue(result2[4] == 4)
 
-        # 位置5-7：条件已成立2次，距离第1次成立(位置0)分别为5,6,7
+        # Positions 5-7: the condition holds twice, 5, 6, 7 bars from the 1st hold (position 0)
         for i in range(5, 8):
             self.assertTrue(result2[i] == i)
 
-        # 位置8：条件第3次成立，距离第2次成立(位置4)为4
+        # Position 8: the condition holds for the 3rd time, 4 bars from the 2nd hold (position 4)
         self.assertTrue(result2[8] == 4)
 
-        # print("✓ N=2测试通过")
+        # print("✓ N=2 test passed")
 
-        # 测试N=3
+        # Test N=3
         result3 = BARSLASTS(ind, 3)
         # print(f"BARSLASTS(ind, 3): {[result3[i] for i in range(len(result3))]}")
 
-        # 验证N=3的结果
-        # 位置0-7：条件只成立2次，不足3次，应为NaN
+        # Verify the N=3 result
+        # Positions 0-7: the condition holds only twice, less than 3 times, should be NaN
         for i in range(8):
             self.assertTrue(np.isnan(result3[i]))
 
-        # 位置8：条件第3次成立，距离第1次成立(位置0)为8
+        # Position 8: the condition holds for the 3rd time, 8 bars from the 1st hold (position 0)
         self.assertTrue(result3[8] == 8)
 
-        # 位置9-11：条件已成立3次，距离第1次成立(位置0)分别为9,10,11
+        # Positions 9-11: the condition holds 3 times, 9, 10, 11 bars from the 1st hold (position 0)
         for i in range(9, 12):
             self.assertTrue(result3[i] == i)
 
-        """测试边界情况"""
-        # print("\n测试边界情况...")
+        """Test the edge cases"""
+        # print("\nTesting the edge cases...")
 
-        # 测试N <= 0
+        # Test N <= 0
         data = [1, 0, 1, 0, 1]
         ind = PRICELIST(data)
 
         result0 = BARSLASTS(ind, 0)
         # print(f"BARSLASTS(ind, 0): {[result0[i] for i in range(len(result0))]}")
         self.assertTrue(result0.discard == len(data))
-        # print("✓ N=0测试通过")
+        # print("✓ N=0 test passed")
 
         result_neg = BARSLASTS(ind, -1)
         # print(f"BARSLASTS(ind, -1): {[result_neg[i] for i in range(len(result_neg))]}")
         self.assertTrue(result_neg.discard == len(data))
-        # print("✓ N=-1测试通过")
+        # print("✓ N=-1 test passed")
 
-        # 测试空数据
+        # Test empty data
         empty_ind = PRICELIST([])
         result_empty = BARSLASTS(empty_ind, 1)
-        # print(f"BARSLASTS(空数据, 1): 长度={len(result_empty)}")
+        # print(f"BARSLASTS(empty data, 1): length={len(result_empty)}")
         self.assertTrue(len(result_empty) == 0)
-        # print("✓ 空数据测试通过")
+        # print("✓ empty data test passed")
 
-        # 测试全0数据
+        # Test all-zero data
         zeros = [0, 0, 0, 0, 0]
         ind_zeros = PRICELIST(zeros)
         result_zeros = BARSLASTS(ind_zeros, 1)
-        # print(f"BARSLASTS(全0数据, 1): discard={result_zeros.discard}")
+        # print(f"BARSLASTS(all-zero data, 1): discard={result_zeros.discard}")
         self.assertTrue(result_zeros.discard == len(zeros))
-        # print("✓ 全0数据测试通过")
+        # print("✓ all-zero data test passed")
 
-        """测试与K线数据结合使用"""
-        # print("\n测试与K线数据结合使用...")
+        """Test the combination with K-line data"""
+        # print("\nTesting the combination with K-line data...")
 
-        # 获取股票数据
+        # Get the stock data
         sm = StockManager.instance()
         stock = sm['sh000001']
 
         if stock.is_null():
-            print("⚠ 无法获取股票数据，跳过此测试")
+            print("⚠ Unable to get stock data, skipping this test")
             return
 
         kdata = stock.get_kdata(Query(-100))
 
         if len(kdata) == 0:
-            print("⚠ K线数据为空，跳过此测试")
+            print("⚠ K-line data is empty, skipping this test")
             return
 
-        # 测试收盘价上涨
+        # Test the rising close price
         close = CLOSE(kdata)
         up = close > REF(close, 1)
 
-        # 计算第1次上涨到现在的天数
+        # Calculate the days from the 1st rise to now
         result1 = BARSLASTS(up, 1)
-        # print(f"BARSLASTS(上涨, 1)前5个值: {[result1[i] for i in range(min(5, len(result1)))]}")
+        # print(f"BARSLASTS(rise, 1) first 5 values: {[result1[i] for i in range(min(5, len(result1)))]}")
 
-        # 计算第2次上涨到现在的天数
+        # Calculate the days from the 2nd rise to now
         result2 = BARSLASTS(up, 2)
-        # print(f"BARSLASTS(上涨, 2)前5个值: {[result2[i] for i in range(min(5, len(result2)))]}")
+        # print(f"BARSLASTS(rise, 2) first 5 values: {[result2[i] for i in range(min(5, len(result2)))]}")
 
-        # 验证N=1时与BARSLAST一致
+        # Verify that N=1 is consistent with BARSLAST
         expected = BARSLAST(up)
         for i in range(min(10, len(result1))):
             if np.isnan(expected[i]):
@@ -355,58 +372,58 @@ class IndicatorTest(unittest.TestCase):
             else:
                 self.assertTrue(result1[i] == expected[i])
 
-        # print("✓ K线数据测试通过")
+        # print("✓ K-line data test passed")
 
     def test_CODELIKE_NAMELIKE(self):
-        """测试CODELIKE和NAMELIKE指标"""
-        # 获取测试股票
+        """Test the CODELIKE and NAMELIKE indicators"""
+        # Get the test stock
         stock = sm['sh000001']
         k = stock.get_kdata(Query(-10))
-        
-        # 测试CODELIKE - 精确匹配
+
+        # Test CODELIKE - exact match
         result = CODELIKE(k, "000001")
         self.assertEqual(len(result), len(k))
-        # sh000001的代码是000001，应该匹配成功，返回全1
+        # The code of sh000001 is 000001, it should match and return all 1
         for i in range(len(result)):
             self.assertEqual(result[i], 1.0)
-        
-        # 测试CODELIKE - 包含匹配（无通配符时自动包含匹配）
+
+        # Test CODELIKE - contains match (auto contains match when there is no wildcard)
         result = CODELIKE(k, "000")
         self.assertEqual(len(result), len(k))
         for i in range(len(result)):
             self.assertEqual(result[i], 1.0)
-        
-        # 测试CODELIKE - 通配符?匹配
+
+        # Test CODELIKE - wildcard ? match
         result = CODELIKE(k, "??????")
         self.assertEqual(len(result), len(k))
         for i in range(len(result)):
             self.assertEqual(result[i], 1.0)
-        
-        # 测试CODELIKE - 不匹配的情况
+
+        # Test CODELIKE - no match case
         result = CODELIKE(k, "01")
         self.assertEqual(len(result), len(k))
         for i in range(len(result)):
             self.assertEqual(result[i], 0.0)
-        
-        # 测试NAMELIKE - 包含匹配（无通配符时自动包含匹配）
+
+        # Test NAMELIKE - contains match (auto contains match when there is no wildcard)
         result = NAMELIKE(k, "上证")
         self.assertEqual(len(result), len(k))
-        # sh000001的名称包含"上证"，应该匹配成功
+        # The Chinese name of sh000001 contains the pattern above, it should match
         for i in range(len(result)):
             self.assertEqual(result[i], 1.0)
-        
-        # 测试NAMELIKE - 不匹配的情况
-        result = NAMELIKE(k, "*不存在的名称*")
+
+        # Test NAMELIKE - no match case
+        result = NAMELIKE(k, "*non-existent name*")
         self.assertEqual(len(result), len(k))
         for i in range(len(result)):
             self.assertEqual(result[i], 0.0)
-        
-        # 测试深圳股票
+
+        # Test a Shenzhen stock
         stock2 = sm['sz00001']
         if not stock2.is_null():
             k2 = stock2.get_kdata(Query(-10))
-            
-            # 测试CODELIKE
+
+            # Test CODELIKE
             result = CODELIKE(k2, "000")
             self.assertEqual(len(result), len(k2))
             for i in range(len(result)):
@@ -416,44 +433,183 @@ class IndicatorTest(unittest.TestCase):
             self.assertEqual(len(result), len(k2))
             for i in range(len(result)):
                 self.assertEqual(result[i], 0.0)
-        
-        # 测试深圳股票NAMELIKE
+
+        # Test NAMELIKE for a Shenzhen stock
         stock3 = sm['sz000955']
         if not stock3.is_null():
             k3 = stock3.get_kdata(Query(-10))
-            
+
             result = NAMELIKE(k3, "欣龙")
             self.assertEqual(len(result), len(k3))
             for i in range(len(result)):
                 self.assertEqual(result[i], 1.0)
-    
+
     def test_CODELIKE_NAMELIKE_wildcard(self):
-        """测试CODELIKE和NAMELIKE的通配符功能"""
+        """Test the wildcard function of CODELIKE and NAMELIKE"""
         stock = sm['sh000001']
         k = stock.get_kdata(Query(-10))
-        
-        # 测试通配符*匹配任意序列
+
+        # Test the wildcard * matching any sequence
         result = CODELIKE(k, "*")
         self.assertEqual(len(result), len(k))
         for i in range(len(result)):
             self.assertEqual(result[i], 1.0)
-        
+
         result = NAMELIKE(k, "*")
         self.assertEqual(len(result), len(k))
         for i in range(len(result)):
             self.assertEqual(result[i], 1.0)
-        
-        # 测试通配符组合
+
+        # Test wildcard combinations
         result = CODELIKE(k, "0*1")
         self.assertEqual(len(result), len(k))
         for i in range(len(result)):
             self.assertEqual(result[i], 1.0)
-        
+
         result = CODELIKE(k, "0????1")
         self.assertEqual(len(result), len(k))
         for i in range(len(result)):
             self.assertEqual(result[i], 1.0)
 
+    def test_to_np_to_df_datetime_length_mismatch(self):
+        # a datetime list shorter than the indicator must raise instead of reading
+        # out of bounds in to_np/to_df
+        k = sm['sh000001'].get_kdata(Query(-20))
+        ind = CLOSE(k)
+        self.assertEqual(len(ind), 20)
+        ind.set_param("align_date_list", DatetimeList([Datetime(2024, 1, 1), Datetime(2024, 1, 2)]))
+        with self.assertRaises(Exception):
+            ind.to_np()
+        with self.assertRaises(Exception):
+            ind.to_df()
+
+        # a consistent indicator keeps working
+        ind2 = CLOSE(k)
+        self.assertEqual(len(ind2.to_np()), 20)
+        df = ind2.to_df()
+        self.assertEqual(len(df), 20)
+
+        # an empty indicator returns an empty table even with a stale align param
+        k_empty = sm['sh000001'].get_kdata(Query(0, 0))
+        ind3 = CLOSE(k_empty)
+        self.assertEqual(len(ind3), 0)
+        ind3.set_param("align_date_list", DatetimeList([Datetime(2024, 1, 1)]))
+        self.assertEqual(len(ind3.to_np()), 0)
+        self.assertEqual(len(ind3.to_df()), 0)
+
+    def test_result_buffer_not_ready(self):
+        # the result buffers are never allocated (size 0): all converters must return
+        # empty results instead of crashing on the null buffers
+        x = sm['sh000001'].get_kdata(Query(-10))
+        ind = Indicator(PartialReadyIndicator(CLOSE(x)))
+        self.assertEqual(ind.get_result_num(), 2)
+        self.assertEqual(len(ind.to_np()), 0)
+        self.assertEqual(len(ind.value_to_np()), 0)
+        self.assertEqual(len(ind.to_df()), 0)
+        self.assertEqual(len(ind.value_to_df()), 0)
+        self.assertEqual(len(ind.to_array(0)), 0)
+
+    def test_batch_calculate_inds_python(self):
+        # Python custom indicators run inside the thread-pool workers of
+        # batch_calculate_inds; the GIL must be released by the calling thread and
+        # re-acquired per Python indicator, otherwise the workers deadlock waiting
+        # for the GIL held by the blocked caller. The probe uses a timeout so a
+        # regression (deadlock) fails the test instead of hanging the suite.
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        config = "test_data/hikyuu_win.ini" if sys.platform == "win32" else "test_data/hikyuu_linux.ini"
+        probe = (
+            "import sys; sys.path.insert(0, r'{root}')\n"
+            "import os; os.chdir(r'{root}')\n"
+            "from hikyuu import *\n"
+            "hikyuu_init(r'{config}')\n"
+            "assert len(sm) > 0\n"
+            "class PyAdd(IndicatorImp):\n"
+            "    def __init__(self, indicator):\n"
+            "        super().__init__('PyAdd')\n"
+            "        self._ready_buffer(len(indicator), 1)\n"
+            "        self.set_discard(0)\n"
+            "        for i in range(len(indicator)):\n"
+            "            self._set(indicator[i] + 1.0, i)\n"
+            "    def _clone(self):\n"
+            "        return PyAdd(Indicator())\n"
+            "    def _calculate(self, ind):\n"
+            "        self.set_discard(0)\n"
+            "        for i in range(len(ind)):\n"
+            "            self._set(ind[i] + 1.0, i)\n"
+            "k = sm['sh000001'].get_kdata(Query(-10))\n"
+            "assert len(k) > 0\n"
+            "m1 = Indicator(PyAdd(PRICELIST(toPriceList([0, 1, 2, 3]))))\n"
+            "m2 = Indicator(PyAdd(PRICELIST(toPriceList([10, 20, 30, 40]))))\n"
+            "m3 = Indicator(PyAdd(PRICELIST(toPriceList([100, 200, 300, 400]))))\n"
+            "res = batch_calculate_inds([m1, m2, m3], k)\n"
+            "assert len(res) == 3\n"
+            "expect = [[1, 2, 3, 4], [11, 21, 31, 41], [101, 201, 301, 401]]\n"
+            "for j in range(3):\n"
+            "    assert len(res[j]) == 4, (j, len(res[j]))\n"
+            "    for i in range(4):\n"
+            "        assert abs(res[j][i] - expect[j][i]) < 1e-9, (j, i, res[j][i])\n"
+        ).format(root=root, config=config)
+        proc = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        self.assertEqual(
+            proc.returncode, 0, "batch_calculate_inds deadlocked/hung:\n%s" % proc.stderr[-2000:]
+        )
+
 
 def suite():
     return unittest.TestLoader().loadTestsFromTestCase(IndicatorTest)
+
+
+class TestIndicatorContext(unittest.TestCase):
+    def test_set_context(self):
+        kdata = sm['sh000001'].get_kdata(Query(-100))
+        ind = MA(CLOSE(), 5)
+        ind.set_context(kdata)
+        self.assertEqual(len(ind), len(kdata))
+        self.assertEqual(len(ind.get_result(0)), len(kdata))
+
+    def test_set_context_stock_query(self):
+        ind = MA(CLOSE(), 5)
+        ind.set_context(sm['sh000001'], Query(-100))
+        self.assertEqual(len(ind), 100)
+
+    def test_extend(self):
+        kdata = sm['sh000001'].get_kdata(Query(-100))
+        ind = MA(CLOSE(), 5)
+        ind.set_context(kdata)
+        ind.extend()
+        self.assertGreaterEqual(len(ind), len(kdata))
+
+
+def suiteTestIndicatorContext():
+    return unittest.TestLoader().loadTestsFromTestCase(TestIndicatorContext)
+
+
+class TestConcatToDf(unittest.TestCase):
+    def test_concat_to_df(self):
+        query = Query(-100)
+        k_list = [stk.get_kdata(query) for stk in [sm['sh000001'], sm['sz000001']]]
+        ma_list = [MA(CLOSE(k)) for k in k_list]
+        dates = sm.get_trading_calendar(query)
+        df = concat_to_df(dates, ma_list)
+        self.assertEqual(list(df.columns), ['datetime', 'SH000001', 'SZ000001'])
+        self.assertEqual(len(df), len(dates))
+        self.assertTrue(df['SH000001'].notna().any())
+
+    def test_concat_to_df_empty_and_head_ind_name(self):
+        query = Query(-20)
+        dates = sm.get_trading_calendar(query)
+        self.assertEqual(list(concat_to_df(dates, []).columns), ['datetime'])
+        ma = MA(CLOSE(sm['sh000001'].get_kdata(query)))
+        df = concat_to_df(dates, [ma], head_stock_code=False, head_ind_name=True)
+        self.assertEqual(list(df.columns), ['datetime', 'MA0'])
+
+
+def suiteTestConcatToDf():
+    return unittest.TestLoader().loadTestsFromTestCase(TestConcatToDf)

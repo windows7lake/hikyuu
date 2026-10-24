@@ -17,7 +17,7 @@
 namespace hku {
 
 /**
- * 两条线交叉, CROSS(A，B)　表示当A从下方向上穿过B时返回1，否则返回0。
+ * Two lines crossing; CROSS(A,B) returns 1 when A crosses B upward from below, otherwise 0.
  * @ingroup Indicator
  */
 inline Indicator CROSS(const Indicator& x, const Indicator& y) {
@@ -40,4 +40,4 @@ inline Indicator CROSS(Indicator::value_t x, Indicator::value_t y) {
 
 }  // namespace hku
 
-#endif /* INDICATOR_CRT_NDAY_H_ */
+#endif /* INDICATOR_CRT_CROSS_H_ */

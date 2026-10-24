@@ -1,7 +1,7 @@
 /*
  * SL_FixedValue.h
  *
- *  Created on: 2016年5月7日
+ *  Created on: 2016-5-7
  *      Author: Administrator
  */
 
@@ -9,17 +9,22 @@
 #ifndef TRADE_SYS_SLIPPAGE_CRT_SP_FIXEDVALUE_H_
 #define TRADE_SYS_SLIPPAGE_CRT_SP_FIXEDVALUE_H_
 
+#include <optional>
 #include "../SlippageBase.h"
 
 namespace hku {
 
 /**
- * 固定价格移滑价差算法
- * @details 买入实际价格 = 计划买入价格 + 偏移价格，卖出实际价格 = 计划卖出价格 - 偏移价格
- * @param value
- * @return
+ * Fixed price slippage algorithm
+ * @details Actual buy price = planned buy price + offset price, actual sell price = planned sell
+ *          price - offset price
+ * @param value the fixed offset price
+ * @param short_value the fixed offset price of the short side (opening a short and covering it),
+ *        must be >= 0; left unset it takes the same value as value
+ * @return the slippage object pointer
  */
-SlippagePtr HKU_API SP_FixedValue(double value = 0.01);
+SlippagePtr HKU_API SP_FixedValue(double value = 0.01,
+                                  std::optional<double> short_value = std::nullopt);
 
 } /* namespace hku */
 

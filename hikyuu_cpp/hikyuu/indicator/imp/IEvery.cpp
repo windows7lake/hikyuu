@@ -7,6 +7,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IEvery.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -23,7 +24,7 @@ IEvery::~IEvery() {}
 
 void IEvery::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 0);
+        HKU_ASSERT(getParam<int>("n") >= 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -36,15 +37,12 @@ void IEvery::_calculate(const Indicator& ind) {
         auto const* src = ind.data();
         auto* dst = this->data();
         m_discard = ind.discard();
+        bool any_false = false;
         for (size_t i = m_discard; i < total; i++) {
-            price_t every = 1.0;
-            for (size_t j = m_discard; j <= i; j++) {
-                if (src[j] == 0.0) {
-                    every = 0.0;
-                    break;
-                }
+            if (!any_false && (!std::isfinite(src[i]) || src[i] == 0.0)) {
+                any_false = true;
             }
-            dst[i] = every;
+            dst[i] = any_false ? 0.0 : 1.0;
         }
         return;
     }
@@ -75,7 +73,7 @@ void IEvery::_increment_calculate(const Indicator& ind, size_t start_pos) {
     price_t every = 1;
     size_t pre_pos = start_pos + n - 1;
     for (size_t i = start_pos + 1 - n; i <= start_pos; i++) {
-        if (src[i] == 0) {
+        if (!std::isfinite(src[i]) || src[i] == 0) {
             pre_pos = i;
             every = 0;
         }
@@ -86,9 +84,9 @@ void IEvery::_increment_calculate(const Indicator& ind, size_t start_pos) {
         size_t j = i + 1 - n;
         if (pre_pos < j) {
             pre_pos = j;
-            every = src[j] == 0 ? 0 : 1;
+            every = (!std::isfinite(src[j]) || src[j] == 0) ? 0 : 1;
         }
-        if (src[i] == 0) {
+        if (!std::isfinite(src[i]) || src[i] == 0) {
             pre_pos = i;
             every = 0;
         }
@@ -97,7 +95,7 @@ void IEvery::_increment_calculate(const Indicator& ind, size_t start_pos) {
 
     every = 1;
     for (size_t i = total - n; i < total; i++) {
-        if (src[i] == 0) {
+        if (!std::isfinite(src[i]) || src[i] == 0) {
             every = 0;
             break;
         }
@@ -106,18 +104,14 @@ void IEvery::_increment_calculate(const Indicator& ind, size_t start_pos) {
 }
 
 void IEvery::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step) {
-    size_t start = 0;
-    if (0 == step) {
-        start = ind.discard();
-    } else if (curPos < ind.discard() + step - 1) {
+    if (curPos < ind.discard() + step - 1) {
         return;
-    } else {
-        start = curPos + 1 - step;
     }
+    size_t start = curPos + 1 - step;
 
     price_t every = 1.0;
     for (size_t i = start; i <= curPos; i++) {
-        if (ind[i] == 0.0) {
+        if (!std::isfinite(ind[i]) || ind[i] == 0.0) {
             every = 0.0;
             break;
         }

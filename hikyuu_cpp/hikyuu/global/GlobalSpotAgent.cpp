@@ -5,6 +5,10 @@
  *     Author: fasiondog
  */
 
+#include <atomic>
+#include <mutex>
+#include <typeinfo>
+
 #include <hikyuu/GlobalInitializer.h>
 #include "../GlobalInitializer.h"
 #include "GlobalSpotAgent.h"
@@ -12,27 +16,35 @@
 
 namespace hku {
 
-SpotAgent* g_spot_agent = nullptr;
+static std::atomic<SpotAgent*> g_spot_agent{nullptr};
 
 SpotAgent* getGlobalSpotAgent() {
-    if (!g_spot_agent) {
-        g_spot_agent = new SpotAgent();
+    SpotAgent* agent = g_spot_agent.load(std::memory_order_acquire);
+    if (agent) {
+        return agent;
     }
-    return g_spot_agent;
+
+    SpotAgent* new_agent = new SpotAgent();
+    SpotAgent* expected = nullptr;
+    if (g_spot_agent.compare_exchange_strong(expected, new_agent, std::memory_order_acq_rel,
+                                             std::memory_order_acquire)) {
+        return new_agent;
+    }
+
+    delete new_agent;
+    return expected;
 }
 
 void releaseGlobalSpotAgent() {
-    if (g_spot_agent) {
+    SpotAgent* agent = g_spot_agent.exchange(nullptr);
+    if (agent) {
         HKU_TRACE("relase spot agent");
-        delete g_spot_agent;
-        g_spot_agent = nullptr;
+        delete agent;
     }
 }
 
 static string getSpotMarketCode(const SpotRecord& spot) {
-    std::stringstream market_code_buf;
-    market_code_buf << spot.market << spot.code;
-    return market_code_buf.str();
+    return spot.market + spot.code;
 }
 
 static void updateStockDayData(const SpotRecord& spot) {
@@ -74,10 +86,10 @@ static void updateStockDayUpData(const SpotRecord& spot, KQuery::KType ktype) {
     Datetime spot_day = Datetime(spot.datetime.year(), spot.datetime.month(), spot.datetime.day());
     Datetime spot_end_of_phase = endOfPhase(&spot_day);
     if (KQuery::WEEK == ktype) {
-        spot_end_of_phase = spot_end_of_phase - TimeDelta(2);  // 周五日期
+        spot_end_of_phase = spot_end_of_phase - TimeDelta(2);  // The Friday date
     }
 
-    // 重新计算交易金额、交易量
+    // Recalculate the turnover amount and the volume
     Datetime spot_start_of_phase = startOfPhase(&spot_day);
     KRecordList klist =
       stk.getKRecordList(KQuery(spot_start_of_phase, spot_end_of_phase + TimeDelta(1), ktype));
@@ -128,12 +140,13 @@ static void updateStockMinData(const SpotRecord& spot, KQuery::KType ktype) {
 
     Datetime minute = spot.datetime;
     Datetime today = minute.startOfDay();
-    // 非24小时交易品种，且时间和当天零时相同认为无分钟线级别数据
+    // For a non-24-hour security, when the time equals the midnight of the day it is regarded as
+    // having no minute-line level data
     HKU_IF_RETURN(stk.type() != STOCKTYPE_CRYPTO && minute == today, void());
 
     Datetime end_minute = minute - (minute - today) % gap + gap;
 
-    // 处理闭市时最后一条记录
+    // Handle the last record at the close
     MarketInfo market_info = StockManager::instance().getMarketInfo(stk.market());
     Datetime close1 = today + market_info.closeTime1();
     Datetime close2 = today + market_info.closeTime2();
@@ -144,7 +157,7 @@ static void updateStockMinData(const SpotRecord& spot, KQuery::KType ktype) {
         end_minute = close1;
     }
 
-    // 计算当天之前的累积成交金额、成交量
+    // Calculate the accumulated turnover amount and volume before that day
     KRecordList klist = stk.getKRecordList(KQuery(today, end_minute, ktype));
     price_t sum_amount = 0.0, sum_volume = 0.0;
     for (const auto& k : klist) {
@@ -154,18 +167,22 @@ static void updateStockMinData(const SpotRecord& spot, KQuery::KType ktype) {
 
     price_t amount =
       spot.amount > sum_amount ? spot.amount - sum_amount : (sum_amount == 0.0 ? spot.amount : 0.0);
-    price_t spot_volume = spot.volume * 100.;  // spot 传过来的是手数
+    price_t spot_volume = spot.volume * 100.;  // The volume passed in the spot is in lots
     price_t volume =
       spot_volume > sum_volume ? spot_volume - sum_volume : (sum_volume == 0.0 ? spot_volume : 0.0);
 
-    // 采集时间间隔如果大于等于ktype，则对应的OHLC值均为 spot close
-    // 采集时间间隔小于ktype, 则多次采集后，其ktype对应值才会体现出 OHLC
-    // 开盘价、最高价、最低价都须使用当前 spot 收盘价（因为 spot 中的开高低均为当天值）
+    // When the collection interval is not smaller than ktype, the OHLC values are the spot close
+    // When the collection interval is smaller than ktype, the OHLC appears in the ktype values only
+    // after several collections The open, the high and the low must all use the current spot close
+    // price (because the open, the high and the low in the spot are the values of the whole day)
     KRecord krecord(end_minute, spot.close, spot.close, spot.close, spot.close, amount, volume);
     stk.realtimeUpdate(krecord, ktype);
 }
 
 void HKU_API startSpotAgent(bool print, size_t worker_num, const string& addr) {
+    static std::mutex g_start_mutex;
+    std::lock_guard<std::mutex> lock(g_start_mutex);
+
     StockManager& sm = StockManager::instance();
     auto& agent = *getGlobalSpotAgent();
     HKU_CHECK(!agent.isRunning(), "The agent is running, please stop first!");
@@ -181,11 +198,9 @@ void HKU_API startSpotAgent(bool print, size_t worker_num, const string& addr) {
     agent.setWorkerNum(worker_num);
     agent.setPrintFlag(print);
 
-    // 防止调用 stopSpotAgent 后重新 startSpotAgent 时重复加入处理函数
+    // Prevent adding the handler repeatedly when startSpotAgent is called again after stopSpotAgent
     static std::atomic_bool g_init_spot_agent{false};
-    if (!g_init_spot_agent) {
-        g_init_spot_agent = true;
-
+    if (!g_init_spot_agent.exchange(true)) {
         const auto& preloadParam = sm.getPreloadParameter();
         if (preloadParam.tryGet<bool>("min", false)) {
             agent.addProcess(std::bind(updateStockMinData, std::placeholders::_1, KQuery::MIN));

@@ -15,6 +15,7 @@
 #include <hikyuu/trade_manage/TradeManager.h>
 #include <hikyuu/trade_manage/crt/crtTM.h>
 #include <hikyuu/trade_manage/crt/TC_FixedA.h>
+#include <hikyuu/trade_manage/crt/TC_FixedAPre2015.h>
 
 using namespace hku;
 
@@ -26,7 +27,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_CostRecord_export") {
     string filename(StockManager::instance().tmpdir());
     filename += "/CostRecord.xml";
@@ -53,7 +54,7 @@ TEST_CASE("test_CostRecord_export") {
     CHECK_EQ(cost.total, doctest::Approx(cost2.total).epsilon(0.00001));
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_TradeRecord_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());
@@ -88,7 +89,7 @@ TEST_CASE("test_TradeRecord_export") {
     CHECK_EQ(record1, record2);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_PositionRecord_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());
@@ -124,14 +125,14 @@ TEST_CASE("test_PositionRecord_export") {
     CHECK_EQ(record1, record2);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_TradeManager_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());
     filename += "/TradeManager.xml";
 
     Stock stock = sm.getStock("sh600000");
-    TradeCostPtr costfunc = TC_FixedA(0.0018, 5, 0.001, 0.001, 1.0);
+    TradeCostPtr costfunc = TC_FixedAPre2015(0.0018, 5, 0.001, 0.001, 1.0);
 
     TradeManagerPtr tm1 = crtTM(Datetime(199901010000), 100000, costfunc);
     tm1->buy(Datetime(199911170000), stock, 27.18, 100, 27.18, 27.18, 0);
@@ -180,7 +181,7 @@ TEST_CASE("test_TradeManager_export") {
     }
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_FundsRecord_export") {
     string filename(StockManager::instance().tmpdir());
     filename += "/FundsRecord.xml";
@@ -209,7 +210,7 @@ TEST_CASE("test_FundsRecord_export") {
     CHECK_EQ(funds1, funds2);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_BorrowRecord_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

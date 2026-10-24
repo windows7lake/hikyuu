@@ -11,6 +11,10 @@
 
 #include <hikyuu/config.h>
 #include <hikyuu/Stock.h>
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <type_traits>
 #include <pybind11/pybind11.h>
 
 #include <pybind11/operators.h>
@@ -25,6 +29,46 @@
 namespace py = pybind11;
 
 namespace hku {
+
+// Wrap a py::object so its lifetime can safely cross worker threads (e.g. Strategy
+// Python callbacks). The deleter acquires the GIL before releasing; if the interpreter
+// is finalizing, skip decref (leak; process is exiting). Finalization is detected via a
+// Py_AtExit flag set at shutdown start, so it is correct on Python <3.13 too (where
+// Py_IsFinalizing is not public). Reusable across pybind bindings.
+inline std::atomic<bool>& g_interpreter_finalizing() {
+    static std::atomic<bool> f{false};
+    return f;
+}
+
+inline void register_finalizing_flag() {
+    static std::once_flag once;
+    std::call_once(once, []() {
+        Py_AtExit([]() { g_interpreter_finalizing().store(true, std::memory_order_release); });
+    });
+}
+
+template <typename T = py::object>
+std::shared_ptr<T> make_gil_safe(T obj) {
+    register_finalizing_flag();
+    return std::shared_ptr<T>(new T(std::move(obj)), [](T* p) {
+        if (g_interpreter_finalizing().load(std::memory_order_acquire)) {
+            return;  // leak; process is exiting
+        }
+        py::gil_scoped_acquire gil;
+        delete p;
+    });
+}
+
+// Keep a Python custom part (e.g. the SG/MM assigned to a system) alive while the owner's
+// Python wrapper lives. This restores the semantics of the former explicit reference leaks
+// (the C++ side holds only the converted shared_ptr, whose holder does not keep the source
+// Python object alive) without leaking: the part is released when the owner is collected.
+// Both arguments must be pybind-registered instances.
+inline void keep_python_part_alive(const py::object& owner, const py::object& part) {
+    if (part) {
+        py::detail::keep_alive_impl(owner, part);
+    }
+}
 
 template <typename T>
 py::bytes vector_to_python_bytes(const std::vector<T>& vect) {
@@ -56,10 +100,22 @@ std::vector<T> python_bytes_to_vector(const py::bytes& obj) {
 
 template <typename T>
 std::vector<T> python_list_to_vector(const py::sequence& obj) {
-    // 如果 len(obj) 长度为零，即使类型不是所期望的也可能成功，但无风险
-    auto total = len(obj);
+    if constexpr (std::is_arithmetic_v<T>) {
+        using ArrayType = py::array_t<T, py::array::c_style>;
+        if (ArrayType::check_(obj)) {
+            auto arr = py::reinterpret_borrow<ArrayType>(obj);
+            if (arr.ndim() == 1) {
+                const T* p = arr.data();
+                return std::vector<T>(p, p + arr.size());
+            }
+        }
+    }
+
+    // If len(obj) is zero it may succeed even when the type is not the expected one, but there is
+    // no risk
+    Py_ssize_t total = len(obj);
     std::vector<T> vect(total);
-    for (auto i = 0; i < total; ++i) {
+    for (Py_ssize_t i = 0; i < total; ++i) {
         vect[i] = py::cast<T>(obj[i]);
     }
     return vect;
@@ -86,41 +142,126 @@ std::string to_py_str(const T& item) {
     return out.str();
 }
 
-// 直接使用 pybind11 重载 _clone，在 C++ 中会丢失 python 中的类型
-// 参考：https://github.com/pybind/pybind11/issues/1049 进行修改
+// Using the pybind11 overload of _clone directly would lose the python type in C++
+// Refer to https://github.com/pybind/pybind11/issues/1049 for the modification
 // PYBIND11_OVERLOAD(IndicatorImpPtr, IndicatorImp, _clone, );
-#define PY_CLONE(pyclassname, classname)                                         \
-public:                                                                          \
-    std::shared_ptr<classname> _clone() override {                               \
-        if (isPythonObject()) {                                                  \
-            py::gil_scoped_acquire acquire;                                      \
-            auto self = py::cast(this);                                          \
-            auto cloned = self.attr("_clone")();                                 \
-            auto keep_python_state_alive = std::make_shared<py::object>(cloned); \
-            auto ptr = cloned.cast<pyclassname*>();                              \
-            return std::shared_ptr<classname>(keep_python_state_alive, ptr);     \
-        }                                                                        \
-        return this->_clone();                                                   \
+#define PY_CLONE(pyclassname, classname)                                     \
+public:                                                                      \
+    std::shared_ptr<classname> _clone() override {                           \
+        if (isPythonObject()) {                                              \
+            py::gil_scoped_acquire acquire;                                  \
+            auto self = py::cast(this);                                      \
+            auto cloned = self.attr("_clone")();                             \
+            auto keep_python_state_alive = make_gil_safe(cloned);            \
+            auto ptr = cloned.cast<pyclassname*>();                          \
+            return std::shared_ptr<classname>(keep_python_state_alive, ptr); \
+        }                                                                    \
+        return this->_clone();                                               \
     }
 
-// 用于检查以 py::object 方式传递的函数参数个数是否符合预期
+// The `inspect` handles used by check_pyfunction_arg_num, cached because the check runs on every
+// callback registration. Held as raw PyObject* to keep pybind11 types out of the struct (they are
+// compiled with hidden visibility). The references are intentionally leaked: the cache outlives
+// the interpreter and must not be decref'd during finalization.
+inline const auto& py_inspect_cache() {
+    struct Cache {
+        PyObject* inspect;
+        PyObject* empty;           // inspect.Parameter.empty
+        PyObject* var_positional;  // inspect.Parameter.VAR_POSITIONAL
+        PyObject* var_keyword;     // inspect.Parameter.VAR_KEYWORD
+        PyObject* keyword_only;    // inspect.Parameter.KEYWORD_ONLY
+    };
+
+    static const Cache* cache = new Cache{[]() {
+        py::object inspect = py::module_::import("inspect");
+        py::object parameter = inspect.attr("Parameter");
+        py::object empty = parameter.attr("empty");
+        py::object var_positional = parameter.attr("VAR_POSITIONAL");
+        py::object var_keyword = parameter.attr("VAR_KEYWORD");
+        py::object keyword_only = parameter.attr("KEYWORD_ONLY");
+        return Cache{inspect.release().ptr(), empty.release().ptr(), var_positional.release().ptr(),
+                     var_keyword.release().ptr(), keyword_only.release().ptr()};
+    }()};
+    return *cache;
+}
+
+// Used to check whether the callable passed as py::object accepts the expected number of
+// positional arguments. Following the inspect.signature convention, the implicit `self` of a
+// bound method or of a callable object is not counted. Callables without an introspectable
+// signature (builtins, numpy ufuncs, ...) are accepted, as their arity cannot be determined.
 inline bool check_pyfunction_arg_num(const py::object& func, size_t arg_num) {
-    py::module_ inspect = py::module_::import("inspect");
-    py::object sig = inspect.attr("signature")(func);
-    py::object params = sig.attr("parameters");
-    return len(params) == arg_num;
+    const auto& cache = py_inspect_cache();
+    py::object params;
+    try {
+        params = py::handle(cache.inspect).attr("signature")(func).attr("parameters");
+    } catch (py::error_already_set& e) {
+        // Not introspectable: accept instead of breaking the registration
+        if (e.matches(PyExc_ValueError) || e.matches(PyExc_TypeError)) {
+            return true;
+        }
+        throw;
+    }
+
+    size_t required = 0, positional = 0;
+    for (auto item : params.attr("values")()) {
+        py::object kind_obj = item.attr("kind");
+        PyObject* kind = kind_obj.ptr();
+        if (kind == cache.var_positional) {
+            return true;  // *args accepts any number of positional arguments
+        }
+        if (kind == cache.var_keyword) {
+            continue;  // **kwargs only absorbs keyword arguments
+        }
+        py::object default_value = item.attr("default");
+        bool has_default = default_value.ptr() != cache.empty;
+        if (kind == cache.keyword_only) {
+            // the caller only passes positional arguments
+            HKU_IF_RETURN(!has_default, false);
+            continue;
+        }
+        positional++;
+        if (!has_default) {
+            required++;
+        }
+    }
+    return arg_num >= required && arg_num <= positional;
 }
 
 /*
- * 将utf8编码的字符串转换为utf32编码
- * @param utf8_str 待转换的字符串
- * @param out 存储转换结果的数组(需自行预先分配内存)
- * @param out_len out数组的长度
- * @return 实际转码点数
+ * Convert a utf8 encoded string to the utf32 encoding
+ * @param utf8_str the string to be converted
+ * @param out the array storing the conversion result (the memory needs to be allocated in advance
+ *            by yourself)
+ * @param out_len the length of the out array
+ * @return the actual number of the converted code points
  */
 size_t utf8_to_utf32(const std::string& utf8_str, int32_t* out, size_t out_len) noexcept;
 
-// 从 python 对象获取 StockList 列表
+// DatetimeList (std::vector<Datetime>) is registered as an independent Python type by
+// py::bind_vector (hikyuu_pywrap/bind_stl.cpp), the registered type takes precedence over the
+// pybind11/stl.h converter, so it only accepts DatetimeList instances and rejects the Python
+// list/tuple. Here the binding layer accepts any iterable Datetime sequence uniformly and converts
+// it manually, which is compatible with the existing DatetimeList argument and also supports the
+// list/tuple syntax.
+inline DatetimeList get_datetime_list_from_python(const py::object& dates) {
+    DatetimeList result;
+    if (dates.is_none()) {
+        return result;
+    }
+    if (!py::hasattr(dates, "__iter__")) {
+        throw py::type_error(
+          "dates must be an iterable sequence of Datetime (list/tuple/DatetimeList)");
+    }
+    if (py::isinstance<py::str>(dates) || py::isinstance<py::bytes>(dates)) {
+        throw py::type_error("dates must be an iterable sequence of Datetime, not str/bytes");
+    }
+    for (auto item : py::iter(dates)) {
+        result.push_back(py::cast<Datetime>(item));
+    }
+    return result;
+}
+
+// Get the StockList from a python object
 inline StockList get_stock_list_from_python(const py::object& stks) {
     StockList ret;
     HKU_IF_RETURN(stks.is_none(), ret);
@@ -134,7 +275,15 @@ inline StockList get_stock_list_from_python(const py::object& stks) {
         const auto& sm = stks.cast<StockManager&>();
         ret = sm.getStockList();
     } else if (py::isinstance<py::sequence>(stks)) {
-        ret = python_list_to_vector<Stock>(stks);
+        ret.reserve(len(stks));
+        const StockManager& sm = StockManager::instance();
+        for (auto item : stks) {
+            if (py::isinstance<py::str>(item)) {
+                ret.emplace_back(sm.getStock(item.cast<string>()));
+            } else {
+                ret.emplace_back(item.cast<Stock>());
+            }
+        }
     } else {
         HKU_THROW("Failed get StockList! Input stks must be Block, sm or sequenc(Stock)!");
     }

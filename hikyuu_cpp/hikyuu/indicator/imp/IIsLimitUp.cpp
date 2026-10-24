@@ -22,15 +22,19 @@ IIsLimitUp::~IIsLimitUp() {}
 
 void IIsLimitUp::_calculate(const Indicator& ind) {
     HKU_WARN_IF(!isLeaf() && !ind.empty(),
-                "The input is ignored because {} depends on the context!",
-                getParam<string>("kpart"));
+                "The input is ignored because {} depends on the context!", name());
 
     size_t total = getContext().size();
     HKU_IF_RETURN(total == 0, void());
 
     _readyBuffer(total, 1);
-    m_discard = 1;  // 第一根K线没有前一根K线, 无法判断是否涨停, 直接舍弃
-    _increment_calculate(ind, 0);
+    m_discard = 1;  // No previous K-line, so the limit up cannot be judged; discard it
+    _increment_calculate(ind, 1);
+}
+
+size_t IIsLimitUp::min_increment_start() const {
+    // ks[i - 1] is read, so the first bar of the context cannot be judged
+    return 1;
 }
 
 void IIsLimitUp::_increment_calculate(const Indicator& data, size_t start_pos) {
@@ -41,23 +45,31 @@ void IIsLimitUp::_increment_calculate(const Indicator& data, size_t start_pos) {
     value_t limit_up = 0.0;
     const Stock& stock = kdata.getStock();
     if (stock.type() == STOCKTYPE_A) {
-        limit_up = 1.1;  // A股涨停幅度为10%, 但ST股票涨停幅度为5%, 由于没有ST历史日期暂不处理
+        limit_up = 1.1;  // 10% for the A-shares, but 5% for the ST stocks (not handled: no ST date)
     } else if (stock.type() == STOCKTYPE_A_BJ) {
-        limit_up = 1.3;  // 北交所涨停幅度为30%
+        limit_up = 1.3;  // 30% for the Beijing Stock Exchange
     } else if (stock.type() == STOCKTYPE_GEM || stock.type() == STOCKTYPE_START) {
-        limit_up = 1.2;  // 创业板和科创板涨停幅度为20%
+        limit_up = 1.2;  // 20% for the ChiNext and the STAR Market
     }
 
-    auto const* ks = kdata.data();
     auto* dst = this->data();
     if (limit_up > 0.0) {
+        // judge on backward-adjusted closes: adjacent ratios stay continuous across ex-right dates
+        const KQuery& q = kdata.getQuery();
+        KData recovered;
+        if (q.recoverType() != KQuery::BACKWARD) {
+            KQuery bq = q;
+            bq.recoverType(KQuery::BACKWARD);
+            recovered = kdata.getKData(bq);
+        }
+        auto const* ks = recovered.size() == total ? recovered.data() : kdata.data();
         for (size_t i = start_pos; i < total; ++i) {
             dst[i] = value_t(ks[i].closePrice >=
                              roundEx(ks[i - 1].closePrice * limit_up, stock.precision()));
         }
     } else {
         for (size_t i = start_pos; i < total; ++i) {
-            dst[i] = 0.0;  // 不支持的股票类型, 默认为非涨停
+            dst[i] = 0.0;  // An unsupported security type, regarded as not limit up
         }
     }
 }

@@ -1,7 +1,7 @@
 /*
  * BandSignal2.h
  *
- *   Created on: 2023年09月23日
+ *   Created on: 2023-09-23
  *       Author: yangrq1018
  */
 
@@ -21,13 +21,18 @@ public:
     virtual SignalPtr _clone() override;
     virtual void _calculate(const KData& kdata) override;
 
+    virtual bool hasPythonPart() const noexcept override {
+        return m_is_python_object || m_ind.hasPythonPart() || m_lower.hasPythonPart() ||
+               m_upper.hasPythonPart();
+    }
+
 private:
     Indicator m_ind;
     Indicator m_lower;
     Indicator m_upper;
 
 //============================================
-// 序列化支持
+// Serialization support
 //============================================
 #if HKU_SUPPORT_SERIALIZATION
     friend class boost::serialization::access;

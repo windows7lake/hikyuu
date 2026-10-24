@@ -7,10 +7,12 @@
 
 #include "doctest/doctest.h"
 #include <fstream>
+#include <limits>
 #include <hikyuu/StockManager.h>
 #include <hikyuu/indicator/crt/KDATA.h>
 #include <hikyuu/indicator/crt/CVAL.h>
 #include <hikyuu/indicator/crt/REF.h>
+#include <hikyuu/indicator/crt/MACD.h>
 
 using namespace hku;
 
@@ -25,11 +27,11 @@ using namespace hku;
 #pragma GCC diagnostic ignored "-Wmisleading-indentation"
 #endif
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_IF") {
     KData kdata = getStock("SH600000").getKData(KQuery(-10));
 
-    /** @arg 三个参数均为 indicator */
+    /** @arg All the three parameters are indicator */
     Indicator x = IF(CLOSE() > OPEN(), CVAL(1), CVAL(0));
     x.setContext(kdata);
     Indicator c = CLOSE(kdata);
@@ -42,7 +44,7 @@ TEST_CASE("test_IF") {
         }
     }
 
-    /** @arg 测试调用operator()(const Indicator&) */
+    /** @arg Test calling operator()(const Indicator&) */
     x = IF(REF(0) > REF(1), 1, 0);
     c = CLOSE(kdata);
     x = x(c);
@@ -53,7 +55,7 @@ TEST_CASE("test_IF") {
             CHECK_EQ(x[i], c[i] > c[i - 1] ? 1 : 0);
     }
 
-    /** @arg 参数其中之一为数字 */
+    /** @arg One of the parameters is a number */
     x = IF(CLOSE() > OPEN(), 1, CVAL(0));
     x.setContext(kdata);
     for (int i = 0; i < x.size(); i++) {
@@ -74,7 +76,7 @@ TEST_CASE("test_IF") {
         }
     }
 
-    /** @arg 两个参数为数字 */
+    /** @arg Two of the parameters are numbers */
     x = IF(CLOSE() > OPEN(), 1, 0);
     x.setContext(kdata);
     for (int i = 0; i < x.size(); i++) {
@@ -90,12 +92,63 @@ TEST_CASE("test_IF") {
 #pragma GCC diagnostic pop
 #endif
 
+/**
+ * @par Test points
+ * Multi-result operands must keep every result column of the chosen operand.
+ *
+ * Background: execute_if took data(0) of both operands once outside the result loop, so each
+ * output column beyond the first repeated column 0 instead of its own column.
+ */
+TEST_CASE("test_IF_multi_result") {
+    KData kdata = getStock("SH600000").getKData(KQuery(-60));
+
+    Indicator cond = CLOSE() > OPEN();
+    Indicator left = MACD(CLOSE(), 12, 26, 9);
+    Indicator right = MACD(CLOSE(), 5, 35, 5);
+
+    Indicator x = IF(cond, left, right);
+    x.setContext(kdata);
+    cond.setContext(kdata);
+    left.setContext(kdata);
+    right.setContext(kdata);
+
+    REQUIRE_EQ(x.getResultNumber(), 3);
+    CHECK_EQ(x.size(), left.size());
+
+    for (size_t i = 0; i < x.size(); ++i) {
+        bool take_left = cond[i] > 0.0;
+        for (size_t r = 0; r < x.getResultNumber(); ++r) {
+            double a = take_left ? left.get(i, r) : right.get(i, r);
+            double b = x.get(i, r);
+            if (std::isnan(a) && std::isnan(b)) {
+                continue;
+            }
+            CHECK_EQ(b, doctest::Approx(a).epsilon(0.0001));
+        }
+    }
+}
+
+/** @par Test points */
+TEST_CASE("test_IF_non_finite_condition") {
+    KData kdata = getStock("SH600000").getKData(KQuery(-10));
+    if (kdata.empty()) {
+        return;
+    }
+
+    /** @arg a non-finite condition takes the false branch instead of firing */
+    Indicator x = IF(CVAL(std::numeric_limits<double>::infinity()), CVAL(1), CVAL(0));
+    x.setContext(kdata);
+    for (size_t i = 0; i < x.size(); ++i) {
+        CHECK_EQ(x[i], 0);
+    }
+}
+
 //-----------------------------------------------------------------------------
 // test export
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_IF_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

@@ -7,22 +7,26 @@
 
 #pragma once
 
+#include <random>
 #include "../SlippageBase.h"
 
 namespace hku {
 
 class TruncNormalSlippage : public SlippageBase {
-    SLIPPAGE_IMP(TruncNormalSlippage)
+    SLIPPAGE_IMP_RNG(TruncNormalSlippage)
     SLIPPAGE_NO_PRIVATE_MEMBER_SERIALIZATION
 
 public:
     TruncNormalSlippage();
     virtual ~TruncNormalSlippage();
     virtual void _checkParam(const string& name) const override;
+    virtual void _reset() override;
+    virtual price_t _getRealBuyShortPrice(const Datetime&, price_t) override;
+    virtual price_t _getRealSellShortPrice(const Datetime&, price_t) override;
 
 private:
-    static std::random_device ms_rd;
-    static std::mt19937 ms_gen;
+    void _checkRange(const string& min_name, const string& max_name) const;
+    std::mt19937 m_gen;
 };
 
 } /* namespace hku */

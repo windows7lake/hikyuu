@@ -1,22 +1,33 @@
 /*
+ * AF_FixedWeightList.h
+ *
  * Copyright (c) 2019 hikyuu.org
  *
- *  Created on: 2018年2月8日
+ *  Created on: 2018-2-8
  *      Author: fasiondog
+ *
+ *  AF has an independent class hierarchy (AllocateFundsBase), the factory returns AFPtr.
  */
 
 #pragma once
+#ifndef TRADE_SYS_ALLOCATEFUNDS_CRT_AF_FIXEDWEIGHTLIST_H_
+#define TRADE_SYS_ALLOCATEFUNDS_CRT_AF_FIXEDWEIGHTLIST_H_
 
 #include "../AllocateFundsBase.h"
 
 namespace hku {
 
 /**
- * @brief 固定比例资产分配
- * @param weights 指定的资产比例列表
+ * @brief Fixed proportion asset allocation
+ * @details L1 takes weights[i] one by one in order, **without normalization**, equivalent to master
+ *          FixedWeightListAllocateFunds with auto_adjust_weight=false. An empty list is rejected
+ *          (it cannot price anything), a length mismatch falls back to the equal weight
+ * @param weights the given asset proportion list
  * @return AFPtr
  * @ingroup AllocateFunds
  */
 AFPtr HKU_API AF_FixedWeightList(const vector<double>& weights);
 
-} /* namespace hku */
+}  // namespace hku
+
+#endif /* TRADE_SYS_ALLOCATEFUNDS_CRT_AF_FIXEDWEIGHTLIST_H_ */

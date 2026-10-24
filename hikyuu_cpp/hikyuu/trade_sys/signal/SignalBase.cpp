@@ -5,9 +5,16 @@
  *      Author: fasiondog
  */
 
+#include <algorithm>
+#include <cmath>
 #include "SignalBase.h"
 
 namespace hku {
+
+namespace {
+// Signals below this magnitude are float residuals (e.g. sg*0.5 - sg/2), not real intents
+constexpr double ZERO_SIGNAL_THRESHOLD = 1e-10;
+}  // namespace
 
 HKU_API std::ostream& operator<<(std::ostream& os, const SignalBase& sg) {
     os << "Signal(" << sg.name() << ", " << sg.getParameter() << ")";
@@ -35,41 +42,47 @@ SignalBase::SignalBase(const string& name) : m_name(name), m_hold_long(false), m
 SignalBase::~SignalBase() {}
 
 void SignalBase::initParam() {
-    setParam<bool>("cycle", false);                 // 仅在指定周期范围内计算
-    setParam<bool>("alternate", true);              // 买入卖出信号交替出现
-    setParam<bool>("support_borrow_stock", false);  // 支持发出空头信号
+    setParam<bool>("cycle", false);  // A marker of the cycle signals: they consume the rebalancing
+                                     // days declared by a MultiSystem (it no longer limits the
+                                     // calculation range)
+    setParam<bool>("alternate", true);              // The buy and sell signals appear alternately
+    setParam<bool>("support_borrow_stock", false);  // Support issuing a short signal
 }
 
 void SignalBase::baseCheckParam(const string& name) const {}
 void SignalBase::paramChanged() {
     m_calculated = false;
+    _normalizeCycleAlternate();
+}
+
+void SignalBase::_normalizeCycleAlternate() {
+    HKU_IF_RETURN(!tryGetParam<bool>("cycle", false), void());
+    HKU_IF_RETURN(!tryGetParam<bool>("alternate", true), void());
+    HKU_WARN("The cycle signal {} ignores alternate=true: a scheduled signal must not alternate!",
+             m_name);
+    m_params.set<bool>("alternate", false);
 }
 
 SignalPtr SignalBase::clone() {
-    SignalPtr p;
-    try {
-        p = _clone();
-    } catch (...) {
-        HKU_ERROR("Subclass _clone failed!");
-        p = SignalPtr();
-    }
-
-    if (!p || p.get() == this) {
-        HKU_ERROR("Failed clone! Will use self-ptr!");
-        return shared_from_this();
-    }
+    SignalPtr p = _clone();
+    HKU_CHECK(p && p.get() != this,
+              "Failed clone! The subclass _clone of {} must return a new object!", m_name);
 
     p->m_name = m_name;
     p->m_params = m_params;
     p->m_is_python_object = m_is_python_object;
+    p->m_keepSignals = m_keepSignals;
     p->m_kdata = m_kdata;
-    p->m_calculated = m_calculated;
+    // The clone recalculates lazily so the subclass runtime state (e.g. the Python subclass
+    // cache) is rebuilt on the next setTO instead of keeping the stale snapshot
+    p->m_calculated = false;
     p->m_hold_long = m_hold_long;
     p->m_hold_short = m_hold_short;
     p->m_buySig = m_buySig;
     p->m_sellSig = m_sellSig;
     p->m_cycle_start = m_cycle_start;
     p->m_cycle_end = m_cycle_end;
+    p->m_cycle_dates = m_cycle_dates;
     return p;
 }
 
@@ -77,40 +90,68 @@ void SignalBase::setTO(const KData& kdata) {
     HKU_IF_RETURN(m_calculated && m_kdata == kdata, void());
     m_kdata = kdata;
     m_calculated = false;
+
+    if (!m_keepSignals) {
+        m_buySig.clear();
+        m_sellSig.clear();
+        m_hold_long = false;
+        m_hold_short = false;
+    }
+
     HKU_IF_RETURN(kdata.empty(), void());
 
-    bool cycle = getParam<bool>("cycle");
-    m_cycle_start = kdata[0].datetime;
-
-    if (!cycle) {
-        _calculate(kdata);
-    }
+    _calculate(kdata);
 
     m_calculated = true;
 }
 
 void SignalBase::reset() {
     m_kdata = Null<KData>();
-    m_buySig.clear();
-    m_sellSig.clear();
-    m_hold_long = false;
-    m_hold_short = false;
+    if (!m_keepSignals) {
+        m_buySig.clear();
+        m_sellSig.clear();
+        m_hold_long = false;
+        m_hold_short = false;
+    }
     m_cycle_start = Null<Datetime>();
     m_cycle_end = Null<Datetime>();
+    m_cycle_dates.clear();
     _reset();
 }
 
 void SignalBase::startCycle(const Datetime& start, const Datetime& close) {
+    // Only a cycle signal consumes the declared cycle days; the other signals keep their full-range
+    // calculation untouched
     HKU_IF_RETURN(!getParam<bool>("cycle"), void());
-    HKU_CHECK(start != Null<Datetime>() && close != Null<Datetime>() && start < close, "{}",
-              m_name);
-    HKU_CHECK(start >= m_cycle_end || m_cycle_end == Null<Datetime>(),
-              "curretn start: {}, pre cycle end: {}", start, m_cycle_end);
+    HKU_CHECK(!start.isNull() && !close.isNull() && start < close, "{}", m_name);
+    HKU_CHECK(start >= m_cycle_end || m_cycle_end.isNull(), "curretn start: {}, pre cycle end: {}",
+              start, m_cycle_end);
     m_cycle_start = start;
     m_cycle_end = close;
-    KData kdata = m_kdata.getKData(start, close);
-    if (!kdata.empty()) {
-        _calculate(kdata);
+
+    DatetimeList dates = m_cycle_dates;
+    dates.push_back(start);
+    setCycleDates(dates);
+}
+
+void SignalBase::setCycleDates(const DatetimeList& dates) {
+    HKU_IF_RETURN(dates == m_cycle_dates, void());
+
+    DatetimeList sorted;
+    sorted.reserve(dates.size());
+    for (const auto& date : dates) {
+        if (!date.isNull()) {
+            sorted.push_back(date);
+        }
+    }
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    HKU_IF_RETURN(sorted == m_cycle_dates, void());
+
+    m_cycle_dates = std::move(sorted);
+    m_calculated = false;
+    if (!m_kdata.empty()) {
+        setTO(m_kdata);
     }
 }
 
@@ -142,63 +183,61 @@ double SignalBase::getSellValue(const Datetime& datetime) const {
 }
 
 void SignalBase::_addSignal(const Datetime& datetime, double value) {
-    HKU_IF_RETURN(iszero(value) || std::isnan(value), void());
+    HKU_IF_RETURN(!std::isfinite(value) || std::abs(value) < ZERO_SIGNAL_THRESHOLD, void());
 
-    double new_value = value + getBuyValue(datetime) + getSellValue(datetime);
-    HKU_IF_RETURN(iszero(new_value), void());
+    auto buy_iter = m_buySig.find(datetime);
+    auto sell_iter = m_sellSig.find(datetime);
+    double buy_value = buy_iter != m_buySig.end() ? buy_iter->second : 0.0;
+    double sell_value = sell_iter != m_sellSig.end() ? sell_iter->second : 0.0;
+    double new_value = value + buy_value + sell_value;
+    HKU_IF_RETURN(!std::isfinite(new_value), void());
 
+    if (std::abs(new_value) < ZERO_SIGNAL_THRESHOLD) {
+        // A zero net leaves no direction: drop the records already written for the day. The hold
+        // flags keep the alternation sequence and are not derived from the tables
+        m_buySig.erase(datetime);
+        m_sellSig.erase(datetime);
+        return;
+    }
+
+    // One day carries one direction only: the written table receives the merged net value and the
+    // opposite record of the same day is dropped, otherwise both shouldBuy and shouldSell hold.
+    // When the alternation state rejects a new entry, a record already flagged for the day is
+    // still refreshed with the net value (it is not a new entry, only a value update)
+    bool alternate = getParam<bool>("alternate");
     if (new_value > 0.0) {
-        auto iter = m_buySig.find(datetime);
-        if (!getParam<bool>("alternate")) {
-            if (iter != m_buySig.end()) {
-                iter->second += new_value;
-            } else {
-                m_buySig.insert({datetime, new_value});
+        if (!alternate || !m_hold_long) {
+            m_sellSig.erase(datetime);
+            m_buySig[datetime] = new_value;
+            if (alternate) {
+                if (getParam<bool>("support_borrow_stock") && m_hold_short) {
+                    m_hold_short = false;
+                } else {
+                    m_hold_long = true;
+                }
             }
-            return;
+        } else if (buy_iter != m_buySig.end()) {
+            m_sellSig.erase(datetime);
+            m_buySig[datetime] = new_value;
         }
+        return;
+    }
 
-        if (!m_hold_long) {
-            if (iter != m_buySig.end()) {
-                iter->second += new_value;
-            } else {
-                m_buySig.insert({datetime, new_value});
-            }
-            if (getParam<bool>("support_borrow_stock") && m_hold_short) {
-                m_hold_short = false;
-            } else {
-                m_hold_long = true;
-            }
-        }
-
-    } else {
-        auto iter = m_sellSig.find(datetime);
-        if (!getParam<bool>("alternate")) {
-            if (iter != m_sellSig.end()) {
-                iter->second += new_value;
-            } else {
-                m_sellSig.insert({datetime, new_value});
-            }
-            return;
-        }
-
-        if (!m_hold_short) {
+    bool allow_sell =
+      !alternate || (!m_hold_short && (m_hold_long || getParam<bool>("support_borrow_stock")));
+    if (allow_sell) {
+        m_buySig.erase(datetime);
+        m_sellSig[datetime] = new_value;
+        if (alternate) {
             if (m_hold_long) {
-                if (iter != m_sellSig.end()) {
-                    iter->second += new_value;
-                } else {
-                    m_sellSig.insert({datetime, new_value});
-                }
                 m_hold_long = false;
-            } else if (getParam<bool>("support_borrow_stock")) {
-                if (iter != m_sellSig.end()) {
-                    iter->second += new_value;
-                } else {
-                    m_sellSig.insert({datetime, new_value});
-                }
+            } else {
                 m_hold_short = true;
             }
         }
+    } else if (sell_iter != m_sellSig.end()) {
+        m_buySig.erase(datetime);
+        m_sellSig[datetime] = new_value;
     }
 }
 

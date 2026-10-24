@@ -27,12 +27,19 @@ void IDma::_calculate(const Indicator& ind) {
     Indicator ref = prepare(ind);
 
     m_discard = std::max(ind.discard(), ref.discard());
+    if (m_discard >= total) {
+        m_discard = total;
+        return;
+    }
+
     auto* y = this->data();
     const auto* a = ref.data();
     const auto* x = ind.data();
     y[m_discard] = x[m_discard];
     for (size_t i = m_discard + 1; i < total; i++) {
-        if (std::isnan(y[i - 1])) {
+        if (!std::isfinite(x[i]) || !std::isfinite(a[i])) {
+            y[i] = y[i - 1];
+        } else if (!std::isfinite(y[i - 1])) {
             y[i] = x[i];
         } else {
             y[i] = a[i] * x[i] + (1 - a[i]) * y[i - 1];
@@ -51,7 +58,9 @@ void IDma::_increment_calculate(const Indicator& data, size_t start_pos) {
     const auto* a = ref.data();
     const auto* x = data.data();
     for (size_t i = start_pos + 1; i < total; i++) {
-        if (std::isnan(y[i - 1])) {
+        if (!std::isfinite(x[i]) || !std::isfinite(a[i])) {
+            y[i] = y[i - 1];
+        } else if (!std::isfinite(y[i - 1])) {
             y[i] = x[i];
         } else {
             y[i] = a[i] * x[i] + (1 - a[i]) * y[i - 1];

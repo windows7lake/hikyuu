@@ -3,7 +3,7 @@
  *
  *  Copyright (c) 2019 hikyuu.org
  *
- *  Created on: 2019年4月1日
+ *  Created on: 2019-4-1
  *      Author: fasiondog
  */
 
@@ -24,7 +24,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_HHVBARS") {
     StockManager& sm = StockManager::instance();
     Stock stk = sm.getStock("sh000001");
@@ -33,7 +33,7 @@ TEST_CASE("test_HHVBARS") {
 
     Indicator result;
 
-    /** @arg n = 0, 高点顺序上升 */
+    /** @arg n = 0, the highs rise in order */
     PriceList a;
     for (int i = 0; i < 10; ++i) {
         a.push_back(i);
@@ -48,7 +48,7 @@ TEST_CASE("test_HHVBARS") {
         CHECK_EQ(result[i], 0);
     }
 
-    /** @arg n = 0, 高点降序 */
+    /** @arg n = 0, the highs are in a descending order */
     a.clear();
     for (int i = 0; i < 10; ++i) {
         a.push_back(10 - i);
@@ -63,7 +63,7 @@ TEST_CASE("test_HHVBARS") {
         CHECK_EQ(result[i], i);
     }
 
-    /** @arg n = 0， 顺序随机 */
+    /** @arg n = 0, the order is random */
     result = HHVBARS(c, 0);
     CHECK_EQ(result.name(), "HHVBARS");
     CHECK_EQ(result.size(), 10);
@@ -131,7 +131,7 @@ TEST_CASE("test_HHVBARS") {
     CHECK_EQ(result[9], 5);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_HHVBARS_dyn") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-30));
@@ -158,19 +158,20 @@ TEST_CASE("test_HHVBARS_dyn") {
         CHECK_EQ(expect[i], doctest::Approx(result[i]));
     }
 
+    /** @arg the static n = 0 keeps the expanding window */
     expect = HHVBARS(c, 0);
+    CHECK_UNARY(std::isfinite(expect[expect.discard()]));
+
+    /** @arg a per-bar window of 0 is no window at all, so every bar is Null */
     result = HHVBARS(c, IndParam(CVAL(c, 0)));
-    CHECK_EQ(expect.discard(), result.discard());
-    CHECK_EQ(expect.size(), result.size());
-    for (size_t i = 0; i < result.discard(); i++) {
+    CHECK_EQ(result.size(), expect.size());
+    CHECK_EQ(result.discard(), result.size());
+    for (size_t i = 0; i < result.size(); i++) {
         CHECK_UNARY(std::isnan(result[i]));
-    }
-    for (size_t i = expect.discard(); i < expect.size(); i++) {
-        CHECK_EQ(expect[i], doctest::Approx(result[i]));
     }
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_HHVBARS_dyn2") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-30));
@@ -185,12 +186,24 @@ TEST_CASE("test_HHVBARS_dyn2") {
     check_indicator(result, expect);
 }
 
+/** @par Test points */
+TEST_CASE("test_HHVBARS_tied_max_dyn") {
+    /** @arg tied extrema: dynamic path picks the most recent occurrence (TDX) */
+    Indicator c = PRICELIST(PriceList{1.0, 2.0, 2.0, 3.0, 3.0});
+    Indicator expect = HHVBARS(c, 2);
+    Indicator result = HHVBARS(c, IndParam(CVAL(c, 2)));
+    CHECK_EQ(result.discard(), expect.discard());
+    for (size_t i = expect.discard(); i < expect.size(); ++i) {
+        CHECK_EQ(result[i], expect[i]);
+    }
+}
+
 //-----------------------------------------------------------------------------
 // test export
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_HHVBARS_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

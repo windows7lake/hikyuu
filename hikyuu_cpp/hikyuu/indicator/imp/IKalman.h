@@ -13,7 +13,7 @@
 
 namespace hku {
 
-/* kalman滤波 */
+/* Kalman filter */
 class IKalman : public IndicatorImp {
     INDICATOR_IMP(IKalman)
     INDICATOR_IMP_NO_PRIVATE_MEMBER_SERIALIZATION
@@ -21,6 +21,8 @@ class IKalman : public IndicatorImp {
 public:
     IKalman();
     virtual ~IKalman() override;
+
+    virtual void _checkParam(const string& name) const override;
 };
 
 } /* namespace hku */

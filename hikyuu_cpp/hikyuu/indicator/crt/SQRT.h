@@ -16,12 +16,13 @@
 namespace hku {
 
 /**
- * 开平方
+ * Square root
  * @details
  * <pre>
- * 用法：SQRT(X)为X的平方根
- * 例如：SQRT(CLOSE)收盘价的平方根
+ * Usage: SQRT(X) is the square root of X
+ * For example: SQRT(CLOSE) is the square root of the close price
  * </pre>
+ * @note Undefined domain (X < 0) returns null
  * @ingroup Indicator
  */
 Indicator HKU_API SQRT();

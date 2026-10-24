@@ -5,7 +5,9 @@
  *     Author: fasiondog
  */
 
+#include <cmath>
 #include <csignal>
+#include <cstdlib>
 #include <unordered_set>
 #include "hikyuu/utilities/os.h"
 #include "hikyuu/utilities/ini_parser/IniParser.h"
@@ -22,19 +24,27 @@ std::atomic<bool> Strategy::ms_sig_registered = false;
 
 void Strategy::sig_handler(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
-        try {
-            ms_keep_running = false;
-            auto* scheduler = getScheduler();
-            scheduler->stop();
-        } catch (...) {
-            // 忽略异常
-        }
-        std::exit(EXIT_SUCCESS);
+        // Only async-signal-safe operations are allowed in the signal handler
+        ms_keep_running = false;
+        _Exit(EXIT_SUCCESS);
+
+        // The old graceful shutdown path is not async-signal-safe: getScheduler (call_once +
+        // malloc), TimerManager::stop (mutex/swap/join/delete) and std::exit (atexit/flush) may
+        // deadlock or corrupt the heap when the interrupted thread holds the relevant lock. Keep
+        // it for reference; switch to a self-pipe wake-up scheme if graceful shutdown is needed.
+        // try {
+        //     ms_keep_running = false;
+        //     auto* scheduler = getScheduler();
+        //     scheduler->stop();
+        // } catch (...) {
+        //     // Ignore the exception
+        // }
+        // std::exit(EXIT_SUCCESS);
     }
 }
 
 void Strategy::register_signal() {
-    // 确保只注册一次
+    // Make sure it is registered only once
     bool expected = false;
     if (ms_sig_registered.compare_exchange_strong(expected, true)) {
         if (std::signal(SIGINT, sig_handler) == SIG_ERR) {
@@ -50,12 +60,8 @@ Strategy::Strategy(const string& name, const string& config_file)
     _initParam();
     if (m_config_file.empty()) {
         string home = getUserDir();
-        HKU_ERROR_IF(home == "", "Failed get user home path!");
-#if HKU_OS_WINOWS
-        m_config_file = format("{}\\{}", home, ".hikyuu\\hikyuu.ini");
-#else
+        HKU_CHECK_THROW(!home.empty(), std::runtime_error, "Failed get user home path!");
         m_config_file = format("{}/{}", home, ".hikyuu/hikyuu.ini");
-#endif
     }
 }
 
@@ -63,7 +69,6 @@ Strategy::Strategy(const vector<string>& codeList, const vector<KQuery::KType>& 
                    const unordered_map<string, int64_t>& preloadNum, const string& name,
                    const string& config_file)
 : Strategy(name, config_file) {
-    _initParam();
     m_context.setStockCodeList(codeList);
     m_context.setKTypeList(ktypeList);
     m_context.setPreloadNum(preloadNum);
@@ -71,19 +76,17 @@ Strategy::Strategy(const vector<string>& codeList, const vector<KQuery::KType>& 
 
 Strategy::Strategy(const StrategyContext& context, const string& name, const string& config_file)
 : Strategy(name, config_file) {
-    _initParam();
     m_context = context;
 }
 
 Strategy::~Strategy() {
-    // ms_keep_running 用于全局 ctrl-c 终止，不能在释放时释放，否则新创建的策略对象将运行
-    // ms_keep_running = false;
-    event([]() {});
+    stop();
 }
 
 void Strategy::_initParam() {
     setParam<int>("spot_worker_num", 1);
     setParam<string>("quotation_server", string());
+    setParam<bool>("support_short", false);
 }
 
 void Strategy::baseCheckParam(const string& name) const {
@@ -95,15 +98,15 @@ void Strategy::baseCheckParam(const string& name) const {
 void Strategy::paramChanged() {}
 
 bool Strategy::running() const {
-    return ms_keep_running;
+    return ms_keep_running && m_running;
 }
 
 void Strategy::_init() {
     StockManager& sm = StockManager::instance();
 
-    // sm 尚未初始化，则初始化
+    // Initialize sm when it has not been initialized yet
     if (sm.thread_id() == std::thread::id()) {
-        // 注册 ctrl-c 终止信号
+        // Register the ctrl-c termination signal
         if (!runningInPython()) {
             // std::signal(SIGINT, sig_handler);
             register_signal();
@@ -111,7 +114,7 @@ void Strategy::_init() {
 
         CLS_INFO("{} is running! You can press Ctrl-C to terminte ...", m_name);
 
-        // 初始化
+        // Initialization
         hikyuu_init(m_config_file, false, m_context);
 
     } else {
@@ -124,8 +127,10 @@ void Strategy::_init() {
 
     CLS_CHECK(!m_context.getStockCodeList().empty(), "The context does not contain any stocks!");
 
-    // 先将行情接收代理停止，以便后面加入处理函数
-    stopSpotAgent();
+    // Stop the market data receiving agent first, so that the handlers can be added later
+    if (!isBacktesting()) {
+        stopSpotAgent();
+    }
 }
 
 void Strategy::start(bool autoRecieveSpot) {
@@ -135,17 +140,40 @@ void Strategy::start(bool autoRecieveSpot) {
                   m_run_daily_at_funcs.empty(),
                 "No any process function is set!");
 
+    // Re-arm the shared alive token so timers registered in previous runs resume; stop()/
+    // ~Strategy flip it so cross-thread callbacks become no-ops instead of touching a freed object.
+    if (!m_token) {
+        m_token = std::make_shared<RunToken>();
+    }
+    m_token->alive = true;
+    m_running = true;
+
     _init();
 
     _runDailyAt();
 
     if (autoRecieveSpot) {
+        auto token = m_token;
         auto& agent = *getGlobalSpotAgent();
-        agent.addProcess([this](const SpotRecord& spot) { _receivedSpot(spot); });
-        agent.addPostProcess([this](Datetime revTime) {
-            if (m_on_recieved_spot) {
-                event([this, revTime]() { m_on_recieved_spot(this, revTime); });
+        // The agent is stopped here (see _init); clear stale registrations from previous
+        // start()/stop() cycles so they do not accumulate (single-strategy mode, see class doc).
+        agent.clearProcessList();
+        agent.clearPostProcessList();
+        agent.addProcess([this, token](const SpotRecord& spot) {
+            if (!token->alive) {
+                return;
             }
+            _receivedSpot(spot);
+        });
+        agent.addPostProcess([this, token](Datetime revTime) {
+            if (!token->alive || !m_on_recieved_spot) {
+                return;
+            }
+            event([this, token, revTime]() {
+                if (token->alive) {
+                    m_on_recieved_spot(this, revTime);
+                }
+            });
         });
         startSpotAgent(true, getParam<int>("spot_worker_num"),
                        getParam<string>("quotation_server"));
@@ -155,6 +183,24 @@ void Strategy::start(bool autoRecieveSpot) {
 
     CLS_INFO("{} start even loop ...", name());
     _startEventLoop();
+}
+
+void Strategy::stop() {
+    bool was_running = m_running.exchange(false);
+    if (m_token) {
+        m_token->alive = false;
+    }
+    // Invalidate the tasks queued around this stop() (they capture the previous generation and
+    // self-drop on a later restart), discard the queued ones, then wake the loop out of
+    // wait_and_pop so start() can return. Only a running loop consumes the wake-up task;
+    // pushing it unconditionally would abort the next start().
+    m_event_generation.fetch_add(1, std::memory_order_acq_rel);
+    event_type task;
+    while (m_event_queue.try_pop(task)) {
+    }
+    if (was_running && m_event_loop_running.load(std::memory_order_acquire)) {
+        m_event_queue.push(FuncWrapper());
+    }
 }
 
 void Strategy::onChange(
@@ -169,11 +215,19 @@ void Strategy::onReceivedSpot(const std::function<void(Strategy*, const Datetime
 }
 
 void Strategy::_receivedSpot(const SpotRecord& spot) {
+    if (!m_on_change) {
+        return;
+    }
     Stock stk = getStock(format("{}{}", spot.market, spot.code));
     if (!stk.isNull()) {
-        if (m_on_change) {
-            event([this, stk, spot]() { m_on_change(this, stk, spot); });
-        }
+        auto token = m_token;
+        auto sp = std::make_shared<const SpotRecord>(spot);
+        event([this, token, stk, sp]() {
+            if (!token->alive) {
+                return;
+            }
+            m_on_change(this, stk, *sp);
+        });
     }
 }
 
@@ -219,88 +273,136 @@ void Strategy::_runDaily() {
     HKU_IF_RETURN(m_run_daily_at_list.empty(), void());
 
     auto* scheduler = getScheduler();
+    auto token = m_token;
 
     for (auto& run_at : m_run_daily_at_list) {
-        if (run_at.ignoreMarket) {
-            scheduler->addDurationFunc(std::numeric_limits<int>::max(), run_at.delta, run_at.func);
-
-        } else {
-            try {
-                const auto& sm = StockManager::instance();
-                auto market_info = sm.getMarketInfo(run_at.market);
-                HKU_ERROR_IF_RETURN(market_info == Null<MarketInfo>(), void(),
-                                    "market {} not found! The run daily func is discard!",
-                                    run_at.market);
-
-                auto today = Datetime::today();
-                auto now = Datetime::now();
-                TimeDelta now_time = now - today;
-                if (now_time >= market_info.closeTime2()) {
-                    scheduler->addFuncAtTime(
-                      today.nextDay() + market_info.openTime1(), [&run_at]() {
-                          run_at.func();
-                          auto* sched = getScheduler();
-                          sched->addDurationFunc(std::numeric_limits<int>::max(), run_at.delta,
-                                                 run_at.func);
-                      });
-
-                } else if (now_time >= market_info.openTime2()) {
-                    int64_t ticks = now_time.ticks() - market_info.openTime2().ticks();
-                    int64_t delta_ticks = run_at.delta.ticks();
-                    if (ticks % delta_ticks == 0) {
-                        scheduler->addDurationFunc(std::numeric_limits<int>::max(), run_at.delta,
-                                                   run_at.func);
-                    } else {
-                        auto delay =
-                          TimeDelta::fromTicks((ticks / delta_ticks + 1) * delta_ticks - ticks);
-                        scheduler->addFuncAtTime(now + delay, [&run_at]() {
-                            run_at.func();
-                            auto* sched = getScheduler();
-                            sched->addDurationFunc(std::numeric_limits<int>::max(), run_at.delta,
-                                                   run_at.func);
-                        });
-                    }
-
-                } else if (now_time >= market_info.closeTime1()) {
-                    scheduler->addFuncAtTime(today + market_info.openTime2(), [&run_at]() {
-                        run_at.func();
-                        auto* sched = getScheduler();
-                        sched->addDurationFunc(std::numeric_limits<int>::max(), run_at.delta,
-                                               run_at.func);
-                    });
-
-                } else if (now_time < market_info.closeTime1() &&
-                           now_time >= market_info.openTime1()) {
-                    int64_t ticks = now_time.ticks() - market_info.openTime1().ticks();
-                    int64_t delta_ticks = run_at.delta.ticks();
-                    if (ticks % delta_ticks == 0) {
-                        scheduler->addDurationFunc(std::numeric_limits<int>::max(), run_at.delta,
-                                                   run_at.func);
-                    } else {
-                        auto delay =
-                          TimeDelta::fromTicks((ticks / delta_ticks + 1) * delta_ticks - ticks);
-                        scheduler->addFuncAtTime(now + delay, [&run_at]() {
-                            run_at.func();
-                            auto* sched = getScheduler();
-                            sched->addDurationFunc(std::numeric_limits<int>::max(), run_at.delta,
-                                                   run_at.func);
-                        });
-                    }
-
-                } else if (now_time < market_info.openTime1()) {
-                    scheduler->addFuncAtTime(today + market_info.openTime1(), [&run_at]() {
-                        run_at.func();
-                        auto* sched = getScheduler();
-                        sched->addDurationFunc(std::numeric_limits<int>::max(), run_at.delta,
-                                               run_at.func);
-                    });
-
-                } else {
-                    CLS_ERROR("Unknown process! now_time: {}", now_time);
-                }
-            } catch (const std::exception& e) {
-                CLS_THROW("{}", e.what());
+        if (!run_at.periodic_armed) {
+            run_at.periodic_armed = std::make_shared<std::atomic_bool>(false);
+        }
+        auto flag = run_at.periodic_armed;
+        // Only skip when the periodic duration func is truly armed; a pending one-shot
+        // alignment suppressed during stop() would otherwise be lost forever after restart.
+        if (flag->load()) {
+            continue;
+        }
+        // Guarded job (captured by value): skip when the strategy has been stopped/destroyed,
+        // so a timer armed before stop() can never touch a freed object.
+        auto job = [token, f = run_at.func]() {
+            if (!token->alive) {
+                return;
             }
+            f();
+        };
+        // Periodic re-arm keeps using the guarded job; the flag dedupes when an old pending
+        // one-shot races with a freshly registered one after a stop()/start() cycle.
+        auto arm_duration = [token, scheduler, job, flag, delta = run_at.delta]() {
+            if (!token->alive) {
+                return;
+            }
+            if (flag->load()) {
+                return;
+            }
+            scheduler->addDurationFunc(std::numeric_limits<int>::max(), delta, job);
+            flag->store(true);
+        };
+
+        if (run_at.ignoreMarket) {
+            scheduler->addDurationFunc(std::numeric_limits<int>::max(), run_at.delta, job);
+            flag->store(true);
+            continue;
+        }
+        try {
+            const auto& sm = StockManager::instance();
+            auto market_info = sm.getMarketInfo(run_at.market);
+            HKU_ERROR_IF_RETURN(market_info == Null<MarketInfo>(), void(),
+                                "market {} not found! The run daily func is discard!",
+                                run_at.market);
+
+            auto today = Datetime::today();
+            auto now = Datetime::now();
+            TimeDelta now_time = now - today;
+            auto open1 = market_info.openTime1();
+            auto close1 = market_info.closeTime1();
+            auto open2 = market_info.openTime2();
+            auto close2 = market_info.closeTime2();
+            // A single-session market leaves session 2 unset (00:00), which would make the
+            // "after close2" branch below always true; anchor session 2 at close1 so the
+            // branch logic degenerates to session 1 only
+            if (close2 <= close1) {
+                open2 = close1;
+                close2 = close1;
+            }
+            if (now_time >= close2) {
+                scheduler->addFuncAtTime(today.nextDay() + market_info.openTime1(),
+                                         [job, arm_duration, flag]() {
+                                             if (flag->load()) {
+                                                 return;
+                                             }
+                                             job();
+                                             arm_duration();
+                                         });
+
+            } else if (now_time >= open2) {
+                int64_t ticks = now_time.ticks() - open2.ticks();
+                int64_t delta_ticks = run_at.delta.ticks();
+                if (ticks % delta_ticks == 0) {
+                    scheduler->addDurationFunc(std::numeric_limits<int>::max(), run_at.delta, job);
+                    flag->store(true);
+                } else {
+                    auto delay =
+                      TimeDelta::fromTicks((ticks / delta_ticks + 1) * delta_ticks - ticks);
+                    scheduler->addFuncAtTime(now + delay, [job, arm_duration, flag]() {
+                        if (flag->load()) {
+                            return;
+                        }
+                        job();
+                        arm_duration();
+                    });
+                }
+
+            } else if (now_time >= close1) {
+                scheduler->addFuncAtTime(today + open2,
+                                         [job, arm_duration, flag]() {
+                                             if (flag->load()) {
+                                                 return;
+                                             }
+                                             job();
+                                             arm_duration();
+                                         });
+
+            } else if (now_time < close1 && now_time >= open1) {
+                int64_t ticks = now_time.ticks() - market_info.openTime1().ticks();
+                int64_t delta_ticks = run_at.delta.ticks();
+                if (ticks % delta_ticks == 0) {
+                    scheduler->addDurationFunc(std::numeric_limits<int>::max(), run_at.delta, job);
+                    flag->store(true);
+                } else {
+                    auto delay =
+                      TimeDelta::fromTicks((ticks / delta_ticks + 1) * delta_ticks - ticks);
+                    scheduler->addFuncAtTime(now + delay, [job, arm_duration, flag]() {
+                        if (flag->load()) {
+                            return;
+                        }
+                        job();
+                        arm_duration();
+                    });
+                }
+
+            } else if (now_time < market_info.openTime1()) {
+                scheduler->addFuncAtTime(today + market_info.openTime1(),
+                                         [job, arm_duration, flag]() {
+                                             if (flag->load()) {
+                                                 return;
+                                             }
+                                             job();
+                                             arm_duration();
+                                         });
+
+            } else {
+                CLS_ERROR("Unknown process! now_time: {}", now_time);
+            }
+        } catch (const std::exception& e) {
+            CLS_THROW("{}", e.what());
         }
     }
 }
@@ -332,21 +434,41 @@ void Strategy::runDailyAt(const std::function<void(Strategy*)>& func, const Time
 
 void Strategy::_runDailyAt() {
     auto* scheduler = getScheduler();
+    auto token = m_token;
     for (const auto& [time, func] : m_run_daily_at_funcs) {
-        scheduler->addFuncAtTimeEveryDay(time, func);
+        // Register each task only once; the timers keep the shared token, so they resume after
+        // a stop()/start() cycle instead of being silently lost.
+        if (m_registered_daily_at.count(time) != 0) {
+            continue;
+        }
+        m_registered_daily_at.insert(time);
+        scheduler->addFuncAtTimeEveryDay(time, [token, func]() {
+            if (!token->alive) {
+                return;
+            }
+            func();
+        });
     }
-    m_run_daily_at_funcs.clear();
 }
 
 /*
- * 在主线程中处理事件队列，避免 python GIL
+ * Process the event queue in the main thread, avoiding the python GIL
  */
 void Strategy::_startEventLoop() {
-    while (ms_keep_running) {
+    m_event_loop_running = true;
+    while (ms_keep_running && m_running) {
         event_type task;
+        // Release the GIL during the blocking wait (Python binding); wait_and_pop never throws,
+        // so the pre/post hooks stay balanced
+        if (m_pre_wait_hook) {
+            m_pre_wait_hook();
+        }
         m_event_queue.wait_and_pop(task);
+        if (m_post_wait_hook) {
+            m_post_wait_hook();
+        }
         if (task.isNullTask()) {
-            ms_keep_running = false;
+            m_running = false;
         } else {
             try {
                 task();
@@ -357,6 +479,7 @@ void Strategy::_startEventLoop() {
             }
         }
     }
+    m_event_loop_running = false;
 }
 
 price_t Strategy::getCurrentPrice(const Stock& stk, const KQuery::KType& ktype) const {
@@ -368,6 +491,10 @@ price_t Strategy::getCurrentPrice(const Stock& stk, const KQuery::KType& ktype) 
 
 KData Strategy::getKData(const Stock& stk, const Datetime& start_date, const Datetime& end_date,
                          const KQuery::KType& ktype, KQuery::RecoverType recover_type) const {
+    // Boundary note: when end_date equals now(), it is used as-is, and the current bar is
+    // excluded by the right-open interval; only when end_date is null or in the future is it
+    // clamped to nextDatetime(), which includes the current bar. That is, the visibility of
+    // the current bar depends on how the caller specifies end_date.
     Datetime new_end_date = end_date;
     if (end_date.isNull() || end_date > now()) {
         new_end_date = nextDatetime();
@@ -378,15 +505,12 @@ KData Strategy::getKData(const Stock& stk, const Datetime& start_date, const Dat
 price_t Strategy::getPriceByTime(const Stock& stk, const TimeDelta& time,
                                  const KQuery::KType& ktype) const {
     Datetime start = today() + time;
-    Datetime end = start + time;
-    if ((now() - today()) != TimeDelta()) {
-        // 非日线级别如分钟线，尝试获取当前时间之后的价格，强制限定为当前时间
-        if (end > now()) {
-            end = now();
-        }
+    Datetime end = start;
+    if (end > now()) {
+        end = now();
     }
     end = end + Seconds(KQuery::getKTypeInSeconds(ktype));
-    KData k = stk.getKData(KQueryByDate(start, end, ktype));
+    KData k = getKData(stk, start, end, ktype, KQuery::NO_RECOVER);
     return k.empty() ? Null<price_t>() : k.back().closePrice;
 }
 
@@ -397,44 +521,110 @@ KData Strategy::getLastKData(const Stock& stk, size_t lastnum, const KQuery::KTy
     size_t out_start = 0, out_end = 0;
     HKU_IF_RETURN(!stk.getIndexRange(query, out_start, out_end), ret);
 
-    int64_t startidx = 0, endidx = 0;
-    endidx = out_end;
+    int64_t endidx = static_cast<int64_t>(out_end);
     int64_t num = static_cast<int64_t>(lastnum);
-    startidx = (endidx > num) ? endidx - num : out_start;
+    int64_t startidx = (endidx > num) ? endidx - num : static_cast<int64_t>(out_start);
 
-    query = KQueryByIndex(startidx, endidx, ktype, recover_type);
-    ret = stk.getKData(query);
+    KData probe = stk.getKData(KQueryByIndex(startidx, startidx + 1, ktype, KQuery::NO_RECOVER));
+    HKU_IF_RETURN(probe.empty(), ret);
+    ret = getKData(stk, probe[0].datetime, Null<Datetime>(), ktype, recover_type);
     return ret;
 }
 
 TradeRecord Strategy::order(const Stock& stk, double num, const string& remark) {
     TradeRecord ret;
+    HKU_ASSERT(m_tm);
+    HKU_WARN_IF_RETURN(!std::isfinite(num), ret, "{} {} order num({}) is invalid!",
+                       stk.market_code(), stk.name(), num);
     HKU_WARN_IF_RETURN(num == 0.0, ret, "{} {} order num is zero!", stk.market_code(), stk.name());
 
     double min_trade_num = stk.minTradeNumber();
     double max_trade_num = stk.maxTradeNumber();
+    HKU_ERROR_IF_RETURN(!(min_trade_num > 0.0), ret, "{} {} invalid minTradeNumber({})!",
+                        stk.market_code(), stk.name(), min_trade_num);
     if (num > 0.0) {
+        // Keep it silent to avoid flooding the log when many sub-lot orders are rejected
         // HKU_WARN_IF_RETURN(num < min_trade_num, ret,
         //                    "Ignore! {} {} order num({}) is less than min trade number({})!",
         //                    stk.market_code(), stk.name(), num, min_trade_num);
         HKU_IF_RETURN(num < min_trade_num, ret);
-        double buy_num = int64_t(num / min_trade_num) * min_trade_num;
+        double buy_num = truncToMultiple(num, min_trade_num);
+        HKU_WARN_IF_RETURN(!std::isfinite(buy_num), ret,
+                           "{} {} order num({}) is not representable!", stk.market_code(),
+                           stk.name(), num);
         if (buy_num > max_trade_num) {
             buy_num = max_trade_num;
         }
-        ret = buy(stk, 0.0, num, 0.0, 0.0, SystemPart::PART_SIGNAL, remark);
+        ret = buy(stk, 0.0, buy_num, 0.0, 0.0, SystemPart::PART_SIGNAL, remark);
 
     } else {
         if (num == -MAX_DOUBLE) {
             ret = sell(stk, 0.0, MAX_DOUBLE, 0.0, 0.0, SystemPart::PART_SIGNAL, remark);
             return ret;
         }
-        double sell_num = int64_t(std::abs(num) / min_trade_num) * min_trade_num;
-        if (sell_num > max_trade_num && sell_num != MAX_DOUBLE) {
-            sell_num = max_trade_num;
-        } else if ((sell_num + num) < min_trade_num) {
-            sell_num = MAX_DOUBLE;  // 指示卖出剩余全部
+        double abs_num = std::abs(num);
+        if (getParam<bool>("support_short")) {
+            // Close-long-then-open-short: sell the long side down to holding first,
+            // then borrow to open a short for the remainder.
+            double hold = m_tm->getHoldNumber(now(), stk);
+            double closed = 0.0;
+            if (abs_num >= hold && hold > 0.0) {
+                ret = sell(stk, 0.0, MAX_DOUBLE, 0.0, 0.0, SystemPart::PART_SIGNAL, remark);
+                // A failed close must not fall through to opening a short, otherwise the same
+                // security ends up locked on both sides.
+                HKU_WARN_IF_RETURN(ret.business == BUSINESS_INVALID, ret,
+                                   "{} {} close long failed, abort opening short!",
+                                   stk.market_code(), stk.name());
+                closed = hold;
+            } else {
+                double close_num = truncToMultiple(abs_num, min_trade_num);
+                HKU_WARN_IF_RETURN(!std::isfinite(close_num), ret,
+                                   "{} {} order num({}) is not representable!", stk.market_code(),
+                                   stk.name(), abs_num);
+                if (close_num > max_trade_num) {
+                    close_num = max_trade_num;
+                }
+                if (close_num > 0.0) {
+                    ret = sell(stk, 0.0, close_num, 0.0, 0.0, SystemPart::PART_SIGNAL, remark);
+                    HKU_WARN_IF_RETURN(ret.business == BUSINESS_INVALID, ret,
+                                       "{} {} close long failed, abort opening short!",
+                                       stk.market_code(), stk.name());
+                }
+                closed = close_num;
+            }
+            double short_num = truncToMultiple(abs_num - closed, min_trade_num);
+            HKU_WARN_IF_RETURN(!std::isfinite(short_num), ret,
+                               "{} {} order num({}) is not representable!", stk.market_code(),
+                               stk.name(), abs_num);
+            if (short_num > max_trade_num) {
+                short_num = max_trade_num;
+            }
+            if (short_num >= min_trade_num) {
+                // sellShort applies the margin rate and borrowable amount internally,
+                // partially filling when they are insufficient
+                ret = sellShort(stk, 0.0, short_num, 0.0, 0.0, SystemPart::PART_SIGNAL, remark);
+            } else if (closed <= 0.0) {
+                HKU_WARN("Ignore! {} {} order num({}) is less than min trade number({})!",
+                         stk.market_code(), stk.name(), abs_num, min_trade_num);
+            }
+            return ret;
         }
+        double sell_num = truncToMultiple(abs_num, min_trade_num);
+        HKU_WARN_IF_RETURN(!std::isfinite(sell_num), ret,
+                           "{} {} order num({}) is not representable!", stk.market_code(),
+                           stk.name(), abs_num);
+        if (sell_num > max_trade_num) {
+            sell_num = max_trade_num;
+        } else if (abs_num != sell_num) {
+            // carry the odd lot only when the position has one and the request closes it
+            double hold = m_tm->getHoldNumber(now(), stk);
+            if (hold > 0.0 && std::fmod(hold, min_trade_num) != 0.0 && abs_num >= hold) {
+                sell_num = MAX_DOUBLE;
+            }
+        }
+        HKU_WARN_IF_RETURN(sell_num <= 0.0, ret,
+                           "Ignore! {} {} sell num({}) is less than min trade number({})!",
+                           stk.market_code(), stk.name(), abs_num, min_trade_num);
         ret = sell(stk, 0.0, sell_num, 0.0, 0.0, SystemPart::PART_SIGNAL, remark);
     }
 
@@ -443,26 +633,57 @@ TradeRecord Strategy::order(const Stock& stk, double num, const string& remark) 
 
 TradeRecord Strategy::orderValue(const Stock& stk, price_t value, const string& remark) {
     TradeRecord ret;
+    HKU_ASSERT(m_tm);
+    HKU_WARN_IF_RETURN(!std::isfinite(value), ret, "{} {} order value({}) is invalid!",
+                       stk.market_code(), stk.name(), value);
     HKU_WARN_IF_RETURN(value == 0.0, ret, "{} {} order value is zero!", stk.market_code(),
                        stk.name());
 
-    auto k = getLastKData(stk, 1, KQuery::DAY, KQuery::NO_RECOVER);  // 取日线当前价
-    HKU_IF_RETURN(k.empty() || k[0].datetime.startOfDay() != today(), ret);
+    auto k = getLastKData(stk, 1, KQuery::DAY, KQuery::NO_RECOVER);  // The current daily-line price
+    HKU_WARN_IF_RETURN(k.empty() || k[0].datetime.startOfDay() != today(), ret,
+                       "{} {} can't order value! The current daily bar is missing!",
+                       stk.market_code(), stk.name());
 
     price_t price = k[0].closePrice;
+    // an invalid daily price (0/NaN) would cause UB in the number conversion
+    HKU_ERROR_IF_RETURN(!(price > 0.0), ret, "Invalid daily price({}) of {} {}!", price,
+                        stk.market_code(), stk.name());
+    double min_trade = stk.minTradeNumber();
+    HKU_ERROR_IF_RETURN(!(min_trade > 0.0), ret, "{} {} invalid minTradeNumber({})!",
+                        stk.market_code(), stk.name(), min_trade);
     if (value > 0.0) {
-        double n = value / price;
-        CostRecord cost = m_tm->getBuyCost(now(), stk, price, n);
-        price_t need_cash = n * price + cost.total;
-        price_t current_cash = m_tm->currentCash();
-        double min_trade = stk.minTradeNumber();
-        while (n > min_trade && need_cash > current_cash) {
-            n = n - min_trade;
-            cost = m_tm->getBuyCost(now(), stk, price, n);
-            need_cash = n * price + cost.total;
-        }
-        if (need_cash > current_cash) {
-            n = 0.0;
+        // Convert it into an integer multiple of the minimum trade quantity
+        // (consistent with the MoneyManagerBase::getBuyNumber convention)
+        double n = truncToMultiple(value / price, min_trade);
+        HKU_WARN_IF_RETURN(!std::isfinite(n), ret,
+                           "{} {} order value({}) is not representable at price({})!",
+                           stk.market_code(), stk.name(), value, price);
+        if (!m_tm->getParam<bool>("support_borrow_cash")) {
+            CostRecord cost = m_tm->getBuyCost(now(), stk, price, n);
+            // The cash needed by the actual trade = the trade quantity * the actual trade price
+            // * the unit of the stock + the total trade cost (consistent with TradeManager::buy)
+            price_t need_cash = n * price * stk.unit() + cost.total;
+            price_t current_cash = m_tm->currentCash();
+            if (need_cash > current_cash) {
+                double low = min_trade, high = n;
+                while (high - low > min_trade) {
+                    double mid = int64_t((low + high) / (2.0 * min_trade)) * min_trade;
+                    if (mid <= low || mid >= high) {
+                        break;
+                    }
+                    cost = m_tm->getBuyCost(now(), stk, price, mid);
+                    if (mid * price * stk.unit() + cost.total <= current_cash) {
+                        low = mid;
+                    } else {
+                        high = mid;
+                    }
+                }
+                n = low;
+                cost = m_tm->getBuyCost(now(), stk, price, n);
+                if (n * price * stk.unit() + cost.total > current_cash) {
+                    n = 0.0;
+                }
+            }
         }
         if (n == 0.0) {
             HKU_WARN("{} {} can buy number is zero!", stk.market_code(), stk.name());
@@ -478,15 +699,25 @@ TradeRecord Strategy::orderValue(const Stock& stk, price_t value, const string& 
 TradeRecord Strategy::buy(const Stock& stk, price_t price, double num, double stoploss,
                           double goal_price, SystemPart part_from, const string& remark) {
     HKU_ASSERT(m_tm);
-    return m_tm->buy(Datetime::now(), stk, price, num, stoploss, goal_price, price, part_from,
-                     remark);
+    return m_tm->buy(now(), stk, price, num, stoploss, goal_price, price, part_from, remark);
 }
 
 TradeRecord Strategy::sell(const Stock& stk, price_t price, double num, price_t stoploss,
                            price_t goal_price, SystemPart part_from, const string& remark) {
     HKU_ASSERT(m_tm);
-    return m_tm->sell(Datetime::now(), stk, price, num, stoploss, goal_price, price, part_from,
-                      remark);
+    return m_tm->sell(now(), stk, price, num, stoploss, goal_price, price, part_from, remark);
+}
+
+TradeRecord Strategy::sellShort(const Stock& stk, price_t price, double num, price_t stoploss,
+                                price_t goal_price, SystemPart part_from, const string& remark) {
+    HKU_ASSERT(m_tm);
+    return m_tm->sellShort(now(), stk, price, num, stoploss, goal_price, price, part_from, remark);
+}
+
+TradeRecord Strategy::buyShort(const Stock& stk, price_t price, double num, price_t stoploss,
+                               price_t goal_price, SystemPart part_from, const string& remark) {
+    HKU_ASSERT(m_tm);
+    return m_tm->buyShort(now(), stk, price, num, stoploss, goal_price, price, part_from, remark);
 }
 
 void HKU_API runInStrategy(const SYSPtr& sys, const Stock& stk, const KQuery& query,
@@ -501,29 +732,8 @@ void HKU_API runInStrategy(const SYSPtr& sys, const Stock& stk, const KQuery& qu
     auto tm = crtBrokerTM(broker, costfunc, sys->name(), other_brokers);
     tm->fetchAssetInfoFromBroker(broker);
     sys->setTM(tm);
-    sys->setSP(SlippagePtr());  // 清除移滑价差算法
+    sys->setSP(SlippagePtr());  // Clear the slippage algorithm
     sys->run(stk, query);
-}
-
-void HKU_API runInStrategy(const PFPtr& pf, const KQuery& query, const OrderBrokerPtr& broker,
-                           const TradeCostPtr& costfunc,
-                           const std::vector<OrderBrokerPtr>& other_brokers) {
-    HKU_ASSERT(pf && broker && pf->getTM());
-    HKU_ASSERT(query != Null<KQuery>());
-
-    auto se = pf->getSE();
-    HKU_ASSERT(se);
-    const auto& sys_list = se->getProtoSystemList();
-    for (const auto& sys : sys_list) {
-        HKU_CHECK(!sys->getSP(), "Exist Slippage part in sys, You must clear it! {}", sys->name());
-        HKU_CHECK(!sys->getParam<bool>("buy_delay") && !sys->getParam<bool>("sell_delay"),
-                  "Thie method only support buy|sell on close!");
-    }
-
-    auto tm = crtBrokerTM(broker, costfunc, pf->name(), other_brokers);
-    tm->fetchAssetInfoFromBroker(broker);
-    pf->setTM(tm);
-    pf->run(query, true);
 }
 
 }  // namespace hku

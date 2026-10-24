@@ -11,7 +11,7 @@
 
 namespace hku {
 
-/* 分位数截断处理 */
+/* Quantile truncation */
 class IQuantileTrunc : public IndicatorImp {
     INDICATOR_IMP(IQuantileTrunc)
     INDICATOR_IMP_SUPPORT_INCREMENT
@@ -21,6 +21,7 @@ public:
     IQuantileTrunc();
     virtual ~IQuantileTrunc() override;
     virtual void _checkParam(const string& name) const override;
+    virtual size_t min_increment_start() const override;
 };
 
 }  // namespace hku

@@ -24,14 +24,18 @@ public:
 
     virtual bool selfAlike(const IndicatorImp& other) const noexcept override;
 
+    virtual bool hasPythonPart() const noexcept override {
+        return IndicatorImp::hasPythonPart() || m_ref_ind.hasPythonPart();
+    }
+
     KData getContextKdata() const;
 
-    // 强制设定自身上下文数据
+    // Forcefully set its own context data
     void setSelfContext(const KData& kdata) {
         m_ref_ind.setContext(kdata);
     }
 
-    // 获取自身上下文数据
+    // Get its own context data
     KData getSelfContext() const {
         return m_ref_ind.getContext();
     }
@@ -40,7 +44,7 @@ private:
     Indicator m_ref_ind;
 
 //============================================
-// 序列化支持
+// Serialization support
 //============================================
 #if HKU_SUPPORT_SERIALIZATION
 private:

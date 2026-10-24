@@ -8,17 +8,17 @@
  */
 
 #pragma once
-#ifndef INDICATOR_CRT_CEIL_H_
-#define INDICATOR_CRT_CEIL_H_
+#ifndef INDICATOR_CRT_CEILING_H_
+#define INDICATOR_CRT_CEILING_H_
 
 #include "CVAL.h"
 
 namespace hku {
 
 /**
- * 向上舍入 (向数值增大方向舍入)
- * 用法：CEILING(A)返回沿A数值增大方向最接近的整数
- * 例如：CEILING(12.3)求得13；CEILING(-3.5)求得-3
+ * Round up (round in the direction of increasing value)
+ * Usage: CEILING(A) returns the nearest integer in the direction of increasing value of A
+ * For example: CEILING(12.3) gives 13; CEILING(-3.5) gives -3
  * @ingroup Indicator
  */
 Indicator HKU_API CEILING();
@@ -33,4 +33,4 @@ inline Indicator CEILING(Indicator::value_t val) {
 
 }  // namespace hku
 
-#endif /* INDICATOR_CRT_CEIL_H_ */
+#endif /* INDICATOR_CRT_CEILING_H_ */

@@ -36,12 +36,8 @@ void hikyuu_init(const string& config_file_name, bool ignore_preload,
 
 void HKU_API hikyuu_init(const StrategyContext& context, bool ignore_preload) {
     string home = getUserDir();
-    HKU_ERROR_IF(home == "", "Failed get user home path!");
-#if HKU_OS_WINOWS
-    string config_file = format("{}\\{}", home, ".hikyuu\\hikyuu.ini");
-#else
+    HKU_CHECK_THROW(!home.empty(), std::runtime_error, "Failed get user home path!");
     string config_file = format("{}/{}", home, ".hikyuu/hikyuu.ini");
-#endif
     hikyuu_init(config_file, ignore_preload, context);
 }
 
@@ -57,16 +53,28 @@ void HKU_API getConfigFromIni(const string& config_file_name, Parameter& basePar
                          config.get("hikyuu", "quotation_server", "ipc:///tmp/hikyuu_real.ipc"));
 
     hkuParam.set<string>("reload_time", config.get("hikyuu", "reload_time", "00:00"));
-    hkuParam.set<string>("lazy_preload", config.get("hikyuu", "lazy_preload", "False"));
+    hkuParam.set<bool>("lazy_preload", config.getBool("hikyuu", "lazy_preload", "False"));
 
-    // 加载权息数据
+    // Load the ex-rights/ex-dividend data
     hkuParam.set<bool>("load_stock_weight", config.getBool("hikyuu", "load_stock_weight", "True"));
 
-    // 加载历史财务数据
+    // Load the historical financial data
     hkuParam.set<bool>("load_history_finance",
                        config.getBool("hikyuu", "load_history_finance", "True"));
 
-    // 插件目录
+    // shm data service (connect to an existing service as the client; disabled by default, the
+    // process runs in the standalone mode when it is not enabled)
+    hkuParam.set<bool>("use_shm_server", config.getBool("hikyuu", "use_shm_server", "False"));
+    hkuParam.set<int64_t>("shm_server_wait_timeout",
+                          config.getInt("hikyuu", "shm_server_wait_timeout", "600"));
+    // IPC runtime directory of the shm data service (socket / lock / segment record files);
+    // empty means the plugin default ~/.hikyuu/ipc. Note: IniParser::get treats an empty
+    // default as "no default" and throws when the option is missing, so guard with hasOption
+    hkuParam.set<string>("shm_ipc_dir", config.hasOption("hikyuu", "shm_ipc_dir")
+                                          ? config.get("hikyuu", "shm_ipc_dir")
+                                          : string());
+
+    // Plugin directory
     hkuParam.set<string>("plugindir", config.get("hikyuu", "plugindir",
                                                  fmt::format("{}/.hikyuu/plugin", getUserDir())));
 

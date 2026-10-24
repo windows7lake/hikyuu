@@ -16,7 +16,9 @@
 namespace hku {
 
 /**
- * 向上截取，如10.1截取后为11
+ * Round toward zero (truncate), e.g. 10.6 rounds to 10 and -10.6 rounds to -10
+ * @param ndigits the number of decimal places to keep; a negative value rounds to the left of the
+ *                decimal point
  * @ingroup Indicator
  */
 Indicator HKU_API ROUNDDOWN(int ndigits = 2);

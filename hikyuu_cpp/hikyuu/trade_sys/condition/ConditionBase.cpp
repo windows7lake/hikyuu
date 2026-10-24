@@ -5,6 +5,7 @@
  *      Author: fasiondog
  */
 
+#include <cmath>
 #include "hikyuu/indicator/crt/PRICELIST.h"
 #include "ConditionBase.h"
 
@@ -43,18 +44,9 @@ void ConditionBase::reset() {
 }
 
 ConditionPtr ConditionBase::clone() {
-    ConditionPtr p;
-    try {
-        p = _clone();
-    } catch (...) {
-        HKU_ERROR("Subclass _clone failed!");
-        p = ConditionPtr();
-    }
-
-    if (!p || p.get() == this) {
-        HKU_ERROR("Failed clone! Will use self-ptr!");
-        return shared_from_this();
-    }
+    ConditionPtr p = _clone();
+    HKU_CHECK(p && p.get() != this,
+              "Failed clone! The subclass _clone of {} must return a new object!", m_name);
 
     p->m_params = m_params;
     p->m_name = m_name;
@@ -63,7 +55,7 @@ ConditionPtr ConditionBase::clone() {
     p->m_date_index = m_date_index;
     p->m_values = m_values;
 
-    // tm、sg由系统运行时进行设定，不作clone
+    // tm and sg are set by the system at runtime, they are not cloned
     // p->m_tm = m_tm->clone();
     // p->m_sg = m_sg->clone();
     return p;
@@ -72,8 +64,9 @@ ConditionPtr ConditionBase::clone() {
 void ConditionBase::setTO(const KData& kdata) {
     HKU_IF_RETURN(kdata == m_kdata, void());
     m_kdata = kdata;
+    m_date_index.clear();
+    m_values.clear();
     if (!kdata.empty()) {
-        m_date_index.clear();
         size_t total = kdata.size();
         m_values.resize(total);
         auto const* ks = m_kdata.data();
@@ -94,14 +87,18 @@ void ConditionBase::_addValid(const Datetime& datetime, price_t value) {
 bool ConditionBase::isValid(const Datetime& datetime) {
     auto iter = m_date_index.find(datetime);
     HKU_IF_RETURN(iter == m_date_index.end(), false);
-    return m_values[iter->second] > 0.;
+    return _isValid(datetime, m_values[iter->second]);
+}
+
+bool ConditionBase::_isValid(const Datetime& datetime, price_t value) const {
+    return std::isfinite(value) && value > 0.;
 }
 
 DatetimeList ConditionBase::getDatetimeList() const {
     DatetimeList result;
-    for (const auto& d : m_date_index) {
-        if (m_values[d.second] > 0.0) {
-            result.emplace_back(d.first);
+    for (const auto& [d, idx] : m_date_index) {
+        if (_isValid(d, m_values[idx])) {
+            result.emplace_back(d);
         }
     }
     return result;
@@ -110,13 +107,11 @@ DatetimeList ConditionBase::getDatetimeList() const {
 Indicator ConditionBase::getValues() const {
     DatetimeList dates;
     PriceList values;
-    for (const auto& d : m_date_index) {
-        dates.push_back(d.first);
-    }
-
-    values.reserve(dates.size());
-    for (const auto& d : dates) {
-        values.push_back(m_values[m_date_index.at(d)]);
+    dates.reserve(m_date_index.size());
+    values.reserve(m_date_index.size());
+    for (const auto& [d, idx] : m_date_index) {
+        dates.emplace_back(d);
+        values.emplace_back(m_values[idx]);
     }
 
     return PRICELIST(values, dates);

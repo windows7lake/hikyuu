@@ -6,7 +6,15 @@
  */
 
 #include <hikyuu/trade_sys/system/build_in.h>
+#include <hikyuu/trade_sys/system/MomentResult.h>
+#include <hikyuu/trade_sys/system/TradeSuggestion.h>
+#include <hikyuu/trade_sys/system/SubSystemContext.h>
+#include <hikyuu/trade_sys/system/imp/MultiSystem.h>
+// The PF factories pass through to the MultiSystem preset configurations
+#include <hikyuu/trade_sys/portfolio/build_in.h>
+#include <hikyuu/trade_sys/allocatefunds/build_in.h>
 #include "../pybind_utils.h"
+#include "../gil_policy.h"
 #include "_System.h"
 
 namespace py = pybind11;
@@ -24,16 +32,16 @@ void PySystem::run(const KData& kdata, bool reset, bool resetAll) {
     PYBIND11_OVERLOAD(void, System, run, kdata, reset, resetAll);
 }
 
-TradeRecord PySystem::runMoment(const Datetime& datetime) {
-    PYBIND11_OVERLOAD(TradeRecord, System, runMoment, datetime);
+MomentResult PySystem::runMoment(const Datetime& datetime) {
+    PYBIND11_OVERLOAD(MomentResult, System, runMoment, datetime);
 }
 
-TradeRecord PySystem::runMomentOnOpen(const Datetime& datetime) {
-    PYBIND11_OVERLOAD(TradeRecord, System, runMomentOnOpen, datetime);
+MomentResult PySystem::runMomentOnOpen(const Datetime& datetime) {
+    PYBIND11_OVERLOAD(MomentResult, System, runMomentOnOpen, datetime);
 }
 
-TradeRecord PySystem::runMomentOnClose(const Datetime& datetime) {
-    PYBIND11_OVERLOAD(TradeRecord, System, runMomentOnClose, datetime);
+MomentResult PySystem::runMomentOnClose(const Datetime& datetime) {
+    PYBIND11_OVERLOAD(MomentResult, System, runMomentOnClose, datetime);
 }
 
 void PySystem::readyForRun() {
@@ -52,74 +60,177 @@ string PySystem::str() const {
     PYBIND11_OVERLOAD(string, System, str);
 }
 
-void PySystem::set_mm(py::object mm) {
+namespace {
+
+// Set the system parts from the wrapped Python objects; usable on any System instance
+// (including plain System objects that are not PySystem instances). pybind11 keeps the
+// source Python object alive as long as the C++ side holds the converted shared_ptr, so
+// the Python objects must NOT be leaked here.
+void system_set_mm(System& sys, py::object mm) {
     py::gil_scoped_acquire gil;
-    auto tmp_mm = mm;
-    setMM(mm.cast<MMPtr>());
-    tmp_mm.release();
+    sys.setMM(mm.cast<MMPtr>());
+}
+
+void system_set_ev(System& sys, py::object ev) {
+    py::gil_scoped_acquire gil;
+    sys.setEV(ev.cast<EnvironmentPtr>());
+}
+
+void system_set_cn(System& sys, py::object cn) {
+    py::gil_scoped_acquire gil;
+    sys.setCN(cn.cast<CNPtr>());
+}
+
+void system_set_sg(System& sys, py::object sg) {
+    py::gil_scoped_acquire gil;
+    sys.setSG(sg.cast<SGPtr>());
+}
+
+void system_set_st(System& sys, py::object st) {
+    py::gil_scoped_acquire gil;
+    sys.setST(st.cast<StoplossPtr>());
+}
+
+void system_set_tp(System& sys, py::object tp) {
+    py::gil_scoped_acquire gil;
+    sys.setTP(tp.cast<StoplossPtr>());
+}
+
+void system_set_pg(System& sys, py::object pg) {
+    py::gil_scoped_acquire gil;
+    sys.setPG(pg.cast<PGPtr>());
+}
+
+void system_set_sp(System& sys, py::object sp) {
+    py::gil_scoped_acquire gil;
+    sys.setSP(sp.cast<SlippagePtr>());
+}
+
+void system_set_tm(System& sys, py::object tm) {
+    py::gil_scoped_acquire gil;
+    sys.setTM(tm.cast<TradeManagerPtr>());
+}
+
+void system_set_af(MultiSystem& sys, py::object af) {
+    py::gil_scoped_acquire gil;
+    sys.setAF(af.cast<AFPtr>());
+}
+
+}  // namespace
+
+void PySystem::set_mm(py::object mm) {
+    system_set_mm(*this, mm);
 }
 
 void PySystem::set_ev(py::object ev) {
-    py::gil_scoped_acquire gil;
-    auto tmp_ev = ev;
-    setEV(ev.cast<EnvironmentPtr>());
-    tmp_ev.release();
+    system_set_ev(*this, ev);
 }
 
 void PySystem::set_cn(py::object cn) {
-    py::gil_scoped_acquire gil;
-    auto tmp_cn = cn;
-    setCN(cn.cast<CNPtr>());
-    tmp_cn.release();
+    system_set_cn(*this, cn);
 }
 
 void PySystem::set_sg(py::object sg) {
-    py::gil_scoped_acquire gil;
-    auto tmp_sg = sg;
-    setSG(sg.cast<SGPtr>());
-    tmp_sg.release();
+    system_set_sg(*this, sg);
 }
 
 void PySystem::set_st(py::object st) {
-    py::gil_scoped_acquire gil;
-    auto tmp_st = st;
-    setST(st.cast<StoplossPtr>());
-    tmp_st.release();
+    system_set_st(*this, st);
 }
 
 void PySystem::set_tp(py::object tp) {
-    py::gil_scoped_acquire gil;
-    auto tmp_tp = tp;
-    setTP(tp.cast<StoplossPtr>());
-    tmp_tp.release();
+    system_set_tp(*this, tp);
 }
 
 void PySystem::set_pg(py::object pg) {
-    py::gil_scoped_acquire gil;
-    auto tmp_pg = pg;
-    setPG(pg.cast<PGPtr>());
-    tmp_pg.release();
+    system_set_pg(*this, pg);
 }
 
 void PySystem::set_sp(py::object sp) {
-    py::gil_scoped_acquire gil;
-    auto tmp_sp = sp;
-    setSP(sp.cast<SlippagePtr>());
-    tmp_sp.release();
+    system_set_sp(*this, sp);
 }
 
 void PySystem::set_tm(py::object tm) {
-    py::gil_scoped_acquire gil;
-    auto tmp_tm = tm;
-    setTM(tm.cast<TradeManagerPtr>());
-    tmp_tm.release();
+    system_set_tm(*this, tm);
+}
+
+PyMultiSystem::PyMultiSystem(const MultiSystem& base) : MultiSystem(base) {}
+
+PyMultiSystem::~PyMultiSystem() {}
+
+void PyMultiSystem::run(const KData& kdata, bool reset, bool resetAll) {
+    PYBIND11_OVERLOAD(void, MultiSystem, run, kdata, reset, resetAll);
+}
+
+MomentResult PyMultiSystem::runMoment(const Datetime& datetime) {
+    PYBIND11_OVERLOAD(MomentResult, MultiSystem, runMoment, datetime);
+}
+
+MomentResult PyMultiSystem::runMomentOnOpen(const Datetime& datetime) {
+    PYBIND11_OVERLOAD(MomentResult, MultiSystem, runMomentOnOpen, datetime);
+}
+
+MomentResult PyMultiSystem::runMomentOnClose(const Datetime& datetime) {
+    PYBIND11_OVERLOAD(MomentResult, MultiSystem, runMomentOnClose, datetime);
+}
+
+void PyMultiSystem::readyForRun() {
+    PYBIND11_OVERLOAD(void, MultiSystem, readyForRun);
+}
+
+void PyMultiSystem::_reset() {
+    PYBIND11_OVERLOAD(void, MultiSystem, _reset);
+}
+
+void PyMultiSystem::_forceResetAll() {
+    PYBIND11_OVERLOAD(void, MultiSystem, _forceResetAll);
+}
+
+string PyMultiSystem::str() const {
+    PYBIND11_OVERLOAD(string, MultiSystem, str);
+}
+
+void PyMultiSystem::set_mm(py::object mm) {
+    system_set_mm(*this, mm);
+}
+
+void PyMultiSystem::set_ev(py::object ev) {
+    system_set_ev(*this, ev);
+}
+
+void PyMultiSystem::set_cn(py::object cn) {
+    system_set_cn(*this, cn);
+}
+
+void PyMultiSystem::set_sg(py::object sg) {
+    system_set_sg(*this, sg);
+}
+
+void PyMultiSystem::set_st(py::object st) {
+    system_set_st(*this, st);
+}
+
+void PyMultiSystem::set_tp(py::object tp) {
+    system_set_tp(*this, tp);
+}
+
+void PyMultiSystem::set_pg(py::object pg) {
+    system_set_pg(*this, pg);
+}
+
+void PyMultiSystem::set_sp(py::object sp) {
+    system_set_sp(*this, sp);
+}
+
+void PyMultiSystem::set_tm(py::object tm) {
+    system_set_tm(*this, tm);
 }
 
 void export_System(py::module& m) {
     m.def("get_system_part_name", getSystemPartName, R"(get_system_part_name(part)
 
-    获取部件的字符串名称
-    
+    Get the string name of the part
+
         - System.Part.ENVIRONMENT  - "EV"
         - System.Part.CONDITION    - "CN"
         - System.Part.SIGNAL       - "SG"
@@ -130,56 +241,119 @@ void export_System(py::module& m) {
         - System.Part.SLIPPAGE     - "SP"
         - System.Part.INVALID      - "--"
 
-    :param int part: System.Part 枚举值
+    :param int part: the System.Part enumeration value
     :rtype: str)");
 
     m.def("get_system_part_enum", getSystemPartEnum, R"(get_system_part_enum(part_name)
 
-     根据系统部件的字符串名称获取相应的枚举值
+     Get the corresponding enumeration value by the string name of the system part
 
-    :param str part_name: 系统部件的字符串名称，参见：:py:func:`getSystemPartName`
+    :param str part_name: the string name of the system part, see: :py:func:`getSystemPartName`
     :rtype: System.Part)");
+
+    //--------------------------------------------------------------------------------------
+    // Recursive combination refactoring: the extensible information model (MomentResult /
+    // TradeSuggestion / SubSystemContext)
+    py::enum_<SuggestionType>(m, "SuggestionType", "The suggestion type")
+      .value("HOLD", SuggestionType::HOLD)
+      .value("BUY", SuggestionType::BUY)
+      .value("SELL", SuggestionType::SELL)
+      .value("CLEAR", SuggestionType::CLEAR);
+
+    py::class_<TradeSuggestion>(
+      m, "TradeSuggestion",
+      "The suggestion instruction with the complete semantic expression (without normalization)")
+      .def(py::init<>())
+      .def_readwrite("stock", &TradeSuggestion::stock)
+      .def_readwrite("sys", &TradeSuggestion::sys)
+      .def_readwrite("type", &TradeSuggestion::type)
+      .def_readwrite("number", &TradeSuggestion::number)
+      .def_readwrite("short_side", &TradeSuggestion::short_side)
+      .def_readwrite("plan_price", &TradeSuggestion::plan_price)
+      .def_readwrite("plan_cash", &TradeSuggestion::plan_cash)
+      .def_readwrite("cash_ratio", &TradeSuggestion::cash_ratio)
+      .def_readwrite("assets_ratio", &TradeSuggestion::assets_ratio)
+      .def_readwrite("target_position_ratio", &TradeSuggestion::target_position_ratio)
+      .def_readwrite("stoploss", &TradeSuggestion::stoploss)
+      .def_readwrite("goalPrice", &TradeSuggestion::goalPrice)
+      .def_readwrite("from", &TradeSuggestion::from)
+      .def_readwrite("urgency", &TradeSuggestion::urgency)
+      .def_readwrite("score", &TradeSuggestion::score)
+      .def_readwrite("remark", &TradeSuggestion::remark);
+
+    py::class_<MomentResult>(
+      m, "MomentResult",
+      "The complete running result (suggestion) of the system instance at a certain moment")
+      .def(py::init<>())
+      .def_readwrite("datetime", &MomentResult::datetime)
+      .def_readwrite("funds_before_open", &MomentResult::funds_before_open)
+      .def_readwrite("funds_before_close", &MomentResult::funds_before_close)
+      .def_readwrite("funds", &MomentResult::funds)
+      .def_readwrite("positions", &MomentResult::positions)
+      .def_readwrite("tradesOnOpen", &MomentResult::tradesOnOpen)
+      .def_readwrite("tradesOnClose", &MomentResult::tradesOnClose)
+      .def_readwrite("delayOnNextOpen", &MomentResult::delayOnNextOpen)
+      .def_readwrite("suggestions", &MomentResult::suggestions)
+      .def_readwrite("pendingOnNextOpen", &MomentResult::pendingOnNextOpen)
+      .def("allTrades", &MomentResult::allTrades)
+      .def("empty", &MomentResult::empty);
+
+    py::class_<SubSystemContext>(m, "SubSystemContext",
+                                 "The MM L1 context (including the mode B quota)")
+      .def(py::init<>())
+      .def_readwrite("sys", &SubSystemContext::sys)
+      .def_readwrite("funds", &SubSystemContext::funds)
+      .def_readwrite("profit_curve", &SubSystemContext::profit_curve)
+      .def_readwrite("total_return", &SubSystemContext::total_return)
+      .def_readwrite("current_weight", &SubSystemContext::current_weight)
+      .def_readwrite("score", &SubSystemContext::score)
+      .def_readwrite("quota", &SubSystemContext::quota)
+      .def_readwrite("suggestion_count", &SubSystemContext::suggestion_count);
 
     //--------------------------------------------------------------------------------------
     py::class_<TradeRequest>(
       m, "TradeRequest",
-      R"(交易请求记录。系统内部在实现延迟操作时登记的交易请求信息。暴露该结构的主要目的是用于
-在“delay”模式（延迟到下一个bar开盘时进行交易）的情况下，系统实际已知下一个Bar将要
-进行交易，此时可通过 System.getBuyTradeRequest() 、 System.getSellTradeRequest()
-来获知下一个BAR是否需要买入/卖出。主要用于提醒或打印下一个Bar需要进行操作。对于系统
-本身的运行没有影响。)")
+      R"(The trade request record. The trade request information registered inside the system when implementing the delayed operation. The main purpose of exposing this structure is to
+in the "delay" mode (delaying the trade to the open of the next bar), the system actually knows that the next Bar will
+trade; at this time, you can know through System.getBuyTradeRequestList() and System.getSellTradeRequestList()
+whether the next BAR needs to buy/sell. It is mainly used to remind or print the operations needed for the next Bar. For the system
+itself, it has no effect on the operation.)")
 
       .def(py::init<>())
       .def("__str__", to_py_str<TradeRequest>)
       .def("__repr__", to_py_str<TradeRequest>)
 
-      .def_readwrite("valid", &TradeRequest::valid, "该交易请求记录是否有效（True | False）")
+      .def_readwrite("valid", &TradeRequest::valid,
+                     "Whether this trade request record is valid (True | False)")
       .def_readwrite("business", &TradeRequest::business,
-                     "交易业务类型，参见：:py:class:`hikyuu.trade_manage.BUSINESS`")
-      .def_readwrite("datetime", &TradeRequest::datetime, "发出交易请求的时刻")
-      .def_readwrite("stoploss", &TradeRequest::stoploss, "发出交易请求时刻的止损价")
+                     "The trade business type, see: :py:class:`hikyuu.trade_manage.BUSINESS`")
+      .def_readwrite("datetime", &TradeRequest::datetime,
+                     "The moment when the trade request was issued")
+      .def_readwrite("stoploss", &TradeRequest::stoploss,
+                     "The stop-loss price at the moment when the trade request was issued")
       .def_readwrite("part", &TradeRequest::from,
-                     "发出交易请求的来源，参见：:py:class:`System.Part`")
-      .def_readwrite("count", &TradeRequest::count, "因操作失败，连续延迟的次数")
+                     "The source of the trade request, see: :py:class:`System.Part`")
+      .def_readwrite("count", &TradeRequest::count,
+                     "The number of the consecutive delays due to the operation failures")
         DEF_PICKLE(TradeRequest);
 
     //--------------------------------------------------------------------------------------
     py::class_<System, SystemPtr, PySystem>(
       m, "System", py::dynamic_attr(),
-      R"(系统基类。需要扩展或实现更复杂的系统交易行为，可从此类继承。
+      R"(The system base class. To extend or implement the more complex system trading behaviors, you can inherit from this class.
 
-系统是指针对单个交易对象的完整策略，包括环境判断、系统有效条件、资金管理、止损、止盈、盈利目标、移滑价差的完整策略，用于模拟回测。
+A system refers to the complete strategy for a single trading object, including the market environment, the system valid condition, the money management, the stop-loss, the take-profit, the profit goal and the slippage; it is used for the simulated backtesting.
 
-公共参数：
+Common parameters:
 
-  - delay=True (bool) : 是否延迟到下一个bar开盘时进行交易
-  - delay_use_current_price=True (bool) : 延迟操作的情况下，是使用当前交易时bar的价格计算新的止损价/止赢价/目标价还是使用上次计算的结果
-  - max_delay_count=3 (int) : 连续延迟交易请求的限制次数，应大于等于0，0表示只允许延迟1次
-  - tp_monotonic=True (bool) : 止赢单调递增
-  - tp_delay_n=3 (int) : 止盈延迟开始的天数，即止盈策略判断从实际交易几天后开始生效
-  - ignore_sell_sg=False (bool) : 忽略卖出信号，只使用止损/止赢等其他方式卖出
-  - ev_open_position=False (bool): 是否使用市场环境判定进行初始建仓
-  - cn_open_position=False (bool): 是否使用系统有效性条件进行初始建仓)")
+  - delay=True (bool): whether to delay the trade to the open of the next bar
+  - delay_use_current_price=True (bool): in the case of the delayed operation, whether to calculate the new stop-loss/take-profit/target price with the price of the bar at the current trade, or use the result calculated last time
+  - max_delay_count=3 (int): the limit on the number of the consecutive delayed trade requests; it should be greater than or equal to 0, and 0 means only one delay is allowed
+  - tp_monotonic=True (bool): the take-profit increases monotonically
+  - tp_delay_n=3 (int): the number of the days when the take-profit delay starts, i.e. the take-profit strategy judgment takes effect only after several days of the actual trading
+  - ignore_sell_sg=False (bool): ignore the sell signal, and sell only by the stop-loss/take-profit and the other ways
+  - ev_open_position=False (bool): whether to use the market environment for the initial position building
+  - cn_open_position=False (bool): whether to use the system valid condition for the initial position building)")
 
       .def(py::init<const string&>())
       .def(py::init<const System&>())
@@ -191,127 +365,221 @@ void export_System(py::module& m) {
 
       .def_property("name", py::overload_cast<>(&System::name, py::const_),
                     py::overload_cast<const string&>(&System::name), py::return_value_policy::copy,
-                    "系统名称")
-      .def_property_readonly("query", &System::getQuery, py::return_value_policy::copy, "查询条件")
-
-      .def_property("to", &System::getTO, &System::setTO, "交易对象 KData")
-
-      //   .def_property("tm", &System::getTM, &System::setTM, "关联的交易管理实例")
+                    "The system name")
+      .def_property_readonly("query", &System::getQuery, py::return_value_policy::copy,
+                             "The query condition")
 
       .def_property(
-        "tm", &System::getTM, [](PySystem& self, py::object py_tm) { self.set_tm(py_tm); },
-        "关联的交易管理实例")
+        "to", &System::getTO,
+        [](System& self, const KData& kdata) {
+            ScopeGilRelease gil(!self.hasPythonPart());
+            self.setTO(kdata);
+        },
+        "The trading object KData")
+
+      //   .def_property("tm", &System::getTM, &System::setTM, "The associated trade manager
+      //   instance")
+
       .def_property(
-        "mm", &System::getMM, [](PySystem& self, py::object py_mm) { self.set_mm(py_mm); },
-        "资金管理策略")
+        "tm", &System::getTM,
+        [](PySystem& self, py::object py_tm) {
+            self.set_tm(py_tm);
+            keep_python_part_alive(py::cast(self), py_tm);
+        },
+        "The associated trade manager instance")
       .def_property(
-        "ev", &System::getEV, [](PySystem& self, py::object py_ev) { self.set_ev(py_ev); },
-        "市场环境判断策略")
+        "mm", &System::getMM,
+        [](PySystem& self, py::object py_mm) {
+            self.set_mm(py_mm);
+            keep_python_part_alive(py::cast(self), py_mm);
+        },
+        "The money management strategy")
       .def_property(
-        "cn", &System::getCN, [](PySystem& self, py::object py_tm) { self.set_cn(py_tm); },
-        "系统有效条件")
+        "ev", &System::getEV,
+        [](PySystem& self, py::object py_ev) {
+            self.set_ev(py_ev);
+            keep_python_part_alive(py::cast(self), py_ev);
+        },
+        "The market environment strategy")
       .def_property(
-        "sg", &System::getSG, [](PySystem& self, py::object py_sig) { self.set_sg(py_sig); },
-        "信号指示器")
+        "cn", &System::getCN,
+        [](PySystem& self, py::object py_tm) {
+            self.set_cn(py_tm);
+            keep_python_part_alive(py::cast(self), py_tm);
+        },
+        "The system valid condition")
       .def_property(
-        "st", &System::getST, [](PySystem& self, py::object py_st) { self.set_st(py_st); },
-        "止损策略")
+        "sg", &System::getSG,
+        [](PySystem& self, py::object py_sig) {
+            self.set_sg(py_sig);
+            keep_python_part_alive(py::cast(self), py_sig);
+        },
+        "The signal generator")
       .def_property(
-        "tp", &System::getTP, [](PySystem& self, py::object py_tp) { self.set_tp(py_tp); },
-        "止盈策略")
+        "st", &System::getST,
+        [](PySystem& self, py::object py_st) {
+            self.set_st(py_st);
+            keep_python_part_alive(py::cast(self), py_st);
+        },
+        "The stop-loss strategy")
       .def_property(
-        "pg", &System::getPG, [](PySystem& self, py::object py_pg) { self.set_pg(py_pg); },
-        "盈利目标策略")
+        "tp", &System::getTP,
+        [](PySystem& self, py::object py_tp) {
+            self.set_tp(py_tp);
+            keep_python_part_alive(py::cast(self), py_tp);
+        },
+        "The take-profit strategy")
       .def_property(
-        "sp", &System::getSP, [](PySystem& self, py::object py_sp) { self.set_sp(py_sp); },
-        "移滑价差算法")
+        "pg", &System::getPG,
+        [](PySystem& self, py::object py_pg) {
+            self.set_pg(py_pg);
+            keep_python_part_alive(py::cast(self), py_pg);
+        },
+        "The profit goal strategy")
+      .def_property(
+        "sp", &System::getSP,
+        [](PySystem& self, py::object py_sp) {
+            self.set_sp(py_sp);
+            keep_python_part_alive(py::cast(self), py_sp);
+        },
+        "The slippage algorithm")
 
       .def("get_param", &System::getParam<boost::any>, R"(get_param(self, name)
 
-    获取指定的参数
+    Get the specified parameter
 
-    :param str name: 参数名称
-    :return: 参数值
-    :raises out_of_range: 无此参数)")
+    :param str name: the parameter name
+    :return: the parameter value
+    :raises out_of_range: no such parameter)")
 
       .def("set_param",
            static_cast<void (System::*)(const std::string&, const boost::any&)>(&System::setParam),
            R"(set_param(self, name, value)
 
-    设置参数
+    Set the parameter
 
-    :param str name: 参数名称
-    :param value: 参数值
-    :raises logic_error: Unsupported type! 不支持的参数类型)")
+    :param str name: the parameter name
+    :param value: the parameter value
+    :raises logic_error: Unsupported type! The parameter type is not supported)")
 
-      .def("have_param", &System::haveParam, "是否存在指定参数")
+      .def("have_param", &System::haveParam, "Whether the specified parameter exists")
 
-      .def("set_not_shared_all", &System::setNotSharedAll, "将所有组件设置为非共享")
+      .def("set_not_shared_all", &System::setNotSharedAll, "Set all the parts to non-shared")
 
       .def("get_stock", &System::getStock, R"(get_stock(self)
 
-    获取关联的证券
+    Get the associated security
 
     :rtype: Stock)")
 
       .def("get_trade_record_list", &System::getTradeRecordList, py::return_value_policy::copy,
            R"(get_trade_record_list(self)
 
-    获取实际执行的交易记录，和 TM 的区别是不包含权息调整带来的交易记录
+    Get the actually executed trade records; the difference from the TM is that it does not contain the trade records caused by the dividend adjustments
 
     :rtype: TradeRecordList)")
 
-      .def("get_buy_trade_request", &System::getBuyTradeRequest, py::return_value_policy::copy,
-           R"(get_buy_trade_request(self)
-  
-    获取买入请求，“delay”模式下查看下一时刻是否存在买入操作
+      .def("get_buy_trade_request_list", &System::getBuyTradeRequestList,
+           py::return_value_policy::copy,
+           R"(get_buy_trade_request_list(self)
 
-    :rtype: TradeRequest)")
+    Get the buy request list; in the "delay" mode, check whether there is a buy operation at the next moment
 
-      .def("get_sell_trade_request", &System::getSellTradeRequest, py::return_value_policy::copy,
-           R"(get_sell_trade_request(self)
+    :rtype: list[TradeRequest])")
 
-    获取卖出请求，“delay”模式下查看下一时刻是否存在卖出操作
+      .def("get_sell_trade_request_list", &System::getSellTradeRequestList,
+           py::return_value_policy::copy,
+           R"(get_sell_trade_request_list(self)
 
-    :rtype: TradeRequest)")
+    Get the sell request list; in the "delay" mode, check whether there is a sell operation at the next moment
 
-      .def("get_sell_short_trade_request", &System::getSellShortTradeRequest,
+    :rtype: list[TradeRequest])")
+
+      .def("get_sell_short_trade_request_list", &System::getSellShortTradeRequestList,
            py::return_value_policy::copy)
-      .def("get_buy_short_trade_request", &System::getBuyShortTradeRequest,
+      .def("get_buy_short_trade_request_list", &System::getBuyShortTradeRequestList,
            py::return_value_policy::copy)
 
       .def("reset", &System::reset,
            R"(reset(self)
 
-    复位，但不包括已有的交易对象，以及共享的部件。)")
+    Reset, but excluding the existing trading object and the shared parts.)")
 
       .def("force_reset_all", &System::forceResetAll,
            R"(force_reset_all(self)
 
-    强制复位所有组件以及清空已有的交易对象，忽略组件的共享属性。)")
+    Forcibly reset all the parts and clear the existing trading object, ignoring the sharing attributes of the parts.)")
 
       .def("clone", &System::clone,
            R"(clone(self)
 
-    克隆操作，会依据部件的共享特性进行克隆，共享部件不进行实际的克隆操作，保持共享。)")
+    The clone operation; it clones according to the sharing attributes of the parts; the shared parts are not actually cloned and remain shared.)")
 
-      .def("run", py::overload_cast<const KQuery&, bool, bool>(&System::run), py::arg("query"),
-           py::arg("reset") = true, py::arg("reset_all") = false)
-      .def("run", py::overload_cast<const KData&, bool, bool>(&System::run), py::arg("kdata"),
-           py::arg("reset") = true, py::arg("reset_all") = false)
-      .def("run", py::overload_cast<const Stock&, const KQuery&, bool, bool>(&System::run),
-           py::arg("stock"), py::arg("query"), py::arg("reset") = true,
-           py::arg("reset_all") = false,
-           R"(run(self, stock, query[, reset=True])
-  
-    运行系统，执行回测
+      .def(
+        "run",
+        [](System& self, const KQuery& query, bool reset, bool reset_all) {
+            ScopeGilRelease gil(!self.hasPythonPart());
+            self.run(query, reset, reset_all);
+        },
+        py::arg("query"), py::arg("reset") = true, py::arg("reset_all") = false,
+        R"(run(self, query, reset=True, reset_all=False)
 
-    :param Stock stock: 交易的证券
-    :param Query query: K线数据查询条件
-    :param bool reset: 执行前是否依据系统部件共享属性复位
-    :param bool reset_all: 强制复位所有部件)")
+    Run the system on the trading object built from the current security and the given query,
+    performing the backtest.
 
-      .def("ready", &System::readyForRun)
+    :param Query query: the K-line data query condition
+    :param bool reset: whether to reset according to the sharing attributes of the system parts before executing
+    :param bool reset_all: forcibly reset all the parts
+
+    The whole run is skipped when reset is False and the system has already calculated on an equal
+    trading object (same security, query and size).)")
+      .def(
+        "run",
+        [](System& self, const KData& kdata, bool reset, bool reset_all) {
+            ScopeGilRelease gil(!self.hasPythonPart());
+            self.run(kdata, reset, reset_all);
+        },
+        py::arg("kdata"), py::arg("reset") = true, py::arg("reset_all") = false,
+        R"(run(self, kdata, reset=True, reset_all=False)
+
+    Run the system on the given trading object, performing the backtest.
+
+    :param KData kdata: the trading object
+    :param bool reset: whether to reset according to the sharing attributes of the system parts before executing
+    :param bool reset_all: forcibly reset all the parts
+
+    The whole run is skipped when reset is False and the system has already calculated on an equal
+    trading object (same security, query and size).)")
+      .def(
+        "run",
+        [](System& self, const Stock& stock, const KQuery& query, bool reset, bool reset_all) {
+            ScopeGilRelease gil(!self.hasPythonPart());
+            self.run(stock, query, reset, reset_all);
+        },
+        py::arg("stock"), py::arg("query"), py::arg("reset") = true, py::arg("reset_all") = false,
+        R"(run(self, stock, query[, reset=True])
+
+    Run the system, performing the backtest
+
+    :param Stock stock: the security to trade
+    :param Query query: the K-line data query condition
+    :param bool reset: whether to reset according to the sharing attributes of the system parts before executing
+    :param bool reset_all: forcibly reset all the parts
+
+    The whole run is skipped when reset is False and the system has already calculated on an equal
+    trading object (same security, query and size).)")
+
+      .def(
+        "ready",
+        [](System& self) {
+            ScopeGilRelease gil(!self.hasPythonPart());
+            self.readyForRun();
+        },
+        R"(ready(self)
+
+    Arm the parts for running: the money manager and the profit goal get the account, and the market
+    environment / condition start from an unknown state. run calls it, so it only needs to be
+    called directly before driving with runMoment.)")
 
       .def(
         "last_suggestion",
@@ -321,9 +589,486 @@ void export_System(py::module& m) {
             py::module json_module = py::module::import("json");
             return json_module.attr("loads")(json_str);
         },
-        "回测完成后，返回最后一天交易记录，以及需要延迟的买入和卖出延迟请求")
+        "After the backtest is completed, return the trade records of the last day, and the "
+        "delayed buy and sell requests that need to be delayed")
+
+      .def("to_suggestions", &System::toSuggestions,
+           "The suggestions produced by the last close stage (an aggregate system returns the "
+           "parent suggestions it converted)")
 
         DEF_PICKLE(System);
+
+    //--------------------------------------------------------------------------------------
+    // Recursive combination refactoring: the aggregate trading system (portfolio backtesting)
+    // PyMultiSystem is registered as the trampoline alias, the Python subclass overrides take
+    // effect
+    py::class_<MultiSystem, PyMultiSystem, System, std::shared_ptr<MultiSystem>>(
+      m, "MultiSystem", py::dynamic_attr(),
+      R"(The aggregate trading system (portfolio backtesting). It holds multiple sub-systems (single-security or nested aggregate), drives them on the open/close stages of a fully aligned time axis, and places the orders on the single real account of the top layer. Arbitrary nesting and a rebalancing cycle are supported; the portfolio-level fund allocation lives in the AF (L1/L2/L3, see AllocateFundsBase).
+
+Running modes (held by the aggregate system itself, set via set_mode or the preset PF factories):
+
+- Mode A "Signal Aggregation" (the default): every sub-system gets a shadow account funded with set_sub_init_cash as a pure signal source (the shadows run continuously and are not reset between bars; run(reset=True) still resets them with the whole system); the parent converts the suggestions into the executable quantity by the AF L2 target conversion (weight x position ratio x the parent net assets, aggregated per instrument) and orders uniformly on its own account. The shadow bookkeeping never touches the real funds.
+
+- Mode B "Fund Allocation" (quota allocation, FOF/MOM style): every selected sub-system is calibrated to the quota allocated by the AF L1 on the rebalancing day BEFORE it is driven (zero-quota liquidation, then the unselected liquidation or the selected cash recycle, then reduce the over-quota part, inject the gap) and trades with the exact quota; a selected sub-system with a zero quota is cleared together with the parent holdings (gated by sell_at_not_selected, and a running sub is exempt when adjust_running_sys is off); the parent mirrors the real instructions of the sub-systems (L2 pass-through) on its own account. The shadow accounts start from zero and follow the cost function of the parent account. The quota cash is a virtual budget: the injections only credit the sub ledger (the parent TM is never debited), and the injections of one rebalancing day are cumulatively capped by the parent's remaining cash, so the mirrored buys stay fundable and the two books stay matched. With sell_at_not_selected the unselected sub-systems (and the parent holdings) are cleared together; otherwise both books keep running.
+
+- Mode C "Shared Account Compatibility" (the legacy Portfolio behavior): no shadow account is created, every sub-system trades DIRECTLY on the single real account of the top layer (shared_tm) and is sized by its own MM; the parent only gates the entry with the SE, keeps the running set driven day by day so that a sell signal is realized on the very day it occurs, and performs no L2 conversion. It exists to reproduce the results of the Portfolio before the refactoring.
+
+Nested modes: the outer mode decides the account topology of a nested aggregate (A: a dedicated shadow account, B: a dedicated quota account, C: the shared parent account) and the inner mode decides how its own sub-systems are scheduled; the SE, sell_at_not_selected, rebalancing cadence and cycle-day declarations of each layer are independent.
+
+Portfolio-level fund allocation (the AF, L1/L2/L3, see AllocateFundsBase for details):
+
+- L1 system-level allocation: decide "how much each sub-system may manage" (the nominal weight in mode A / the real quota written into the context in mode B);
+- L2 behavior-level conversion: turn the sub-system suggestions into the executable quantity of the parent account (mode A: target market value = weight x position ratio x the parent net assets, aggregated per instrument; mode B: the sub-system instruction passes through);
+- L3 portfolio risk control: clip the suggestions at the portfolio dimension (e.g. max_single_position); mode B skips the clipping.)")
+      .def(py::init<>())
+      .def(py::init<const string&>(), py::arg("name") = "MultiSystem")
+      .def(py::init<const SystemList&, const string&>(), py::arg("sys_list"),
+           py::arg("name") = "MultiSystem")
+      .def("add", &MultiSystem::add, py::arg("sys"),
+           "Add a sub-system (with the circular reference detection)")
+      .def("get_system_list", &MultiSystem::getSystemList, "Get the sub-system list")
+      .def(
+        "run",
+        [](MultiSystem& self, const KData& kdata, bool reset, bool reset_all) {
+            ScopeGilRelease gil(!self.hasPythonPart());
+            self.run(kdata, reset, reset_all);
+        },
+        py::arg("kdata"), py::arg("reset") = true, py::arg("reset_all") = false,
+        R"(run(self, kdata, reset=True, reset_all=False)
+
+    The portfolio backtesting entry. kdata is used as the aligned time axis, it traverses every trading day and drives all the sub-systems (open/close) respectively and aggregates the orders.
+    Every sub-system has an independent virtual account, the parent system allocates and orders uniformly on its own account.
+
+    :param KData kdata: the aligned time axis (it should cover the trading days of every sub-system))")
+      .def(
+        "run",
+        [](MultiSystem& self, const KQuery& query, bool reset, bool reset_all) {
+            ScopeGilRelease gil(!self.hasPythonPart());
+            self.run(query, reset, reset_all);
+        },
+        py::arg("query"), py::arg("reset") = true, py::arg("reset_all") = false,
+        R"(run(self, query, reset=True, reset_all=False)
+
+    [master compatibility] Run with the market trading calendar as the driving axis, equivalent to the master Portfolio.run(query).
+
+    The difference from run(kdata): the driving axis no longer takes the dates of the input KData, but takes the trading calendar
+    (the injected fixed time axis takes precedence, otherwise StockManager.get_trading_calendar(query)).
+    The price and ktype context is taken from the KData of the reference instrument (its own instrument -> the first sub-system instrument -> the calendar benchmark index).
+
+    :param Query query: the query condition
+    :param bool reset: whether to reset before running
+    :param bool reset_all: whether to force a full reset before running)")
+      .def(
+        "runMoment",
+        [](MultiSystem& self, const Datetime& datetime) {
+            ScopeGilRelease gil(!self.hasPythonPart());
+            return self.runMoment(datetime);
+        },
+        py::arg("datetime"),
+        R"(runMoment(self, datetime)
+
+    Execute one step at the specified moment, drive all the sub-systems (open/close) respectively, and aggregate the trades and suggestions.
+
+    :param Datetime datetime: the specified date
+    :rtype: MomentResult)")
+      .def(
+        "runMomentOnOpen",
+        [](MultiSystem& self, const Datetime& datetime) {
+            ScopeGilRelease gil(!self.hasPythonPart());
+            return self.runMomentOnOpen(datetime);
+        },
+        py::arg("datetime"),
+        R"(runMomentOnOpen(self, datetime)
+
+    Execute only the open stage at the specified moment: the requests delayed from the previous
+    close are fulfilled and the sub-systems are driven at the open.
+
+    :param Datetime datetime: the specified date
+    :rtype: MomentResult)")
+      .def(
+        "runMomentOnClose",
+        [](MultiSystem& self, const Datetime& datetime) {
+            ScopeGilRelease gil(!self.hasPythonPart());
+            return self.runMomentOnClose(datetime);
+        },
+        py::arg("datetime"),
+        R"(runMomentOnClose(self, datetime)
+
+    Execute only the close stage at the specified moment: the sub-systems generate their signals and
+    close trades, which are aggregated into the parent suggestions.
+
+    :param Datetime datetime: the specified date
+    :rtype: MomentResult)")
+      .def("ready_for_run",
+           [](MultiSystem& self) {
+               ScopeGilRelease gil(!self.hasPythonPart());
+               self.readyForRun();
+           })
+      .def("set_mode", &MultiSystem::setMode, py::arg("mode"),
+           "Set the running mode: \"A\" Signal Aggregation (the default) / \"B\" Fund Allocation "
+           "/ \"C\" Shared Account Compatibility (the legacy Portfolio behavior)")
+      .def_property_readonly("mode", &MultiSystem::getMode,
+                             "The current running mode: \"A\" Signal Aggregation / \"B\" Fund "
+                             "Allocation / \"C\" Shared Account Compatibility")
+      .def(
+        "set_sub_init_cash", &MultiSystem::setSubInitCash, py::arg("cash"),
+        "Set the signal cash of the sub-system shadow account; in mode A the shadow is created "
+        "once and runs continuously (never reset). In mode B the shadow accounts start from zero "
+        "and the quota comes from the L1 allocation, so this value is unused")
+      .def("set_adjust_cycle", &MultiSystem::setAdjustCycle, py::arg("days"),
+           "Set the rebalancing cycle (days); 1 means rebalancing on every close day, 0 is treated "
+           "as 1 at readyForRun, and a negative value is rejected")
+      .def("set_axis_mode", &MultiSystem::setAxisMode, py::arg("mode"),
+           R"(set_axis_mode(self, mode)
+
+    Set the driving time axis mode: "kdata" (the default, the dates of the input KData of run(kdata) are used as the driving axis)
+    or "calendar" (the fixed date table injected by set_date_axis is used as the driving axis). An invalid value is rejected.
+
+    :param str mode: "kdata" / "calendar")")
+      .def("get_axis_mode", &MultiSystem::getAxisMode, "Get the driving time axis mode")
+      .def(
+        "set_date_axis",
+        [](MultiSystem& ms, const py::object& dates) {
+            ms.setDateAxis(get_datetime_list_from_python(dates));
+        },
+        py::arg("dates"),
+        "Set the fixed date table (accepting list/tuple/DatetimeList; it is used as the driving "
+        "axis only when axis_mode == \"calendar\";"
+        "an empty table falls back to the kdata axis with a warning)")
+      .def("get_date_axis", &MultiSystem::getDateAxis, "Get the fixed date table")
+      .def("clear_date_axis", &MultiSystem::clearDateAxis, "Clear the fixed date table")
+      .def(
+        "set_adjust_dates",
+        [](MultiSystem& ms, const py::object& dates) {
+            ms.setAdjustDates(get_datetime_list_from_python(dates));
+        },
+        py::arg("dates"),
+        R"(set_adjust_dates(self, dates)
+
+    Set the external rebalancing day table (when it is not empty it takes precedence as the rebalancing day criterion, otherwise it falls back to the counting judgment of set_adjust_cycle).
+    The input dates are normalized to the zero hour of that day and stored, the rebalancing is only executed on the dates hitting the table.
+
+    :param dates: the Datetime sequence (list/tuple/DatetimeList are all accepted))")
+      .def(
+        "get_adjust_dates",
+        [](const MultiSystem& ms) {
+            // Return a list (DatetimeList) instead of the C++ std::set: consistent with
+            // get_date_axis, and avoid the set conversion failure when Datetime has no __hash__ on
+            // the Python side
+            const auto& dates = ms.getAdjustDates();
+            return DatetimeList(dates.begin(), dates.end());
+        },
+        "Get the external rebalancing day table (already normalized to the zero hour of that day)")
+      .def("clear_adjust_dates", &MultiSystem::clearAdjustDates,
+           "Clear the external rebalancing day table (fall back to the rebalancing cycle counting "
+           "judgment)")
+      .def_static(
+        "calc_adjust_dates",
+        [](const py::object& dates, const string& mode, int adjust_cycle,
+           bool delay_to_trading_day) {
+            return MultiSystem::calcAdjustDates(get_datetime_list_from_python(dates), mode,
+                                                adjust_cycle, delay_to_trading_day);
+        },
+        py::arg("dates"), py::arg("mode"), py::arg("adjust_cycle") = 1,
+        py::arg("delay_to_trading_day") = true,
+        R"(calc_adjust_dates(dates, mode, adjust_cycle=1, delay_to_trading_day=True)
+
+    [Static] Calculate the rebalancing day set on the given trading day axis (a pure function, usable to preview the rebalancing rhythm).
+
+    :param dates: the sorted trading day sequence (list/tuple/DatetimeList)
+    :param str mode: "week" / "month" / "quarter" / "year" (the other values return empty)
+    :param int adjust_cycle: the N-th day within the cycle (<=0 is treated as 1)
+    :param bool delay_to_trading_day: whether to postpone to the first trading day within the current cycle when the target day is not a trading day
+    :rtype: DatetimeList)")
+      .def("set_trade_on_close", &MultiSystem::setTradeOnClose, py::arg("on_close"),
+           "Set whether to execute the rebalancing orders at the close stage")
+      .def("set_auto_checkin", &MultiSystem::setAutoCheckin, py::arg("auto_checkin"),
+           R"(set_auto_checkin(self, auto_checkin)
+
+    Set whether the parent account tops up its own cash when the executable suggestions exceed the
+    available cash (aligned with the money manager auto_checkin). It deposits the gap computed from
+    the money plus the commission instead of borrowing, so the backtest principal is inflated; it is
+    meant to keep the planned quantities tradable, not as a funding policy. It only applies to the
+    parent executor of modes A/B (mode C trades on the shared account and ignores it). The value is
+    snapshotted by readyForRun: a change during a run takes effect at the next preparation.
+
+    :param bool auto_checkin: whether to top up the parent cash)")
+      .def("get_auto_checkin", &MultiSystem::getAutoCheckin,
+           "Get whether the parent account tops up its own cash")
+      .def("set_adjust_mode", &MultiSystem::setAdjustMode, py::arg("mode"),
+           R"(set_adjust_mode(self, mode)
+
+    Set the rebalancing mode (taking over the master PF adjust_mode):
+      - "query" / "day" (the default): continue the "every N close days" counting judgment of set_adjust_cycle;
+      - "week" / "month" / "quarter" / "year": judge the rebalancing days by the runtime period rule ("the adjust_cycle-th day within the cycle" on the driving axis).
+    An invalid value is rejected.
+
+    :param str mode: "query" / "day" / "week" / "month" / "quarter" / "year")")
+      .def("get_adjust_mode", &MultiSystem::getAdjustMode, "Get the rebalancing mode")
+      .def("set_delay_to_trading_day", &MultiSystem::setDelayToTradingDay, py::arg("delay"),
+           "Set whether to postpone to the first trading day within the current cycle when the "
+           "rebalancing day is not a trading day (it takes effect only when "
+           "week/month/quarter/year use the runtime period rule)")
+      .def("get_delay_to_trading_day", &MultiSystem::getDelayToTradingDay,
+           "Get whether the rebalancing day is postponed to the trading day")
+      .def("set_se", &MultiSystem::setSE, py::arg("se"),
+           "Set the trading object selector (optional, only the rebalancing-day stock selection "
+           "filtering)")
+      .def_property_readonly("se", &MultiSystem::getSE, "The trading object selector")
+      .def("set_sell_at_not_selected", &MultiSystem::setSellAtNotSelected, py::arg("on"),
+           "Set whether to force liquidating the unselected sub-systems, and the selected ones "
+           "with a zero "
+           "quota (a running sub is exempt when adjust_running_sys is off), together with their "
+           "shadow/quota accounts (mode B/C; SE is required). In mode B the two books must stay "
+           "matched, so with the default off the unselected sub-systems keep running and only skip "
+           "the quota calibration")
+      .def("get_adjust_turnover", &MultiSystem::getAdjustTurnover,
+           "Get the turnover rate of every rebalancing day (a list of (date, turnover amount / "
+           "total assets))")
+      // The setters delegate to the shared system_set_* free functions (same behavior as the
+      // PySystem set_* methods); the Python parts are kept alive via the keep-alive registry.
+      .def_property(
+        "tm", &MultiSystem::getTM,
+        [](MultiSystem& self, py::object o) {
+            system_set_tm(self, o);
+            keep_python_part_alive(py::cast(self), o);
+        },
+        "The associated trade management instance")
+      .def_property(
+        "mm", &MultiSystem::getMM,
+        [](MultiSystem& self, py::object o) {
+            system_set_mm(self, o);
+            keep_python_part_alive(py::cast(self), o);
+        },
+        "The money management strategy")
+      .def_property(
+        "ev", &MultiSystem::getEV,
+        [](MultiSystem& self, py::object o) {
+            system_set_ev(self, o);
+            keep_python_part_alive(py::cast(self), o);
+        },
+        "The market environment judgment strategy")
+      .def_property(
+        "cn", &MultiSystem::getCN,
+        [](MultiSystem& self, py::object o) {
+            system_set_cn(self, o);
+            keep_python_part_alive(py::cast(self), o);
+        },
+        "The system precondition")
+      .def_property(
+        "sg", &MultiSystem::getSG,
+        [](MultiSystem& self, py::object o) {
+            system_set_sg(self, o);
+            keep_python_part_alive(py::cast(self), o);
+        },
+        "The signal generator")
+      .def_property(
+        "st", &MultiSystem::getST,
+        [](MultiSystem& self, py::object o) {
+            system_set_st(self, o);
+            keep_python_part_alive(py::cast(self), o);
+        },
+        "The stop-loss strategy")
+      .def_property(
+        "tp", &MultiSystem::getTP,
+        [](MultiSystem& self, py::object o) {
+            system_set_tp(self, o);
+            keep_python_part_alive(py::cast(self), o);
+        },
+        "The take-profit strategy")
+      .def_property(
+        "pg", &MultiSystem::getPG,
+        [](MultiSystem& self, py::object o) {
+            system_set_pg(self, o);
+            keep_python_part_alive(py::cast(self), o);
+        },
+        "The profit goal strategy")
+      .def_property(
+        "sp", &MultiSystem::getSP,
+        [](MultiSystem& self, py::object o) {
+            system_set_sp(self, o);
+            keep_python_part_alive(py::cast(self), o);
+        },
+        "The slippage algorithm")
+      .def_property(
+        "af", &MultiSystem::getAF,
+        [](MultiSystem& self, py::object o) {
+            system_set_af(self, o);
+            keep_python_part_alive(py::cast(self), o);
+        },
+        "The portfolio-level fund allocation algorithm (AF, carrying L1/L2/L3; used by the "
+        "aggregate system only)")
+      .def("clone", &MultiSystem::clone)
+      // The aggregate needs its own pickle: inheriting System.__setstate__ mismatches the dynamic
+      // type and aborts the interpreter on loads
+      DEF_PICKLE(MultiSystem);
+
+    //--------------------------------------------------------------------------------------
+    // The PF factories pass through to MultiSystem, keeping the master call style unchanged
+    // (the return type changes from PortfolioPtr to MultiSystem)
+    m.def(
+      "PF_Simple", &PF_Simple, py::arg("tm") = TradeManagerPtr(), py::arg("se") = SE_Fixed(),
+      py::arg("af") = AF_EqualWeight(), py::arg("adjust_cycle") = 1,
+      py::arg("adjust_mode") = "query", py::arg("delay_to_trading_day") = true,
+      py::arg("trade_on_close") = true, py::arg("sell_at_not_selected") = true,
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(), py::keep_alive<0, 3>(),
+      R"(PF_Simple([tm, se, af, adjust_cycle=1, adjust_mode="query", delay_to_trading_day=True, trade_on_close=True, sell_at_not_selected=True])
+
+    Create a multi-instrument, single-system-strategy portfolio (returns MultiSystem running in mode B "Fund Allocation").
+
+    Mode B semantics (quota allocation, FOF/MOM style): on every rebalancing day the AF allocates the
+    quota to each selected sub-system (L1); each selected sub-system is calibrated to its quota BEFORE
+    it is driven (zero-quota liquidation, then the unselected liquidation or the selected cash recycle,
+    then reduce the over-quota part, inject the gap) and trades with the exact quota; the parent mirrors the real instructions of the sub-systems
+    (L2 pass-through) on its own account; the L3 portfolio risk control is skipped (the sub-manager
+    autonomy is respected). ``PF_Simple`` is aligned with the legacy ``SimplePortfolio``: the defaults
+    ``trade_on_close=True`` and ``sell_at_not_selected=True`` force clear the unselected sub-systems
+    together with the parent holdings on the rebalancing day; set ``sell_at_not_selected=False`` to
+    keep them running (they only skip the quota calibration).
+    The sub-system shadow accounts start from zero and follow the cost function of the parent account.
+
+    The rebalancing mode adjust_mode description:
+    - In the "query" mode, it follows the ktype in the input parameter query, at this time adjust_cycle determines the cycle interval
+      by the ktype in query;
+    - In the "day" mode, adjust_cycle is the rebalancing interval days
+    - In the "week" | "month" | "quarter" | "year" mode, adjust_cycle
+      is the corresponding N-th day of every week, the n-th day of every month, the n-th day of every quarter and the n-th day of
+      every year; when delay_to_trading_day is false and that day is not a trading day, the rebalancing is skipped; when
+      delay_to_trading_day is true and that day is not a trading day, it is postponed to the first trading day within the current
+      cycle, e.g. if the rebalancing is specified on the 1st day of every month but the 1st of that month is not a trading day,
+      it is postponed to the first trading day of that month.
+
+    :param TradeManager tm: the trade manager
+    :param SelectorBase se: the trading object selection algorithm
+    :param AllocateFundsBase af: the portfolio-level fund allocation algorithm (AF, carrying L1/L2/L3)
+    :param int adjust_cycle: the rebalancing cycle
+    :param str adjust_mode: the rebalancing mode
+    :param bool delay_to_trading_day: when that day is not a trading day, it is postponed to the first trading day within the current cycle
+    :param bool trade_on_close: whether the trade is executed at the close
+    :param bool sell_at_not_selected: whether to force selling the stocks not selected on the rebalancing day (True by default, aligned with the legacy SimplePortfolio)
+    :rtype: MultiSystem)");
+
+    m.def(
+      "PF_WithoutAF", &PF_WithoutAF, py::arg("tm") = TradeManagerPtr(), py::arg("se") = SE_Fixed(),
+      py::arg("adjust_cycle") = 1, py::arg("adjust_mode") = "query",
+      py::arg("delay_to_trading_day") = true, py::arg("trade_on_close") = true,
+      py::arg("sys_use_self_tm") = false, py::arg("sell_at_not_selected") = false,
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      R"(PF_WithoutAF([tm, se, adjust_cycle=1, adjust_mode="query", delay_to_trading_day=True, trade_on_close=True, sys_use_self_tm=False, sell_at_not_selected=False])
+
+    Create a portfolio without a fund allocation algorithm (returns MultiSystem running in mode C
+    "Shared Account Compatibility", i.e. the legacy Portfolio behavior).
+
+    Mode C semantics (shared account): no shadow account is created, every sub-system trades DIRECTLY
+    on the single real account of the parent (shared_tm) and is sized by its own MM, so the
+    sub-systems compete for the same cash in the pool admission order. The parent keeps the legacy
+    DUAL-POOL driving: the running pool (admitted by the SE) and the force-sell pool (the ones that
+    left the running pool while still holding, driven on the non-rebalancing days only when
+    sell_at_not_selected is on); the two pools stay mutually exclusive. No L2 conversion is done; the
+    AF is only the mode carrier here (L1 takes no quota, L3 is off by default).
+
+    On a rebalancing day a sub-system that the SE stops admitting leaves the running pool no matter
+    whether it still holds: sell_at_not_selected=True liquidates it at once, while the default False
+    gives it ONE last drive (so a sell signal of that very day is still realized) and then stops
+    following it, exactly as the Portfolio before the refactoring did. The driven set follows the SE
+    semantics: an "all selected" SE (e.g. SE_Fixed) degenerates mode C into driving every sub-system
+    every day. Use this factory when the results of the previous release have to be reproduced; the
+    mode A preset now lives in PF_SignalAggregate.
+
+    The rebalancing mode adjust_mode description:
+    - In the "query" mode, it follows the ktype in the input parameter query, at this time adjust_cycle determines the cycle interval
+      by the ktype in query;
+    - In the "day" mode, adjust_cycle is the rebalancing interval days
+    - In the "week" | "month" | "quarter" | "year" mode, adjust_cycle
+      is the corresponding N-th day of every week, the n-th day of every month, the n-th day of every quarter and the n-th day of
+      every year; when delay_to_trading_day is false and that day is not a trading day, the rebalancing is skipped; when
+      delay_to_trading_day is true and that day is not a trading day, it is postponed to the first trading day within the current
+      cycle, e.g. if the rebalancing is specified on the 1st day of every month but the 1st of that month is not a trading day,
+      it is postponed to the first trading day of that month.
+
+    :param TradeManager tm: the trade manager
+    :param SelectorBase se: the trading object selection algorithm
+    :param int adjust_cycle: the rebalancing cycle
+    :param str adjust_mode: the rebalancing mode
+    :param bool delay_to_trading_day: when that day is not a trading day, it is postponed to the first trading day within the current cycle
+    :param bool trade_on_close: whether the trade is executed at the close
+    :param bool sys_use_self_tm: kept for the signature compatibility only; mode C always shares the real account of the parent, so it is ignored with a warning
+    :param bool sell_at_not_selected: whether to force selling the stocks not selected on the rebalancing day
+    :rtype: MultiSystem)");
+
+    m.def(
+      "PF_SignalAggregate", &PF_SignalAggregate, py::arg("tm") = TradeManagerPtr(),
+      py::arg("se") = SE_Fixed(), py::arg("af") = AF_EqualWeight(), py::arg("adjust_cycle") = 1,
+      py::arg("adjust_mode") = "query", py::arg("delay_to_trading_day") = true,
+      py::arg("trade_on_close") = true, py::arg("sell_at_not_selected") = false,
+      py::arg("sub_init_cash") = 100000.0, py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(),
+      R"(PF_SignalAggregate([tm, se, af, adjust_cycle=1, adjust_mode="query", delay_to_trading_day=True, trade_on_close=True, sell_at_not_selected=False, sub_init_cash=100000.0])
+
+    Create a portfolio running in mode A "Signal Aggregation" (the signal sources + the parent uniform ordering).
+
+    Mode A semantics (signal aggregation): the sub-systems are pure signal sources on their shadow
+    accounts (the signal cash is never reset, the shadows run continuously); the parent converts the
+    suggestions into the target positions of the parent account by the AF L2 (target market value =
+    weight x position ratio x the parent net assets, aggregated per instrument and rebalanced by the
+    delta against the current position) and the L3 portfolio risk control applies (e.g.
+    max_single_position).
+    The unselected sub-systems are not force cleared by default (sell_at_not_selected=False);
+    the selected ones with a zero quota follow the same switch.
+
+    This is the preset that PF_WithoutAF carried during the beginning of the three-mode
+    refactoring; PF_WithoutAF now means mode C (the legacy shared-account Portfolio) again, so the
+    mode A preset is named after what it does.
+
+    :param TradeManager tm: the trade manager
+    :param SelectorBase se: the trading object selection algorithm
+    :param AllocateFundsBase af: the portfolio-level fund allocation algorithm (AF, carrying L1/L2/L3)
+    :param int adjust_cycle: the rebalancing cycle
+    :param str adjust_mode: the rebalancing mode "query" | "day" | "week" | "month" | "quarter" | "year"
+    :param bool delay_to_trading_day: when that day is not a trading day, it is postponed to the first trading day within the current cycle
+    :param bool trade_on_close: whether the trade is executed at the close
+    :param bool sell_at_not_selected: whether to force selling the stocks not selected on the rebalancing day
+    :param float sub_init_cash: the signal cash of every sub-system shadow account (never reset)
+    :rtype: MultiSystem)");
+
+    //--------------------------------------------------------------------------------------
+    // The three presets also carry the letter-named aliases PF_ModeA / PF_ModeB / PF_ModeC: the
+    // very same function, the very same parameters and no behavior difference. The semantic names
+    // stay the primary ones; the aliases exist for the lookup and for comparing the modes.
+    m.def(
+      "PF_ModeA", &PF_SignalAggregate, py::arg("tm") = TradeManagerPtr(),
+      py::arg("se") = SE_Fixed(), py::arg("af") = AF_EqualWeight(), py::arg("adjust_cycle") = 1,
+      py::arg("adjust_mode") = "query", py::arg("delay_to_trading_day") = true,
+      py::arg("trade_on_close") = true, py::arg("sell_at_not_selected") = false,
+      py::arg("sub_init_cash") = 100000.0, py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(),
+      R"(PF_ModeA([tm, se, af, adjust_cycle=1, adjust_mode="query", delay_to_trading_day=True, trade_on_close=True, sell_at_not_selected=False, sub_init_cash=100000.0])
+
+    Alias of PF_SignalAggregate (mode A "Signal Aggregation"): the same implementation, the same
+    parameters and no behavior difference.)");
+
+    m.def(
+      "PF_ModeB", &PF_Simple, py::arg("tm") = TradeManagerPtr(), py::arg("se") = SE_Fixed(),
+      py::arg("af") = AF_EqualWeight(), py::arg("adjust_cycle") = 1,
+      py::arg("adjust_mode") = "query", py::arg("delay_to_trading_day") = true,
+      py::arg("trade_on_close") = true, py::arg("sell_at_not_selected") = true,
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(), py::keep_alive<0, 3>(),
+      R"(PF_ModeB([tm, se, af, adjust_cycle=1, adjust_mode="query", delay_to_trading_day=True, trade_on_close=True, sell_at_not_selected=True])
+
+    Alias of PF_Simple (mode B "Fund Allocation", FOF/MOM style): the same implementation, the same
+    parameters and no behavior difference.)");
+
+    m.def(
+      "PF_ModeC", &PF_WithoutAF, py::arg("tm") = TradeManagerPtr(), py::arg("se") = SE_Fixed(),
+      py::arg("adjust_cycle") = 1, py::arg("adjust_mode") = "query",
+      py::arg("delay_to_trading_day") = true, py::arg("trade_on_close") = true,
+      py::arg("sys_use_self_tm") = false, py::arg("sell_at_not_selected") = false,
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      R"(PF_ModeC([tm, se, adjust_cycle=1, adjust_mode="query", delay_to_trading_day=True, trade_on_close=True, sys_use_self_tm=False, sell_at_not_selected=False])
+
+    Alias of PF_WithoutAF (mode C "Shared Account Compatibility", i.e. the Portfolio of the previous
+    release): the same implementation, the same parameters and no behavior difference.)");
 
     //--------------------------------------------------------------------------------------
     m.def(
@@ -332,16 +1077,15 @@ void export_System(py::module& m) {
          py::object cn = py::none(), py::object sg = py::none(), py::object st = py::none(),
          py::object tp = py::none(), py::object pg = py::none(), py::object sp = py::none()) {
           auto sys = make_shared<System>("SYS_Simple");
-          auto* sys_ptr = (PySystem*)sys.get();
-          sys_ptr->set_tm(tm);
-          sys_ptr->set_mm(mm);
-          sys_ptr->set_ev(ev);
-          sys_ptr->set_cn(cn);
-          sys_ptr->set_sg(sg);
-          sys_ptr->set_st(st);
-          sys_ptr->set_tp(tp);
-          sys_ptr->set_pg(pg);
-          sys_ptr->set_sp(sp);
+          system_set_tm(*sys, tm);
+          system_set_mm(*sys, mm);
+          system_set_ev(*sys, ev);
+          system_set_cn(*sys, cn);
+          system_set_sg(*sys, sg);
+          system_set_st(*sys, st);
+          system_set_tp(*sys, tp);
+          system_set_pg(*sys, pg);
+          system_set_sp(*sys, sp);
           return sys;
       },
       py::arg("tm") = py::none(), py::arg("mm") = py::none(), py::arg("ev") = py::none(),
@@ -349,33 +1093,33 @@ void export_System(py::module& m) {
       py::arg("tp") = py::none(), py::arg("pg") = py::none(), py::arg("sp") = py::none(),
       R"(SYS_Simple([tm=None, mm=None, ev=None, cn=None, sg=None, st=None, tp=None, pg=None, sp=None])
 
-  创建简单系统实例（每次交易不进行多次加仓或减仓，即每次买入后在卖出时全部卖出），  系统实例在运行时(调用run方法），至少需要一个配套的交易管理实例、一个资金管理策略
-  和一个信号指示器），可以在创建系统实例后进行指定。如果出现调用run时没有任何输出，
-  且没有正确结果的时候，可能是未设置tm、sg、mm。进行回测时，使用 run 方法，如::
-    
-        #创建模拟交易账户进行回测，初始资金30万
+  Create a simple system instance (no multiple position increases or decreases per trade, i.e. after each buy, sell all when selling); when the system instance runs (calling the run method), it needs at least a matching trade manager instance, a money management strategy
+  and a signal generator), which can be specified after creating the system instance. If there is no output when calling run,
+  and no correct results, it may be that tm, sg, mm are not set. For the backtest, use the run method, e.g.::
+
+        # Create a simulated trading account for the backtest, with an initial capital of 300,000
         my_tm = crtTM(init_cash = 300000)
 
-        #创建信号指示器（以5日EMA为快线，5日EMA自身的10日EMA作为慢线，快线向上穿越慢线时买入，反之卖出）
+        # Create the signal generator (with the 5-day EMA as the fast line and the 10-day EMA of the 5-day EMA itself as the slow line; buy when the fast line crosses the slow line upward, and sell otherwise)
         my_sg = SG_Flex(EMA(C, n=5), slow_n=10)
 
-        #固定每次买入1000股
+        # Fixedly buy 1000 shares each time
         my_mm = MM_FixedCount(1000)
 
-        #创建交易系统并运行
+        # Create the trading system and run it
         sys = SYS_Simple(tm = my_tm, sg = my_sg, mm = my_mm)
         sys.run(sm['sz000001'], Query(-150))
-    
-    :param TradeManager tm: 交易管理实例 
-    :param MoneyManager mm: 资金管理策略
-    :param EnvironmentBase ev: 市场环境判断策略
-    :param ConditionBase cn: 系统有效条件
-    :param SignalBase sg: 信号指示器
-    :param StoplossBase st: 止损策略
-    :param StoplossBase tp: 止盈策略
-    :param ProfitGoalBase pg: 盈利目标策略
-    :param SlippageBase sp: 移滑价差算法
-    :return: system实例)");
+
+    :param TradeManager tm: the trade manager instance
+    :param MoneyManager mm: the money management strategy
+    :param EnvironmentBase ev: the market environment strategy
+    :param ConditionBase cn: the system valid condition
+    :param SignalBase sg: the signal generator
+    :param StoplossBase st: the stop-loss strategy
+    :param StoplossBase tp: the take-profit strategy
+    :param ProfitGoalBase pg: the profit goal strategy
+    :param SlippageBase sp: the slippage algorithm
+    :return: the system instance)");
 
     m.def(
       "SYS_WalkForward",
@@ -393,12 +1137,12 @@ void export_System(py::module& m) {
       py::arg("train_tm") = TradeManagerPtr(),
       R"(SYS_WalkForward(sys_list, tm, train_len, test_len, train_tm)
 
-  创建滚动寻优系统，当输入的候选系统列表中仅有一个候选系统时，即为滚动系统
+  Create a walk-forward optimization system; when there is only one candidate system in the input candidate system list, it is a walk-forward system
 
-  :param sequence sys_list: 候选系统列表
-  :param TradeManager tm: 交易账户
-  :param int train_len: 滚动评估系统绩效时使用的数据长度
-  :param int test_len: 使用在 train_len 中选出的最优系统执行的数据长度
-  :param SelectorBase se: 寻优选择器，默认为按“帐户平均年收益率%”最大选择
-  :param TradeManager train_tm: 滚动评估时使用的交易账户, 为None时, 使用 tm 的拷贝进行评估)");
+  :param sequence sys_list: the candidate system list
+  :param TradeManager tm: the trading account
+  :param int train_len: the data length used when evaluating the system performance in the rolling way
+  :param int test_len: the data length executed with the optimal system selected in train_len
+  :param SelectorBase se: the optimization selector, defaults to selecting the one with the maximum "Account Avg Annual Return %"
+  :param TradeManager train_tm: the trading account used in the rolling evaluation; when it is None, a copy of tm is used for the evaluation)");
 }

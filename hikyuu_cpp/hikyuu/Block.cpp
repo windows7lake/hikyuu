@@ -3,7 +3,7 @@
  *
  *  Copyright (c) hikyuu.org
  *
- *  Created on: 2015年2月8日
+ *  Created on: 2015-2-8
  *      Author: fasiondog
  */
 
@@ -34,7 +34,7 @@ Block::Block(const string& category, const string& name, const string& indexCode
         if (!stock.isNull()) {
             m_data->m_indexStock = stock;
         } else {
-            // 直接忽略不再打印
+            // Ignore it directly, no more printing
             HKU_TRACE("Can't find index stock: {}, will ignore!", indexCode);
         }
     }
@@ -102,6 +102,7 @@ Stock Block::get(const string& market_code) const {
 
 StockList Block::getStockList(std::function<bool(const Stock&)>&& filter) const {
     StockList ret;
+    HKU_IF_RETURN(!m_data, ret);
     ret.reserve(size());
     auto iter = m_data->m_stockDict.begin();
     if (filter) {
@@ -119,7 +120,8 @@ StockList Block::getStockList(std::function<bool(const Stock&)>&& filter) const 
 }
 
 bool Block::add(const Stock& stock) {
-    HKU_IF_RETURN(stock.isNull() || have(stock), false);
+    HKU_IF_RETURN(stock.isNull(), false);
+    HKU_IF_RETURN(have(stock), true);
     if (!m_data)
         m_data = make_shared<Data>();
 
@@ -130,8 +132,10 @@ bool Block::add(const Stock& stock) {
 bool Block::add(const string& market_code) {
     const StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock(market_code);
-    // stock 为空时不打印日志，防止打印过多，尤其是部分累积不用的板块在初始化时会打印很多日志
-    HKU_IF_RETURN(stock.isNull() || have(stock), false);
+    // No log is printed when the stock is empty, to prevent too much printing, especially because
+    // some accumulating and unused blocks print a lot of logs during the initialization
+    HKU_IF_RETURN(stock.isNull(), false);
+    HKU_IF_RETURN(have(stock), true);
     if (!m_data) [[unlikely]]
         m_data = make_shared<Data>();
 
@@ -142,7 +146,9 @@ bool Block::add(const string& market_code) {
 bool Block::add(const StockList& stocks) {
     bool success = true;
     for (const auto& stk : stocks) {
-        success = add(stk);
+        if (!add(stk)) {
+            success = false;
+        }
     }
     return success;
 }
@@ -150,7 +156,9 @@ bool Block::add(const StockList& stocks) {
 bool Block::add(const StringList& market_codes) {
     bool success = true;
     for (const auto& code : market_codes) {
-        success = add(code);
+        if (!add(code)) {
+            success = false;
+        }
     }
     return success;
 }
@@ -187,15 +195,17 @@ uint64_t Block::strongHash() const {
     XXH64_update(state, m_data->m_category.data(), m_data->m_category.size());
     XXH64_update(state, m_data->m_name.data(), m_data->m_name.size());
 
-    StockList stocks = getStockList();
-    std::sort(stocks.begin(), stocks.end(),
-              [](const Stock& a, const Stock& b) { return a.market_code() < b.market_code(); });
-    for (const auto& stk : stocks) {
-        auto stkid = stk.id();
-        XXH64_update(state, &stkid, sizeof(stkid));
+    std::vector<uint64_t> ids;
+    ids.reserve(m_data->m_stockDict.size());
+    for (const auto& kv : m_data->m_stockDict) {
+        ids.push_back(kv.second.id());
+    }
+    std::sort(ids.begin(), ids.end());
+    for (uint64_t idx : ids) {
+        XXH64_update(state, &idx, sizeof(idx));
     }
 
-    // 获取最终哈希值
+    // Get the final hash value
     uint64_t result = XXH64_digest(state);
     XXH64_freeState(state);
     return result;
@@ -207,18 +217,16 @@ bool Block::operator==(const Block& blk) const noexcept {
                     getIndexStock() != blk.getIndexStock(),
                   false);
 
-    auto self_stocks = getStockList();
-    std::sort(self_stocks.begin(), self_stocks.end(),
-              [](const Stock& a, const Stock& b) { return a.market_code() < b.market_code(); });
-
-    auto blk_stocks = blk.getStockList();
-    std::sort(blk_stocks.begin(), blk_stocks.end(),
-              [](const Stock& a, const Stock& b) { return a.market_code() < b.market_code(); });
-
-    for (size_t i = 0; i < self_stocks.size(); i++) {
-        HKU_IF_RETURN(self_stocks[i].market_code() != blk_stocks[i].market_code(), false);
+    if (!m_data || !blk.m_data) {
+        return true;  // both empty (sizes were already compared equal)
     }
-
+    const auto& self_map = m_data->m_stockDict;
+    const auto& blk_map = blk.m_data->m_stockDict;
+    for (const auto& kv : self_map) {
+        if (blk_map.find(kv.first) == blk_map.end()) {
+            return false;
+        }
+    }
     return true;
 }
 

@@ -1,49 +1,87 @@
 /*
+ * PF_WithoutAF.h
+ *
  *  Copyright (c) 2025 hikyuu.org
  *
  *  Created on: 2025-02-18
  *      Author: fasiondog
+ *
+ *  PF is a preset configuration of MultiSystem, so this factory directly returns MultiSystemPtr,
+ *  no shell class is introduced. The returned aggregate system runs in
+ *  **mode C "Shared Account Compatibility"**: no shadow account is created, every sub-system
+ *  trades directly on the single real account of the parent (shared_tm) and is sized by its own
+ *  MM; the parent only gates the entry with the SE, keeps the running pool driven and performs no
+ *  L2 conversion (see the MultiSystem class comment for the full semantics).
+ *
+ *  The name literally means "portfolio without a fund allocation algorithm", which is exactly what
+ *  mode C is. During the three-mode refactoring this factory was temporarily mapped onto mode A;
+ *  it is now restored to mode C so that it keeps reproducing the Portfolio of the previous release
+ *  with no change on the strategy side, and the mode A preset moved to PF_SignalAggregate.
  */
 
 #pragma once
 #ifndef TRADE_SYS_PORTFOLIO_IMP_PF_WITHOUTAF_H_
 #define TRADE_SYS_PORTFOLIO_IMP_PF_WITHOUTAF_H_
 
-#include "../Portfolio.h"
-#include "../../selector/crt/SE_Fixed.h"
+#include "../../system/imp/MultiSystem.h"
+#include "../../selector/SelectorBase.h"
 #include "../../allocatefunds/crt/AF_EqualWeight.h"
+#include "../../selector/crt/SE_Fixed.h"
 
 namespace hku {
 
 /**
- * @brief 无资金分配算法的投资组合
+ * @brief Portfolio without a fund allocation algorithm
  * @details
  * <pre>
- * 调仓模式 adjust_mode 说明：
- *  - "query" 模式，跟随输入参数 query 中的 ktype，此时 adjust_cycle 为以 query 中的 ktype
- *    决定周期间隔；
- *  - "day" 模式，adjust_cycle 为调仓间隔天数
- *  - "week" | "month" | "quarter" | "year" 模式时，adjust_cycle
- *    为对应的每周第N日、每月第n日、每季度第n日、每年第n日，在 delay_to_trading_day 为 false 时
- *    如果当日不是交易日将会被跳过调仓；当 delay_to_trading_day 为 true时，如果当日不是交易日
- *    将会顺延至当前周期内的第一个交易日，如指定每月第1日调仓，但当月1日不是交易日，则将顺延至当月
- *    的第一个交易日
+ * Description of the rebalancing mode adjust_mode:
+ *  - In the "query" mode it follows the ktype in the input parameter query; at this time
+ * adjust_cycle determines the cycle interval with the ktype in query;
+ *  - In the "day" mode adjust_cycle is the number of the days between the rebalancing;
+ *  - In the "week" | "month" | "quarter" | "year" mode, adjust_cycle is the corresponding N-th day
+ * of every week, the n-th day of every month, the n-th day of every quarter and the n-th day of
+ * every year; when delay_to_trading_day is false, the rebalancing is skipped if that day is not a
+ * trading day; when delay_to_trading_day is true, it is postponed to the first trading day within
+ * the current cycle if that day is not a trading day; for example, if the rebalancing is specified
+ * on the 1st day of every month but the 1st is not a trading day, it is postponed to the first
+ * trading day of that month
  * </pre>
- * @note 无资金分配算法模式下，仅支持全部在开盘时买卖或全部在收盘时买卖！
- * @param tm 交易账户
- * @param se 系统选择器
- * @param adjust_cycle 调仓周期（受 adjust_mode 影响）, 默认为1
- * @param adjust_mode 调仓模式 "query" | "day" | "week" | "month" | "year"
- * @param delay_to_trading_day true 时，如果当日不是交易日将会被顺延至当前周期内的第一个交易日
- * @param trade_on_close 在收盘时执行交易
- * @param sys_use_self_tm 使用原型系统自身交易账户进行计算（仅在无资金分配模式下有效），默认 false
- * @param sell_at_not_selected 调仓日未选中的股票是否强制卖出，默认 false
- * @return 组合实例
+ * @note In the mode without a fund allocation algorithm, only all buying and selling at the open or
+ *       all buying and selling at the close is supported!
+ * @note Returns MultiSystemPtr running in mode C "Shared Account Compatibility" (the legacy
+ *       Portfolio behavior): the sub-systems share the real account of the parent and are sized by
+ *       their own MM (so they compete for the same cash, in the pool admission order), the AF is
+ *       only the mode carrier here (L1 takes no quota, L2 needs no conversion, L3 is off by
+ *       default) and the parent never places an extra order.
+ * @note On a rebalancing day a sub-system that the SE stops admitting leaves the running pool no
+ *       matter whether it still holds: sell_at_not_selected=true liquidates it at once, while the
+ *       default false gives it ONE last drive (so a sell signal of that very day is still realized)
+ *       and then stops following it (the position is left as the legacy engine did). The driven set
+ *       follows the SE semantics: an "all selected" SE (e.g. SE_Fixed) degenerates mode C into
+ *       driving every sub-system every day.
+ * @note sys_use_self_tm is kept for the signature compatibility only: in mode C the sub-systems
+ *       always share the real account of the parent, so it is ignored with a warning.
+ * @param tm trade account
+ * @param se system selector
+ * @param adjust_cycle the rebalancing cycle (affected by adjust_mode), 1 by default
+ * @param adjust_mode the rebalancing mode "query" | "day" | "week" | "month" | "year"
+ * @param delay_to_trading_day when it is true, it is postponed to the first trading day within the
+ *                             current cycle if the rebalancing day is not a trading day
+ * @param trade_on_close execute the trade at the close
+ * @param sys_use_self_tm kept for the signature compatibility only: mode C always shares the real
+ *                        account of the parent with its sub-systems, so it is ignored with a
+ *                        warning
+ * @param sell_at_not_selected whether to force selling the stocks not selected on the rebalancing
+ *                             day, false by default
+ * @return the portfolio instance (MultiSystemPtr)
+ * @ingroup Portfolio
  */
-PortfolioPtr HKU_API PF_WithoutAF(const TMPtr& tm = TradeManagerPtr(), const SEPtr& se = SE_Fixed(),
-                                  int adjust_cycle = 1, const string& adjust_mode = "query",
-                                  bool delay_to_trading_day = true, bool trade_on_close = true,
-                                  bool sys_use_self_tm = false, bool sell_at_not_selected = false);
+MultiSystemPtr HKU_API PF_WithoutAF(const TMPtr& tm = TradeManagerPtr(),
+                                    const SEPtr& se = SE_Fixed(), int adjust_cycle = 1,
+                                    const string& adjust_mode = "query",
+                                    bool delay_to_trading_day = true, bool trade_on_close = true,
+                                    bool sys_use_self_tm = false,
+                                    bool sell_at_not_selected = false);
 
 } /* namespace hku */
 

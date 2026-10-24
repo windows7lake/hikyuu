@@ -1,7 +1,7 @@
 /*
  * FixedRiskMM.h
  *
- *  Created on: 2016年5月1日
+ *  Created on: 2016-5-1
  *      Author: Administrator
  */
 
@@ -21,6 +21,8 @@ public:
     FixedRiskMoneyManager();
     virtual ~FixedRiskMoneyManager();
     virtual void _checkParam(const string& name) const override;
+    virtual double _getSellShortNumber(const Datetime& datetime, const Stock& stock, price_t price,
+                                       price_t risk, SystemPart from) override;
 };
 
 } /* namespace hku */

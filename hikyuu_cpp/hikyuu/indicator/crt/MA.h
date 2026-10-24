@@ -6,25 +6,27 @@
  */
 
 #pragma once
-#ifndef MA_H_
-#define MA_H_
+#ifndef INDICATOR_CRT_MA_H_
+#define INDICATOR_CRT_MA_H_
 
 #include "../Indicator.h"
 
 namespace hku {
 
 /**
- * 简单移动平均
- * @param n 计算均值的周期窗口，n为0时从第一个有效数据开始计算
+ * Simple moving average
+ * @param n the period window for calculating the average; when n is 0 the calculation starts from
+ *          the first valid data
  * @ingroup Indicator
  */
 Indicator HKU_API MA(int n = 22);
 Indicator HKU_API MA(const IndParam& n);
 
 /**
- * 简单移动平均
- * @param ind 待计算的数据
- * @param n 计算均值的周期窗口，n为0时从第一个有效数据开始计算
+ * Simple moving average
+ * @param ind the data to be calculated
+ * @param n the period window for calculating the average; when n is 0 the calculation starts from
+ *          the first valid data
  * @ingroup Indicator
  */
 inline Indicator MA(const Indicator& ind, int n = 22) {
@@ -41,4 +43,4 @@ inline Indicator MA(const Indicator& ind, const Indicator& n) {
 
 }  // namespace hku
 
-#endif /* MA_H_ */
+#endif /* INDICATOR_CRT_MA_H_ */

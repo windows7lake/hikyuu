@@ -7,6 +7,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "ILowLineBars.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -23,7 +24,7 @@ ILowLineBars::~ILowLineBars() {}
 
 void ILowLineBars::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 0);
+        HKU_ASSERT(getParam<int>("n") >= 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -150,7 +151,7 @@ void ILowLineBars::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t
     price_t minVal = ind[start];
     size_t minPos = start;
     for (size_t i = start + 1; i <= curPos; i++) {
-        if (ind[i] < minVal) {
+        if (ind[i] <= minVal) {
             minVal = ind[i];
             minPos = i;
         }

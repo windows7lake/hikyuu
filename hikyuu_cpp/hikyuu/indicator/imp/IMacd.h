@@ -14,17 +14,23 @@
 namespace hku {
 
 /*
- * MACD平滑异同移动平均线
- * 参数： n1: 短期EMA时间窗
- *         n2: 长期EMA时间窗
- *         n3: （短期EMA-长期EMA）EMA平滑时间窗
- * 返回：1)MACD BAR： MACD直柱，即MACD快线－MACD慢线
- *      2)DIFF: 快线,即（短期EMA-长期EMA）
- *      3)DEA: 慢线，即快线的n3周期EMA平滑
+ * MACD moving average convergence / divergence
+
+ * Parameters: n1: short-term EMA time window
+
+ *         n2: long-term EMA time window
+
+ *         n3: EMA smoothing time window of (short-term EMA - long-term EMA)
+
+ * Returns: 1) MACD BAR: MACD histogram, i.e. MACD fast line - MACD slow line
+
+ *      2) DIFF: fast line, i.e. (short-term EMA - long-term EMA)
+
+ *      3) DEA: slow line, i.e. the n3-period EMA smoothing of the fast line
+
  */
 class IMacd : public IndicatorImp {
     INDICATOR_IMP(IMacd)
-    INDICATOR_IMP_SUPPORT_INCREMENT
     INDICATOR_IMP_NO_PRIVATE_MEMBER_SERIALIZATION
 
 public:
@@ -33,7 +39,7 @@ public:
 
     virtual void _checkParam(const string& name) const override;
     virtual void _dyn_calculate(const Indicator&) override;
-    virtual size_t min_increment_start() const override;
+    virtual void _increment_calculate(const Indicator& data, size_t start_pos) override;
 
 private:
     void _dyn_one_circle(const Indicator& ind, size_t curPos, int n1, int n2, int n3);

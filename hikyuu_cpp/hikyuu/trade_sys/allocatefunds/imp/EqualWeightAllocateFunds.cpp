@@ -1,7 +1,8 @@
 /*
  * EqualWeightAllocateFunds.cpp
  *
- *  Created on: 2018年2月8日
+ *  Copyright (c) 2025 hikyuu.org
+ *  Created on: 2018-2-8
  *      Author: fasiondog
  */
 
@@ -17,18 +18,4 @@ EqualWeightAllocateFunds::EqualWeightAllocateFunds() : AllocateFundsBase("AF_Equ
 
 EqualWeightAllocateFunds::~EqualWeightAllocateFunds() {}
 
-SystemWeightList EqualWeightAllocateFunds ::_allocateWeight(const Datetime& date,
-                                                            const SystemWeightList& se_list) {
-    SystemWeightList result;
-    for (auto iter = se_list.begin(); iter != se_list.end(); ++iter) {
-        result.emplace_back(iter->sys, 1.0);
-    }
-
-    return result;
-}
-
-AFPtr HKU_API AF_EqualWeight() {
-    return make_shared<EqualWeightAllocateFunds>();
-}
-
-} /* namespace hku */
+}  // namespace hku

@@ -26,43 +26,61 @@ RunSystemInStrategy::RunSystemInStrategy(const SYSPtr& sys, const OrderBrokerPtr
 
     auto tm = crtBrokerTM(broker, costfunc, sys->name());
     m_sys->setTM(tm);
-    m_sys->setSP(SlippagePtr());  // 清除移滑价差算法
+    m_sys->setSP(SlippagePtr());  // Clear the slippage algorithm
     m_sys->readyForRun();
 }
 
 void RunSystemInStrategy::run(const Stock& stock) {
-    if (m_sys->getParam<bool>("buy_delay") && m_buyRequest.valid) {
-        KData k = stock.getKData(
-          KQueryByIndex(-1, Null<int64_t>(), m_query.kType(), m_query.recoverType()));
-        const auto& stock = m_sys->getStock();
-        m_broker->buy(m_buyRequest.datetime, stock.market(), stock.code(), 10.0,
-                      m_buyRequest.number, m_buyRequest.stoploss, m_buyRequest.goal,
-                      m_buyRequest.from, "");
+    if (m_sys->getParam<bool>("buy_delay") && !m_buyRequestList.empty()) {
+        // Fetch the latest bar without adjustment as the order reference price (the broker needs
+        // the real price, consistent with the original-price coordinates of the request)
+        KData k =
+          stock.getKData(KQueryByIndex(-1, Null<int64_t>(), m_query.kType(), KQuery::NO_RECOVER));
+        if (!k.empty()) {
+            price_t price = k.back().closePrice;
+            for (const auto& req : m_buyRequestList) {
+                m_broker->buy(req.datetime, stock.market(), stock.code(), price, req.number,
+                              req.stoploss, req.goal, req.from, "");
+            }
+        } else {
+            HKU_WARN("Skip submitting the delayed buy order, {} has no loaded data!",
+                     stock.market_code());
+        }
+        m_buyRequestList.clear();
     }
 
-    if (m_sys->getParam<bool>("sell_delay") && m_sellRequest.valid) {
-        KData k = stock.getKData(
-          KQueryByIndex(-1, Null<int64_t>(), m_query.kType(), m_query.recoverType()));
-        const auto& stock = m_sys->getStock();
-        m_broker->sell(m_sellRequest.datetime, stock.market(), stock.code(), 10.0,
-                       m_sellRequest.number, m_sellRequest.stoploss, m_sellRequest.goal,
-                       m_sellRequest.from, "");
+    if (m_sys->getParam<bool>("sell_delay") && !m_sellRequestList.empty()) {
+        KData k =
+          stock.getKData(KQueryByIndex(-1, Null<int64_t>(), m_query.kType(), KQuery::NO_RECOVER));
+        if (!k.empty()) {
+            price_t price = k.back().closePrice;
+            for (const auto& req : m_sellRequestList) {
+                m_broker->sell(req.datetime, stock.market(), stock.code(), price, req.number,
+                               req.stoploss, req.goal, req.from, "");
+            }
+        } else {
+            HKU_WARN("Skip submitting the delayed sell order, {} has no loaded data!",
+                     stock.market_code());
+        }
+        m_sellRequestList.clear();
     }
 
     m_sys->getTM()->fetchAssetInfoFromBroker(m_broker);
     m_sys->run(stock, m_query);
 
     if (m_sys->getParam<bool>("buy_delay")) {
-        m_buyRequest = m_sys->getBuyTradeRequest();
+        m_buyRequestList = m_sys->getBuyTradeRequestList();
     }
 
     if (m_sys->getParam<bool>("sell_delay")) {
-        m_sellRequest = m_sys->getSellTradeRequest();
+        m_sellRequestList = m_sys->getSellTradeRequestList();
     }
 }
 
 void RunSystemInStrategy::runMomentOnOpen(const Stock& stock) {
     auto k = stock.getKData(m_query);
+    HKU_WARN_IF_RETURN(k.empty(), void(), "Skip runMomentOnOpen, {} has no loaded data!",
+                       stock.market_code());
     m_sys->setTO(k);
     m_sys->getTM()->fetchAssetInfoFromBroker(m_broker);
     m_sys->runMomentOnOpen(k.back().datetime);
@@ -70,6 +88,8 @@ void RunSystemInStrategy::runMomentOnOpen(const Stock& stock) {
 
 void RunSystemInStrategy::runMomentOnClose(const Stock& stock) {
     auto k = stock.getKData(m_query);
+    HKU_WARN_IF_RETURN(k.empty(), void(), "Skip runMomentOnClose, {} has no loaded data!",
+                       stock.market_code());
     m_sys->setTO(k);
     m_sys->getTM()->fetchAssetInfoFromBroker(m_broker);
     m_sys->runMomentOnClose(k.back().datetime);

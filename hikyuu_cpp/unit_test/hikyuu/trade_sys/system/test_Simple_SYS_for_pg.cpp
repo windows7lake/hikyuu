@@ -26,24 +26,24 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点（盈利目标策略）  */
+/** @par Test point (the profit goal strategy) */
 TEST_CASE("test_SYS_Simple_for_pg") {
     TradeRecordList tr_list;
     price_t current_cash;
 
     StockManager& sm = StockManager::instance();
 
-    // 初始参数
-    Datetime init_date(199001010000LL);   // 账户初始日期
-    price_t init_cash = 100000;           // 账户初始金额
-    TradeCostPtr costfunc = TC_Zero();    // 零成本函数
-    Stock stk = sm["sh600000"];           // 选定标的
-    Datetime start_date(199911100000LL);  // 测试起始日期
-    Datetime end_date(200002250000LL);    // 测试结束日期
+    // The initial parameters
+    Datetime init_date(199001010000LL);   // Account initial date
+    price_t init_cash = 100000;           // Account initial amount
+    TradeCostPtr costfunc = TC_Zero();    // The zero cost function
+    Stock stk = sm["sh600000"];           // The selected security
+    Datetime start_date(199911100000LL);  // Test start date
+    Datetime end_date(200002250000LL);    // Test end date
 
     KQuery query = KQueryByDate(start_date, end_date, KQuery::DAY);
 
-    // 构建系统部件
+    // Build the system parts
     TMPtr tm = crtTM(init_date, init_cash, costfunc, "TEST_TM");
     SGPtr sg = SG_Cross(MA(CLOSE(), 5), MA(CLOSE(), 10));
     MMPtr mm = MM_FixedCount(100);
@@ -52,7 +52,7 @@ TEST_CASE("test_SYS_Simple_for_pg") {
     PGPtr pg = PG_FixedPercent(0.01);
     SYSPtr sys;
 
-    /** @arg 指定了TM、SG、MM、ST、TP、PG，但未指定其他策略组件，非延迟操作 */
+    /** @arg TM, SG, MM, ST, TP and PG are given but the others are not, a non-delayed operation */
     sys = SYS_Simple();
     sys->setParam("buy_delay", false);
     sys->setParam("sell_delay", false);
@@ -73,7 +73,7 @@ TEST_CASE("test_SYS_Simple_for_pg") {
     CHECK_EQ(tr_list[1].business, BUSINESS_BUY);
     CHECK_LT(std::fabs(tr_list[1].planPrice - 26.45), 0.00001);
     CHECK_LT(std::fabs(tr_list[1].realPrice - 26.45), 0.00001);
-    CHECK_LT(std::fabs(tr_list[1].goalPrice - 26.45 * 1.01), 0.00001);
+    CHECK_LT(std::fabs(tr_list[1].goalPrice - 26.72), 0.00001);
     CHECK_EQ(tr_list[1].number, 100);
     CHECK_LT(std::fabs(tr_list[1].cost.total - 0), 0.00001);
     CHECK_LT(std::fabs(tr_list[1].stoploss - 26.19), 0.00001);
@@ -121,7 +121,7 @@ TEST_CASE("test_SYS_Simple_for_pg") {
     // CHECK_LT(std::fabs(tr_list[4].cash - current_cash), 0.00001);
     // CHECK_EQ(tr_list[4].from, PART_PROFITGOAL);
 
-    // /** @arg 指定了TM、SG、MM、ST、TP、PG，但未指定其他策略组件，延迟操作 */
+    // /** @arg TM, SG, MM, ST, TP and PG are given but the others are not, a delayed operation */
     // sys = SYS_Simple();
     // sys->setParam("delay", true);
     // sys->setTM(tm->clone());
@@ -192,6 +192,53 @@ TEST_CASE("test_SYS_Simple_for_pg") {
     /*for (auto iter = tr_list.begin(); iter , tr_list.end(); ++iter) {
         std::cout << *iter << std::endl;
     }*/
+}
+
+/** @par Test points */
+TEST_CASE("test_SYS_Simple_for_pg_profitgoal_sell") {
+    StockManager& sm = StockManager::instance();
+    Stock stk = sm["sh600000"];
+    Datetime init_date(199001010000LL);
+    price_t init_cash = 100000;
+    TradeCostPtr costfunc = TC_Zero();
+    KQuery query = KQueryByDate(Datetime(199911100000LL), Datetime(200002250000LL), KQuery::DAY);
+
+    TMPtr tm = crtTM(init_date, init_cash, costfunc, "TEST_TM");
+    SGPtr sg = SG_Cross(MA(CLOSE(), 5), MA(CLOSE(), 10));
+    MMPtr mm = MM_FixedCount(100);
+    STPtr st = ST_FixedPercent(0.5);     // wide, never hit before the goal
+    PGPtr pg = PG_FixedPercent(0.0001);  // target sits one tick above the average cost
+
+    SYSPtr sys = SYS_Simple();
+    sys->setParam("buy_delay", false);
+    sys->setParam("sell_delay", false);
+    sys->setParam("ignore_sell_sg", true);  // no TP is set, so exits come from ST or PG
+    sys->setTM(tm->clone());
+    sys->setSG(sg->clone());
+    sys->setMM(mm->clone());
+    sys->setST(st->clone());
+    sys->setPG(pg->clone());
+    sys->run(stk, query);
+
+    TradeRecordList tr_list = sys->getTM()->getTradeList();
+    TradeRecordList sells;
+    for (const auto& tr : tr_list) {
+        if (tr.business == BUSINESS_SELL) {
+            sells.push_back(tr);
+        }
+    }
+
+    /** @arg both exits come from the profit goal, not from the stop-loss */
+    REQUIRE(sells.size() == 2);
+    CHECK_EQ(sells[0].from, PART_PROFITGOAL);
+    CHECK_EQ(sells[1].from, PART_PROFITGOAL);
+
+    /** @arg the goal is the average cost (buyMoney / totalNumber) times (1 + p) rounded up: the
+     *  26.45 and 25.28 buys average to 25.865, so the first goal is 25.87 */
+    CHECK_LT(std::fabs(sells[0].goalPrice - 25.87), 0.00001);
+
+    /** @arg the second exit uses the 24.41 buy cost, so its goal is 24.42 */
+    CHECK_LT(std::fabs(sells[1].goalPrice - 24.42), 0.00001);
 }
 
 /** @} */

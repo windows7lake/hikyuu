@@ -10,6 +10,7 @@
 #include "hikyuu/utilities/config.h"
 #include "MySQLConnect.h"
 
+#include <atomic>
 #include <memory>
 #include <boost/mysql.hpp>
 #include <boost/asio.hpp>
@@ -17,7 +18,7 @@
 
 namespace hku {
 
-// 辅助函数：打印 diagnostics 诊断信息
+// Helper function: print the diagnostics information
 static void printDiagHelper(const boost::mysql::error_code& ec,
                             const boost::mysql::diagnostics& diag, const std::string& context) {
     if (!diag.server_message().empty()) {
@@ -29,12 +30,21 @@ static void printDiagHelper(const boost::mysql::error_code& ec,
     }
 }
 
-// Pimpl 实现结构体
+// The Pimpl implementation struct
 struct MySQLConnect::Impl {
+    // Per-connection-generation state shared with the statement deleters, so a statement is not
+    // closed on a connection that has been destroyed by a reconnect
+    struct StatementCloseState {
+        boost::mysql::tcp_connection* conn{nullptr};
+        std::atomic_bool alive{true};
+    };
+
     boost::asio::io_context io_context;
     std::unique_ptr<boost::mysql::tcp_connection> conn;
     std::unique_ptr<LruCache<std::string, std::shared_ptr<boost::mysql::statement>>>
       statement_cache;
+    // Recreated for every new connection; the deleters hold the state of their own generation
+    std::shared_ptr<StatementCloseState> close_state;
 
     std::shared_ptr<boost::mysql::statement> get_statement(const std::string& sql,
                                                            boost::mysql::error_code& ec,
@@ -44,12 +54,14 @@ struct MySQLConnect::Impl {
             return ret;
         }
 
-        // 创建 statement 并准备关闭的 lambda
-        auto* connection_ptr = conn.get();
-        auto deleter = [connection_ptr](boost::mysql::statement* stmt) {
-            if (stmt && connection_ptr) {
-                connection_ptr->close_statement(*stmt);
-                // 忽略关闭时的错误，因为连接可能已经断开
+        // The deleter closes the statement only while its connection generation is alive
+        auto state = close_state;
+        auto deleter = [state](boost::mysql::statement* stmt) {
+            if (stmt && state->alive.load(std::memory_order_acquire)) {
+                boost::mysql::error_code close_ec;
+                boost::mysql::diagnostics close_diag;
+                state->conn->close_statement(*stmt, close_ec, close_diag);
+                // Ignore the closing error, as the connection may already have been lost
             }
             delete stmt;
         };
@@ -69,7 +81,7 @@ struct MySQLConnect::Impl {
 
 MySQLConnect::MySQLConnect(const Parameter& param)
 : DBConnectBase(param), m_impl(std::make_unique<Impl>()) {
-    // 获取预处理语句缓存大小，并创建缓存
+    // Get the prepared statement cache size and create the cache
     int64_t cache_size = tryGetParam<int64_t>("statement_cache_size", 3);
     m_params.set("statement_cache_size", cache_size);
     m_impl->statement_cache =
@@ -106,6 +118,11 @@ void MySQLConnect::connect() {
         unsigned short port = static_cast<unsigned short>(tryGetParam<int>("port", 3306));
 
         m_impl->conn = std::make_unique<boost::mysql::tcp_connection>(m_impl->io_context);
+
+        // A new connection generation starts
+        m_impl->close_state = std::make_shared<Impl::StatementCloseState>();
+        m_impl->close_state->conn = m_impl->conn.get();
+
         boost::mysql::handshake_params params(usr, pwd, database);
 
         boost::mysql::error_code ec;
@@ -139,7 +156,11 @@ void MySQLConnect::connect() {
 
 void MySQLConnect::close() {
     if (m_impl && m_impl->conn) {
+        // Close the cached statements while the connection is still alive, then mark this
+        // generation dead before destroying the connection
         m_impl->statement_cache->clear();
+        m_impl->close_state->alive.store(false, std::memory_order_release);
+
         m_impl->conn->close();
         m_impl->conn.reset();
     }
@@ -155,14 +176,14 @@ bool MySQLConnect::ping() {
         boost::mysql::results results;
         m_impl->conn->execute("SELECT 1", results, ec, diag);
 
-        // 如果 ping 失败，尝试重连
+        // Try to reconnect when the ping fails
         if (ec && !tryConnect()) [[unlikely]] {
             printDiagHelper(ec, diag, "MySQL ping failed!");
             return false;
         }
         return true;
     } catch (const std::exception& e) {
-        // 异常时也尝试重连
+        // Try to reconnect on an exception as well
         HKU_ERROR_IF_RETURN(!tryConnect(), false, "MySQL ping exception! {}", e.what());
         return true;
     }
@@ -183,8 +204,10 @@ int64_t MySQLConnect::exec(const std::string& sql_string) {
     m_impl->conn->execute(sql_string, results, ec, diag);
 
     if (ec) [[unlikely]] {
-        // 执行失败,尝试重连后再次执行
-        if (ping()) {
+        // Only read-only statements are replayed after a lost connection: a failed write may
+        // already have been committed server-side and replaying it would apply it twice
+        if (detail::isConnectionLostError(ec.value()) && detail::isReadOnlySql(sql_string) &&
+            ping()) {
             m_impl->conn->execute(sql_string, results, ec, diag);
         }
 
@@ -194,7 +217,7 @@ int64_t MySQLConnect::exec(const std::string& sql_string) {
         }
     }
 
-    // 获取受影响的行数
+    // Get the number of the affected rows
     return results.affected_rows();
 }
 
@@ -205,7 +228,8 @@ SQLStatementPtr MySQLConnect::getStatement(const std::string& sql_statement) {
 bool MySQLConnect::tableExist(const std::string& tablename) {
     bool result = false;
     try {
-        SQLStatementPtr st = getStatement(fmt::format("SELECT 1 FROM {} LIMIT 1;", tablename));
+        SQLStatementPtr st =
+          getStatement(fmt::format("SELECT 1 FROM {} LIMIT 1;", sqlIdentifier(tablename)));
         st->exec();
         result = true;
     } catch (...) {
@@ -215,10 +239,11 @@ bool MySQLConnect::tableExist(const std::string& tablename) {
 }
 
 void MySQLConnect::resetAutoIncrement(const std::string& tablename) {
-    int64_t count = queryNumber<int64_t>(fmt::format("select count(1) from {}", tablename));
+    int64_t count =
+      queryNumber<int64_t>(fmt::format("select count(1) from {}", sqlIdentifier(tablename)));
     SQL_CHECK(count == 0, -1, "The ID cannot be reset when data is present in table({})",
               tablename);
-    exec(fmt::format("alter {} auto_increment=1", tablename));
+    exec(fmt::format("ALTER TABLE {} AUTO_INCREMENT = 1", sqlIdentifier(tablename)));
 }
 
 void MySQLConnect::transaction() {

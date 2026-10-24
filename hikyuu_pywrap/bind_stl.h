@@ -13,17 +13,19 @@
 
 using namespace hku;
 
-// pybind stl 绑定必须在其他 type_caster 之前
+// The pybind stl binding must come before the other type_caster
 
-// 让自定义的 vector 在 python 中表现的像 list 一样
-// 简单类型的 vector 不再导出，只导出复杂的 structList，避免影响性能
+// Make the custom vector behave like a list in python
+// The vectors of the simple types are no longer exported, only the complex structList is exported,
+// avoiding the performance impact
 // PYBIND11_MAKE_OPAQUE(StringList);
 // PYBIND11_MAKE_OPAQUE(PriceList);
 PYBIND11_MAKE_OPAQUE(DatetimeList);
 PYBIND11_MAKE_OPAQUE(KRecordList);
-// PYBIND11_MAKE_OPAQUE(StockList); // StockList 数据量不大，让 pybind 自动从 list 互转比较方便
+// PYBIND11_MAKE_OPAQUE(StockList); // The StockList is not large, so letting pybind convert it from
+// and to a list automatically is more convenient
 PYBIND11_MAKE_OPAQUE(StockWeightList);
-// PYBIND11_MAKE_OPAQUE(IndicatorList); // 无法编译
+// PYBIND11_MAKE_OPAQUE(IndicatorList); // It cannot be compiled
 PYBIND11_MAKE_OPAQUE(TimeLineList);
 PYBIND11_MAKE_OPAQUE(TransList);
 // PYBIND11_MAKE_OPAQUE(BorrowRecordList);
@@ -34,3 +36,7 @@ PYBIND11_MAKE_OPAQUE(TradeRecordList);
 PYBIND11_MAKE_OPAQUE(SystemWeightList);
 // PYBIND11_MAKE_OPAQUE(SystemList);
 PYBIND11_MAKE_OPAQUE(ScoreRecordList);
+// The AF virtual functions (allocate/_to_targets/_check_risk) rewrite the suggestions/contexts in
+// place, they must be opaque (otherwise the Python custom AF rewrite is lost with the copy)
+PYBIND11_MAKE_OPAQUE(TradeSuggestionList);
+PYBIND11_MAKE_OPAQUE(SubSystemContextList);

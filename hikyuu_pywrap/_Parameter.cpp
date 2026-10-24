@@ -11,12 +11,10 @@
 using namespace hku;
 namespace py = pybind11;
 
-bool (*parameter_eq)(const Parameter&, const Parameter&) = &operator==;
-bool (*parameter_ne)(const Parameter&, const Parameter&) = &operator!=;
-bool (*parameter_lt)(const Parameter&, const Parameter&) = &operator<;
-
 void export_Parameter(py::module& m) {
-    py::class_<Parameter>(m, "Parameter", "参数类，供需要命名参数设定的类使用，类似于 dict")
+    py::class_<Parameter>(m, "Parameter",
+                          "The parameter class, used by the classes that need the named parameter "
+                          "settings, similar to a dict")
       .def(py::init<>())
       .def("__str__", to_py_str<Parameter>)
       .def("__repr__", to_py_str<Parameter>)
@@ -30,8 +28,9 @@ void export_Parameter(py::module& m) {
            static_cast<void (Parameter::*)(const std::string&, const boost::any&)>(&Parameter::set))
       .def("get", &Parameter::get<boost::any>)
       .def("type", &Parameter::type,
-           "Get the type name of the specified parameter, return 'string' | 'int' | 'double' | "
-           "'bool' | 'Stock' | 'KQuery' | 'KData' | 'PriceList' | 'DatetimeList'")
+           "Get the type name of the specified parameter, return 'string' | 'int64' | 'double' | "
+           "'bool' | 'Datetime' | 'Stock' | 'Block' | 'KQuery' | 'KData' | 'PriceList' | "
+           "'DatetimeList'")
       .def("get_name_list", &Parameter::getNameList, "Get all the parameter names list")
       .def("get_name_value_list", &Parameter::getNameValueList,
            "Return a string, like 'name1=val1,name2=val2,...'")

@@ -1,7 +1,7 @@
 /*
  * _DataDriverFactory.cpp
  *
- *  Created on: 2017年10月7日
+ *  Created on: 2017-10-07
  *      Author: fasiondog
  */
 
@@ -14,7 +14,7 @@ using namespace hku;
 namespace py = pybind11;
 
 void export_DataDriverFactory(py::module& m) {
-    py::class_<DataDriverFactory>(m, "DataDriverFactory", "数据驱动工厂类")
+    py::class_<DataDriverFactory>(m, "DataDriverFactory", "The data driver factory class")
       .def_static("getBaseInfoDriver", &DataDriverFactory::getBaseInfoDriver)
       .def_static("removeBaseInfoDriver", &DataDriverFactory::removeBaseInfoDriver)
       .def_static("getKDataDriverPool", &DataDriverFactory::getKDataDriverPool)
@@ -24,7 +24,9 @@ void export_DataDriverFactory(py::module& m) {
 
       .def_static("regBaseInfoDriver",
                   [](py::object pydriver) {
-                      auto keep_python_state_alive = std::make_shared<py::object>(pydriver);
+                      // The driver may be destroyed on a background thread (e.g. reload or factory
+                      // release); the owner must acquire the GIL before the final decref.
+                      auto keep_python_state_alive = make_gil_safe(pydriver);
                       auto ptr = pydriver.cast<PyBaseInfoDriver*>();
                       auto driver = BaseInfoDriverPtr(keep_python_state_alive, ptr);
                       DataDriverFactory::regBaseInfoDriver(driver);
@@ -32,7 +34,7 @@ void export_DataDriverFactory(py::module& m) {
 
       .def_static("regBlockDriver",
                   [](py::object pydriver) {
-                      auto keep_python_state_alive = std::make_shared<py::object>(pydriver);
+                      auto keep_python_state_alive = make_gil_safe(pydriver);
                       auto ptr = pydriver.cast<PyBlockInfoDriver*>();
                       auto driver = BlockInfoDriverPtr(keep_python_state_alive, ptr);
                       DataDriverFactory::regBlockDriver(driver);
@@ -40,13 +42,14 @@ void export_DataDriverFactory(py::module& m) {
 
       .def_static("regKDataDriver",
                   [](py::object pydriver) {
-                      auto keep_python_state_alive = std::make_shared<py::object>(pydriver);
+                      auto keep_python_state_alive = make_gil_safe(pydriver);
                       auto ptr = pydriver.cast<PyKDataDriver*>();
                       auto driver = KDataDriverPtr(keep_python_state_alive, ptr);
                       DataDriverFactory::regKDataDriver(driver);
                   })
 
-      .def_static("init", &DataDriverFactory::init, "初始化支持的默认驱动")
+      .def_static("init", &DataDriverFactory::init, "Initialize the supported default drivers")
       .def_static("release", &DataDriverFactory::release,
-                  "主动释放资源，主要用于内存泄漏检测，退出时主动清理，避免误报");
+                  "Actively release the resources, mainly used for the memory leak detection; "
+                  "clean up actively at the exit to avoid false positives");
 }

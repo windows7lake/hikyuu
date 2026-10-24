@@ -33,15 +33,21 @@ void export_TradeRecord(py::module& m) {
       .value("BORROW_STOCK", BUSINESS_BORROW_STOCK)
       .value("RETURN_STOCK", BUSINESS_RETURN_STOCK)
       .value("SUOGU", BUSINESS_SUOGU)
+      .value("BORROW_ADJUST", BUSINESS_BORROW_ADJUST)
+      .value("SHORT_ADJUST", BUSINESS_SHORT_ADJUST)
+      .value("DIVIDEND_COMPENSATION", BUSINESS_DIVIDEND_COMPENSATION)
       .value("INVALID", BUSINESS_INVALID);
 
     m.def("get_business_name", getBusinessName, R"(get_business_name(business)
 
-    :param BUSINESS business: 交易业务类型
-    :return: 交易业务类型名称("INIT"|"BUY"|"SELL"|"GIFT"|"BONUS"|"CHECKIN"|"CHECKOUT"|"UNKNOWN"
+    :param BUSINESS business: the trade business type
+    :return: the trade business type name
+             ("INIT"|"BUY"|"SELL"|"BUY_SHORT"|"SELL_SHORT"|"GIFT"|"BONUS"|"CHECKIN"|"CHECKOUT"
+              |"CHECKIN_STOCK"|"CHECKOUT_STOCK"|"BORROW_CASH"|"RETURN_CASH"|"BORROW_STOCK"
+              |"RETURN_STOCK"|"SUOGU"|"BORROW_ADJUST"|"SHORT_ADJUST"|"DIVIDEND_COMPENSATION"|"UNKNOWN")
     :rtype: string)");
 
-    py::class_<TradeRecord>(m, "TradeRecord", "交易记录")
+    py::class_<TradeRecord>(m, "TradeRecord", "The trade record")
       .def(py::init<>())
       .def(py::init<const Stock&, const Datetime&, BUSINESS, price_t, price_t, price_t, double,
                     const CostRecord&, price_t, price_t, SystemPart>())
@@ -51,21 +57,22 @@ void export_TradeRecord(py::module& m) {
 
       .def("is_null", &TradeRecord::isNull)
 
-      .def_readwrite("stock", &TradeRecord::stock, "股票（Stock）")
-      .def_readwrite("datetime", &TradeRecord::datetime, " 交易时间（Datetime）")
-      .def_readwrite("business", &TradeRecord::business, "交易类型（BUSINESS）")
-      .def_readwrite("plan_price", &TradeRecord::planPrice, "计划交易价格（float）")
-      .def_readwrite("real_price", &TradeRecord::realPrice, "实际交易价格（float）")
+      .def_readwrite("stock", &TradeRecord::stock, "The stock (Stock)")
+      .def_readwrite("datetime", &TradeRecord::datetime, " The trading time (Datetime)")
+      .def_readwrite("business", &TradeRecord::business, "The trade type (BUSINESS)")
+      .def_readwrite("plan_price", &TradeRecord::planPrice, "The planned trading price (float)")
+      .def_readwrite("real_price", &TradeRecord::realPrice, "The actual trading price (float)")
       .def_readwrite("goal_price", &TradeRecord::goalPrice,
-                     "目标价格（float），如果为0表示未限定目标")
-      .def_readwrite("number", &TradeRecord::number, "成交数量（float）")
-      .def_readwrite("cost", &TradeRecord::cost, "交易成本")
-      .def_readwrite("stoploss", &TradeRecord::stoploss, "止损价（float）")
-      .def_readwrite("cash", &TradeRecord::cash, "现金余额（float）")
+                     "The target price (float); if it is 0, it means the goal is not limited")
+      .def_readwrite("number", &TradeRecord::number, "The traded quantity (float)")
+      .def_readwrite("cost", &TradeRecord::cost, "The trading cost")
+      .def_readwrite("stoploss", &TradeRecord::stoploss, "The stop-loss price (float)")
+      .def_readwrite("cash", &TradeRecord::cash, "The cash balance (float)")
       .def_readwrite("part", &TradeRecord::from,
-                     "交易指示来源，区别是交易系统哪个部件发出的指示，参见： "
-                     ":py:class:`System.Part`")  // python中不能用from关键字
-      .def_readwrite("remark", &TradeRecord::remark, "备注")
+                     "The source of the trading instruction, distinguishing which part of the "
+                     "trading system issued the instruction; see: "
+                     ":py:class:`System.Part`")  // The from keyword cannot be used in python
+      .def_readwrite("remark", &TradeRecord::remark, "The remark")
 
         DEF_PICKLE(TradeRecord);
 
@@ -76,28 +83,35 @@ void export_TradeRecord(py::module& m) {
         struct alignas(8) RawData {
             int32_t code[10];
             int32_t name[20];
-            int64_t datetime;         // 交易日期
-            int32_t business[20];     // 业务类型
-            double planPrice;         // 计划交易价格
-            double realPrice;         // 实际交易价格
-            double goalPrice;         // 目标价位，如果为0或Null表示未限定目标
-            double number;            // 成交数量
-            double stoploss;          // 止损价
-            double cash;              // 现金余额
-            double cost_total;        // 总成本
-            double cost_commission;   // 佣金
-            double cost_stamptax;     // 印花税
-            double cost_transferfee;  // 过户费
-            double cost_others;       // 其他费用
-            int32_t sig_from[20];     // 信号部件来源
-            int32_t remark[100];      // 备注
+            int64_t datetime;      // The trading date
+            int32_t business[20];  // The business type
+            double planPrice;      // The planned trading price
+            double realPrice;      // The actual trading price
+            double
+              goalPrice;  // The target price; if it is 0 or Null, it means the goal is not limited
+            double number;            // The traded quantity
+            double stoploss;          // The stop-loss price
+            double cash;              // The cash balance
+            double cost_total;        // The total cost
+            double cost_commission;   // The commission
+            double cost_stamptax;     // The stamp tax
+            double cost_transferfee;  // The transfer fee
+            double cost_others;       // The other fees
+            int32_t sig_from[20];     // The signal part source
+            int32_t remark[100];      // The remark
         };
 
         RawData* data = static_cast<RawData*>(std::malloc(total * sizeof(RawData)));
+        HKU_CHECK(data != nullptr, "trades_to_np: malloc failed!");
         for (size_t i = 0, total = trades.size(); i < total; i++) {
             const TradeRecord& t = trades[i];
-            utf8_to_utf32(t.stock.market_code(), data[i].code, 10);
-            utf8_to_utf32(t.stock.name(), data[i].name, 20);
+            if (!t.stock.isNull()) {
+                utf8_to_utf32(t.stock.market_code(), data[i].code, 10);
+                utf8_to_utf32(t.stock.name(), data[i].name, 20);
+            } else {
+                memset(data[i].code, 0, 10 * sizeof(int32_t));
+                memset(data[i].name, 0, 20 * sizeof(int32_t));
+            }
             data[i].datetime = t.datetime.timestamp() * 1000LL;
             utf8_to_utf32(getBusinessName(t.business), data[i].business, 20);
             data[i].planPrice = t.planPrice;
@@ -139,7 +153,7 @@ void export_TradeRecord(py::module& m) {
               return py::module_::import("pandas").attr("DataFrame")();
           }
 
-          // 创建各列数据容器
+          // Create the data containers of each column
           py::list code_list(total);
           py::list name_list(total);
           py::array_t<int64_t> datetime_arr(total);
@@ -158,7 +172,7 @@ void export_TradeRecord(py::module& m) {
           py::list part_from_list(total);
           py::list remark_list(total);
 
-          // 获取各数组缓冲区
+          // Get the buffers of each array
           auto datetime_buf = datetime_arr.request();
           auto planPrice_buf = planPrice_arr.request();
           auto realPrice_buf = realPrice_arr.request();
@@ -185,7 +199,7 @@ void export_TradeRecord(py::module& m) {
           double* cost_transferfee_ptr = static_cast<double*>(cost_transferfee_buf.ptr);
           double* cost_others_ptr = static_cast<double*>(cost_others_buf.ptr);
 
-          // 填充数据
+          // Fill the data
           for (size_t i = 0; i < total; i++) {
               const TradeRecord& t = trades[i];
               if (!t.stock.isNull()) {
@@ -212,7 +226,7 @@ void export_TradeRecord(py::module& m) {
               remark_list[i] = py::str(t.remark);
           }
 
-          // 构建 DataFrame
+          // Build the DataFrame
           auto pandas = py::module_::import("pandas");
           py::dict columns;
           columns[htr("market_code").c_str()] =
@@ -242,9 +256,9 @@ void export_TradeRecord(py::module& m) {
       },
       R"(trades_to_df(trades)
 
-    将交易记录列表转换为 pandas DataFrame
+    Convert the trade record list to a pandas DataFrame
 
-    :param TradeRecordList trades: 交易记录列表
-    :return: 包含交易记录的 pandas DataFrame
+    :param TradeRecordList trades: the trade record list
+    :return: a pandas DataFrame containing the trade records
     :rtype: pandas.DataFrame)");
 }

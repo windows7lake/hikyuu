@@ -7,6 +7,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IStdp.h"
 #include "../crt/MA.h"
 
@@ -25,19 +26,21 @@ IStdp::~IStdp() {}
 void IStdp::_checkParam(const string& name) const {
     if ("n" == name) {
         int n = getParam<int>("n");
-        HKU_ASSERT(n == 0 || n >= 2);
+        HKU_ASSERT(n == 0 || (n >= 2 && n < INT_MAX));
     }
 }
 
 void IStdp::_calculate(const Indicator& data) {
     size_t total = data.size();
-    m_discard = data.discard();
+
+    int n = getParam<int>("n");
+    // n of 0 asks for the whole series, which has no warm up window to drop
+    m_discard = data.discard() + (0 == n ? 0 : n - 1);
     if (m_discard >= total) {
         m_discard = total;
         return;
     }
 
-    int n = getParam<int>("n");
     if (0 == n) {
         n = total;
     }
@@ -45,33 +48,45 @@ void IStdp::_calculate(const Indicator& data) {
     auto const* src = data.data();
     auto* dst = this->data();
 
-    vector<price_t> pow_buf(data.size());
-    price_t ex = 0.0, ex2 = 0.0;
-    size_t num = 0;
-    size_t start_pos = m_discard;
+    size_t start_pos = data.discard();
     size_t first_end = start_pos + n >= total ? total : start_pos + n;
-    price_t k = src[start_pos];
+    price_t k = std::isfinite(src[start_pos]) ? src[start_pos] : 0.0;
+    price_t ex = 0.0, ex2 = 0.0;
+    size_t valid = 0;
+
     for (size_t i = start_pos; i < first_end; i++) {
-        num++;
         price_t d = src[i] - k;
-        ex += d;
-        price_t d_pow = std::pow(d, 2);
-        pow_buf[i] = d_pow;
-        ex2 += d_pow;
-        dst[i] = std::sqrt((ex2 - std::pow(ex, 2) / num) / num);
+        if (std::isfinite(d)) {
+            ex += d;
+            ex2 += d * d;
+            valid++;
+        }
+        if (i < m_discard || valid == 0)
+            continue;
+        price_t nv = (price_t)valid;
+        dst[i] = std::sqrt(std::max(0.0, (ex2 - ex * ex / nv) / nv));
     }
 
     for (size_t i = first_end; i < total; i++) {
-        ex -= src[i - n] - k;
-        ex2 -= pow_buf[i - n];
+        price_t d_pre = src[i - n] - k;
+        if (std::isfinite(d_pre)) {
+            ex -= d_pre;
+            ex2 -= d_pre * d_pre;
+            valid--;
+        }
         price_t d = src[i] - k;
-        ex += d;
-        price_t d_pow = std::pow(d, 2);
-        pow_buf[i] = d_pow;
-        ex2 += d_pow;
-        dst[i] = std::sqrt((ex2 - std::pow(ex, 2) / n) / n);
+        if (std::isfinite(d)) {
+            ex += d;
+            ex2 += d * d;
+            valid++;
+        }
+        if (valid == 0)
+            continue;
+        price_t nv = (price_t)valid;
+        dst[i] = std::sqrt(std::max(0.0, (ex2 - ex * ex / nv) / nv));
     }
 }
+
 bool IStdp::supportIncrementCalculate() const {
     return getParam<int>("n") != 0;
 }
@@ -86,41 +101,62 @@ void IStdp::_increment_calculate(const Indicator& data, size_t start_pos) {
     auto const* src = data.data();
     auto* dst = this->data();
 
-    vector<price_t> pow_buf(data.size() + n - start_pos);
+    price_t k = std::isfinite(src[start_pos - n]) ? src[start_pos - n] : 0.0;
     price_t ex = 0.0, ex2 = 0.0;
-    price_t k = src[start_pos - n];
+    size_t valid = 0;
     for (size_t i = start_pos - n; i < start_pos; i++) {
         price_t d = src[i] - k;
-        ex += d;
-        price_t d_pow = std::pow(d, 2);
-        pow_buf[i + n - start_pos] = d_pow;
-        ex2 += d_pow;
+        if (std::isfinite(d)) {
+            ex += d;
+            ex2 += d * d;
+            valid++;
+        }
     }
 
     for (size_t i = start_pos; i < total; i++) {
-        ex -= src[i - n] - k;
-        ex2 -= pow_buf[i - start_pos];
+        price_t d_pre = src[i - n] - k;
+        if (std::isfinite(d_pre)) {
+            ex -= d_pre;
+            ex2 -= d_pre * d_pre;
+            valid--;
+        }
         price_t d = src[i] - k;
-        ex += d;
-        price_t d_pow = std::pow(d, 2);
-        pow_buf[i + n - start_pos] = d_pow;
-        ex2 += d_pow;
-        dst[i] = std::sqrt((ex2 - std::pow(ex, 2) / n) / n);
+        if (std::isfinite(d)) {
+            ex += d;
+            ex2 += d * d;
+            valid++;
+        }
+        if (valid == 0)
+            continue;
+        price_t nv = (price_t)valid;
+        dst[i] = std::sqrt(std::max(0.0, (ex2 - ex * ex / nv) / nv));
     }
 }
 
 void IStdp::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step) {
+    HKU_IF_RETURN(step < 2, void());
     size_t start = _get_step_start(curPos, step, ind.discard());
-    size_t num = 0;
-    price_t ex = 0.0, ex2 = 0.0;
-    price_t k = ind[start];
-    for (size_t i = start; i <= curPos; i++) {
-        num++;
-        price_t d = ind[i] - k;
-        ex += d;
-        ex2 += std::pow(d, 2);
+    if (curPos - start + 1 < step) {
+        _set(Null<price_t>(), curPos);
+        return;
     }
-    _set(num == 0 ? 0.0 : std::sqrt((ex2 - std::pow(ex, 2) / num) / num), curPos);
+    price_t k = std::isfinite(ind[start]) ? ind[start] : 0.0;
+    price_t ex = 0.0, ex2 = 0.0;
+    size_t valid = 0;
+    for (size_t i = start; i <= curPos; i++) {
+        price_t d = ind[i] - k;
+        if (std::isfinite(d)) {
+            ex += d;
+            ex2 += d * d;
+            valid++;
+        }
+    }
+    if (valid == 0) {
+        _set(Null<price_t>(), curPos);
+        return;
+    }
+    price_t nv = (price_t)valid;
+    _set(std::sqrt(std::max(0.0, (ex2 - ex * ex / nv) / nv)), curPos);
 }
 
 Indicator HKU_API STDP(int n) {

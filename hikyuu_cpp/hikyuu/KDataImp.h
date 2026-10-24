@@ -7,11 +7,12 @@
 
 #pragma once
 
+#include <algorithm>
 #include "Stock.h"
 
 namespace hku {
 
-class HKU_API KDataImp : public enable_shared_from_this<KDataImp> {
+class HKU_API KDataImp {
 public:
     KDataImp() = default;
     KDataImp(const Stock& stock, const KQuery& query);
@@ -65,17 +66,27 @@ public:
         return nullptr;
     }
 
-    virtual KRecord* data() noexcept {
-        return nullptr;
-    }
-
     virtual DatetimeList getDatetimeList() const {
         return DatetimeList();
     }
 
     typedef shared_ptr<KDataImp> KDataImpPtr;
-    virtual KDataImpPtr getOtherFromSelf(const KQuery& query) const {
-        return std::make_shared<KDataImp>(m_stock, query);
+    virtual KDataImpPtr getOtherFromSelf(const KQuery& query) const;
+
+protected:
+    // Find the index of the KRecord whose datetime equals `datetime` within the contiguous
+    // [first, first + count) range, or return Null<size_t>() when absent. The range must be
+    // sorted ascending by datetime.
+    static size_t getKRecordPosByDatetime(const KRecord* first, size_t count,
+                                          const Datetime& datetime) noexcept {
+        const KRecord* last = first + count;
+        const KRecord* it = std::lower_bound(
+          first, last, datetime,
+          [](const KRecord& record, const Datetime& dt) { return record.datetime < dt; });
+        if (it == last || it->datetime != datetime) {
+            return Null<size_t>();
+        }
+        return static_cast<size_t>(it - first);
     }
 
 protected:

@@ -6,11 +6,14 @@
  */
 
 #include "../test_config.h"
+#include <cmath>
 #include <fstream>
+#include <limits>
 #include <hikyuu/StockManager.h>
 #include <hikyuu/indicator/crt/WINNER.h>
 #include <hikyuu/indicator/crt/COST.h>
 #include <hikyuu/indicator/crt/KDATA.h>
+#include <hikyuu/indicator/crt/PRICELIST.h>
 #include <hikyuu/indicator/crt/WINNER.h>
 
 /**
@@ -19,7 +22,7 @@
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_WINNER") {
     auto k = getKData("sz000001", KQueryByIndex(-50));
     auto result = WINNER(k.close());
@@ -31,6 +34,29 @@ TEST_CASE("test_WINNER") {
     CHECK_EQ(k[1].closePrice, doctest::Approx(k[1].closePrice).epsilon(0.01));
 }
 
+/** @par Test points */
+TEST_CASE("test_WINNER_non_finite") {
+    auto k = getKData("sz000001", KQueryByIndex(-50));
+    if (k.empty()) {
+        return;
+    }
+    PriceList offsets(50, 0.0);
+    offsets[10] = std::numeric_limits<double>::quiet_NaN();
+    offsets[20] = std::numeric_limits<double>::infinity();
+    Indicator x = (CLOSE() + PRICELIST(offsets))(k);
+    Indicator r = WINNER(x);
+    CHECK_EQ(r.size(), 50);
+
+    /** @arg non-finite input yields Null instead of a bogus quantile */
+    CHECK_UNARY(std::isnan(r[10]));
+    CHECK_UNARY(std::isnan(r[20]));
+    for (size_t i = r.discard(); i < r.size(); ++i) {
+        if (!std::isnan(r[i])) {
+            CHECK_UNARY(r[i] >= 0.0 && r[i] <= 1.0);
+        }
+    }
+}
+
 //-----------------------------------------------------------------------------
 // benchmark
 //-----------------------------------------------------------------------------
@@ -39,7 +65,7 @@ TEST_CASE("test_WINNER_benchmark") {
     Stock stock = getStock("sz000001");
     KData kdata = stock.getKData(KQuery(0));
 
-    int cycle = 1000;  // 测试循环次数
+    int cycle = 1000;  // Test loop count
 
     {
         BENCHMARK_TIME_MSG(test_WINNER_benchmark, cycle, fmt::format("data len: {}", kdata.size()));
@@ -58,7 +84,7 @@ TEST_CASE("test_WINNER_benchmark") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_WINNER_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

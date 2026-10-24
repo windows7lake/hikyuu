@@ -1,7 +1,7 @@
 /*
- * AShareTradeCost.h
+ * FixedA2015TradeCost.h
  *
- *  Created on: 2016年5月4日
+ *  Created on: 2016-5-4
  *      Author: Administrator
  */
 
@@ -9,43 +9,31 @@
 #ifndef TRADE_MANAGE_IMP_FIXEDA2015TRADECOST_H_
 #define TRADE_MANAGE_IMP_FIXEDA2015TRADECOST_H_
 
-#include "../TradeCostBase.h"
+#include "FixedATradeCostBase.h"
 
 namespace hku {
 
-class FixedA2015TradeCost : public TradeCostBase {
-    TRADE_COST_NO_PRIVATE_MEMBER_SERIALIZATION
+/**
+ * Trade cost algorithm for the Shanghai and Shenzhen A-share after August 1, 2015
+ * @details
+ * <pre>
+ * The transfer fee is charged by turnover value (0.02 per mille) on the Shanghai market only.
+ * </pre>
+ * @ingroup TradeCost
+ */
+class FixedA2015TradeCost : public FixedATradeCostBase {
+    TRADE_COST_FIXEDA_SERIALIZATION
 
 public:
     FixedA2015TradeCost();
     virtual ~FixedA2015TradeCost();
 
-    virtual void _checkParam(const string& name) const override;
-
-    /**
-     * 计算买入成本
-     * @param datetime 交易日期
-     * @param stock 交易的证券对象
-     * @param price 买入价格
-     * @param num 买入数量
-     * @return CostRecord 交易成本记录
-     */
-    virtual CostRecord getBuyCost(const Datetime& datetime, const Stock& stock, price_t price,
-                                  double num) const override;
-
-    /**
-     * 计算卖出成本
-     * @param datetime 交易日期
-     * @param stock 交易的证券对象
-     * @param price 卖出价格
-     * @param num 卖出数量
-     * @return CostRecord 交易成本记录
-     */
-    virtual CostRecord getSellCost(const Datetime& datetime, const Stock& stock, price_t price,
-                                   double num) const override;
-
-    /** 子类私有变量克隆接口 */
+    /** Clone interface of the private variables of the subclass */
     virtual TradeCostPtr _clone() override;
+
+protected:
+    /** Transfer fee by turnover value, charged on the Shanghai market only */
+    virtual price_t _calcTransferFee(const Stock& stock, price_t value, double num) const override;
 };
 
 } /* namespace hku */

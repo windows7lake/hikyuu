@@ -3,7 +3,7 @@
  *
  *  Copyright (c) 2019 hikyuu.org
  *
- *  Created on: 2019年4月2日
+ *  Created on: 2019-4-2
  *      Author: fasiondog
  */
 
@@ -22,7 +22,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_POW") {
     Indicator result;
 
@@ -45,9 +45,13 @@ TEST_CASE("test_POW") {
     CHECK_EQ(result.size(), 1);
     CHECK_EQ(result.discard(), 0);
     CHECK_EQ(result[0], std::pow(-11, 3));
+
+    /** @arg overflow result -> null (was +inf, which leaked downstream) */
+    result = POW(1e200, 2);
+    CHECK_UNARY(std::isnan(result[0]));
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_POW_dyn") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-30));
@@ -80,7 +84,7 @@ TEST_CASE("test_POW_dyn") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_POW_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

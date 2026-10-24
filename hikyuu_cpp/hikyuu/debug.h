@@ -4,7 +4,8 @@
  *  Created on: 2020-2-6
  *      Author: fasiondog
  *
- * 用途：用于内存泄露检测，cpp 文件包含此头文件以便内存泄露检测时可打印文件名等信息
+ * Purpose: memory leak detection; a cpp file includes this header so that the file name and other
+ *          information can be printed when a memory leak is detected
  */
 
 #pragma once
@@ -16,10 +17,10 @@
 #endif
 
 // clang-format off
-// MSVC 内存泄露检测
+// MSVC memory leak detection
 #ifdef MSVC_LEAKER_DETECT
     #define _CRTDBG_MAP_ALLOC
-    #include "crtdbg.h"
+    #include <crtdbg.h>
 
     #ifndef DEBUG_CLIENTBLOCK
     #define DEBUG_CLIENTBLOCK new (_CLIENT_BLOCK, __FILE__, __LINE__)

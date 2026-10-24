@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstdint>
 #include <forward_list>
 #include <stack>
 #include "hikyuu/utilities/Log.h"
@@ -35,8 +37,8 @@ bool IndicatorImp::ms_enable_increment_calculate{true};
 
 void IndicatorImp::initEngine() {
 #if HKU_ENABLE_MIMALLOC
-    mi_option_enable(mi_option_large_os_pages);  // 启用大页面
-    mi_option_enable(mi_option_use_numa_nodes);  // 启用NUMA支持
+    mi_option_enable(mi_option_large_os_pages);  // Enable the large pages
+    mi_option_enable(mi_option_use_numa_nodes);  // Enable the NUMA support
     // mi_option_set(mi_option_purge_delay, 0);
     // mi_option_set(mi_option_purge_delay, 100);
     // mi_option_disable(mi_option_purge_decommits);
@@ -148,9 +150,11 @@ HKU_API std::ostream &operator<<(std::ostream &os, const IndicatorImpPtr &imp) {
     return os;
 }
 
-// 构造出身发号器。唯一定义于本文件（非 inline），保证跨 DLL 只有一份计数器：
-// 派生指标可能在插件 dll（如 extind）中构造，但其基类构造函数由核心 dll 导出并执行，
-// in-class 初始器随之在核心侧求值，id 空间统一。
+// The construction id generator. It is defined in this file only (not inline), ensuring that
+// there is a single counter across the DLLs: a derived indicator may be constructed in a
+// plugin dll (such as extind), but its base class constructor is exported and executed by the
+// core dll, so the in-class initializer is evaluated on the core side and the id space is
+// unified.
 uint64_t IndicatorImp::nextOriginId() noexcept {
     static std::atomic<uint64_t> seq{1};
     return seq.fetch_add(1, std::memory_order_relaxed);
@@ -158,6 +162,23 @@ uint64_t IndicatorImp::nextOriginId() noexcept {
 
 uint64_t IndicatorImp::originId() const noexcept {
     return m_origin_id;
+}
+
+bool IndicatorImp::hasPythonPart() const noexcept {
+    if (m_is_python_object) {
+        return true;
+    }
+    for (const auto &param : m_ind_params) {
+        const IndicatorImpPtr &imp = param.second;
+        if (imp && imp->hasPythonPart()) {
+            return true;
+        }
+    }
+    if ((m_left && m_left->hasPythonPart()) || (m_right && m_right->hasPythonPart()) ||
+        (m_three && m_three->hasPythonPart())) {
+        return true;
+    }
+    return false;
 }
 
 IndicatorImp::IndicatorImp() : m_name("IndicatorImp") {
@@ -194,11 +215,15 @@ void IndicatorImp::setIndParam(const string &name, const IndParam &ind) {
 }
 
 IndParam IndicatorImp::getIndParam(const string &name) const {
-    return IndParam(m_ind_params.at(name));
+    auto it = m_ind_params.find(name);
+    HKU_CHECK(it != m_ind_params.end(), "Invalid dynamic parameter name: {}!", name);
+    return IndParam(it->second);
 }
 
 const IndicatorImpPtr &IndicatorImp::getIndParamImp(const string &name) const {
-    return m_ind_params.at(name);
+    auto it = m_ind_params.find(name);
+    HKU_CHECK(it != m_ind_params.end(), "Invalid dynamic parameter name: {}!", name);
+    return it->second;
 }
 
 bool IndicatorImp::supportIncrementCalculate() const {
@@ -242,6 +267,12 @@ bool IndicatorImp::can_inner_calculate() {
         return false;
     }
 
+    // The shift below works in old context coordinates, which requires the buffers to be exactly
+    // as long as the old context
+    if (!can_shift_old_results(m_old_context.size())) {
+        return false;
+    }
+
     for (size_t r = 0; r < m_result_num; ++r) {
         if (m_pBuffer[r] == nullptr) {
             return false;
@@ -260,7 +291,7 @@ bool IndicatorImp::can_inner_calculate() {
 void IndicatorImp::setContext(const KData &k) {
     const KData &old_k = getContext();
 
-    // 上下文没变化的情况下根据自身标识进行计算
+    // Calculate according to its own identifier when the context has not changed
     if (old_k == k) {
         if (m_need_calculate) {
             calculate();
@@ -275,7 +306,7 @@ void IndicatorImp::setContext(const KData &k) {
 
     m_need_calculate = true;
 
-    // 子节点设置上下文
+    // Set the context for the child nodes
     if (m_left)
         m_left->setContext(k);
     if (m_right)
@@ -283,15 +314,15 @@ void IndicatorImp::setContext(const KData &k) {
     if (m_three)
         m_three->setContext(k);
 
-    // 对动态参数设置上下文
+    // Set the context for the dynamic parameters
     for (auto iter = m_ind_params.begin(); iter != m_ind_params.end(); ++iter) {
         iter->second->setContext(k);
     }
 
-    // 启动重新计算
+    // Start the recalculation
     calculate();
 
-    // 清理根节点之下所有节点中间计算数据
+    // Clean up the intermediate calculation data of all the nodes below the root node
     if (!m_parent) {
         vector<IndicatorImpPtr> nodes;
         getAllSubNodes(nodes);
@@ -317,6 +348,10 @@ void IndicatorImp::_readyBuffer(size_t len, size_t result_num) {
                     "result_num oiverload MAX_RESULT_NUM! {}", name());
     HKU_IF_RETURN(result_num == 0, void());
 
+    // Every slot is filled with null on each full calculation, never only when the length changes:
+    // an implementation may write nothing below its discard, so the invalid prefix is exactly what
+    // is left unwritten here, and a discard which grew since the previous run has to wipe the
+    // values written before it
     value_t null_price = Null<value_t>();
     for (size_t i = 0; i < result_num; ++i) {
         if (!m_pBuffer[i]) {
@@ -411,7 +446,7 @@ IndicatorImpPtr IndicatorImp::clone() {
     IndicatorImpPtr p = _clone();
     p->m_params = m_params;
     p->m_name = m_name;
-    p->m_origin_id = m_origin_id;  // 出身证复印：克隆链共享构造身份
+    p->m_origin_id = m_origin_id;  // Copy the origin id: the clone chain shares the identity
     p->m_is_python_object = m_is_python_object;
     p->m_need_self_alike_compare = m_need_self_alike_compare;
     p->m_is_serial = m_is_serial;
@@ -432,15 +467,15 @@ IndicatorImpPtr IndicatorImp::clone() {
 
     if (m_left) {
         p->m_left = m_left->clone();
-        p->m_left->m_parent = this;
+        p->m_left->m_parent = p.get();
     }
     if (m_right) {
         p->m_right = m_right->clone();
-        p->m_right->m_parent = this;
+        p->m_right->m_parent = p.get();
     }
     if (m_three) {
         p->m_three = m_three->clone();
-        p->m_three->m_parent = this;
+        p->m_three->m_parent = p.get();
     }
 
     for (auto iter = m_ind_params.begin(); iter != m_ind_params.end(); ++iter) {
@@ -448,7 +483,7 @@ IndicatorImpPtr IndicatorImp::clone() {
     }
 
     if (!m_parent) {
-        // 重构各子节点的父节点
+        // Rebuild the parent node of every child node
         std::forward_list<IndicatorImp *> stack;
         stack.push_front(p.get());
         while (!stack.empty()) {
@@ -475,8 +510,8 @@ IndicatorImpPtr IndicatorImp::clone() {
 }
 
 IndicatorImpPtr IndicatorImp::operator()(const Indicator &ind) {
-    HKU_INFO("This indicator not support operator()! {}", *this);
-    // 保证对齐
+    HKU_DEBUG("This indicator not support operator()! {}", *this);
+    // Guarantee the alignment
     IndicatorImpPtr result = make_shared<IndicatorImp>();
     size_t total = ind.size();
     result->_readyBuffer(total, m_result_num);
@@ -524,19 +559,28 @@ IndicatorImpPtr IndicatorImp::getResult(size_t result_num) {
     imp->_readyBuffer(total, 1);
     imp->setDiscard(discard());
     imp->name(name());
+    imp->onlySetContext(getContext());
+    if (haveParam("align_date_list")) {
+        imp->setParam<DatetimeList>("align_date_list",
+                                    getParam<const DatetimeList &>("align_date_list"));
+    }
     auto const *src = this->data(result_num);
     auto *dst = imp->data(0);
     for (size_t i = imp->discard(); i < total; ++i) {
         dst[i] = src[i];
     }
+    // without this, a later clone recomputes through the base _calculate and wipes the buffer
+    imp->setCalculateFlag(false);
     return imp;
 }
 
 IndicatorImp::value_t IndicatorImp::get(size_t pos, size_t num) const {
+    // The bounds are only guarded under CHECK_ACCESS_BOUND; the documented contract is that the
+    // caller ensures 0 <= pos < size() and num < getResultNumber() (see Indicator::get)
 #if CHECK_ACCESS_BOUND
     // cppcheck-suppress [arrayIndexOutOfBoundsCond]
     HKU_CHECK_THROW(
-      (num <= MAX_RESULT_NUM && m_pBuffer[num] && pos < m_pBuffer[num]->size()), std::out_of_range,
+      (num < MAX_RESULT_NUM && m_pBuffer[num] && pos < m_pBuffer[num]->size()), std::out_of_range,
       "Try to access value out of bounds! num: {}, pos: {}, name: {}", num, pos, name());
 #endif
     return (*m_pBuffer[num])[pos];
@@ -545,7 +589,7 @@ IndicatorImp::value_t IndicatorImp::get(size_t pos, size_t num) const {
 IndicatorImp::value_t IndicatorImp::front(size_t num) const {
 #if CHECK_ACCESS_BOUND
     // cppcheck-suppress [arrayIndexOutOfBoundsCond]
-    HKU_CHECK_THROW((num <= MAX_RESULT_NUM && m_pBuffer[num] && !m_pBuffer[num]->empty()),
+    HKU_CHECK_THROW((num < MAX_RESULT_NUM && m_pBuffer[num] && !m_pBuffer[num]->empty()),
                     std::out_of_range, "Try to access value out of bounds! num: {}, name: {}", num,
                     name());
 #endif
@@ -555,7 +599,7 @@ IndicatorImp::value_t IndicatorImp::front(size_t num) const {
 IndicatorImp::value_t IndicatorImp::back(size_t num) const {
 #if CHECK_ACCESS_BOUND
     // cppcheck-suppress [arrayIndexOutOfBoundsCond]
-    HKU_CHECK_THROW((num <= MAX_RESULT_NUM && m_pBuffer[num] && !m_pBuffer[num]->empty()),
+    HKU_CHECK_THROW((num < MAX_RESULT_NUM && m_pBuffer[num] && !m_pBuffer[num]->empty()),
                     std::out_of_range, "Try to access value out of bounds! num: {}, name: {}", num,
                     name());
 #endif
@@ -566,7 +610,7 @@ void IndicatorImp::_set(value_t val, size_t pos, size_t num) {
 #if CHECK_ACCESS_BOUND
     // cppcheck-suppress [arrayIndexOutOfBoundsCond]
     HKU_CHECK_THROW(
-      (num <= MAX_RESULT_NUM && m_pBuffer[num] && pos < m_pBuffer[num]->size()), std::out_of_range,
+      (num < MAX_RESULT_NUM && m_pBuffer[num] && pos < m_pBuffer[num]->size()), std::out_of_range,
       "Try to access value out of bounds! num: {}, pos: {}, name: {}", num, pos, name());
 #endif
     (*m_pBuffer[num])[pos] = val;
@@ -607,6 +651,7 @@ size_t IndicatorImp::getPos(Datetime date) const {
 bool IndicatorImp::existNan(size_t result_idx) const {
     HKU_CHECK(result_idx < m_result_num, "result_idx: {}", result_idx);
     const value_t *src = data(result_idx);
+    HKU_IF_RETURN(!src, false);
     for (size_t i = m_discard, total = size(); i < total; i++) {
         if (std::isnan(src[i])) {
             return true;
@@ -795,7 +840,7 @@ bool IndicatorImp::needCalculate() {
         return true;
     }
 
-    // 子节点设置上下文
+    // Set the context for the child nodes
     if (m_left) {
         m_need_calculate = m_left->needCalculate();
         if (m_need_calculate) {
@@ -874,6 +919,92 @@ bool IndicatorImp::can_increment_calculate() {
     return true;
 }
 
+bool IndicatorImp::can_shift_old_results(size_t operand_total) const noexcept {
+    size_t old_total = m_old_context.size();
+    if (old_total == 0) {
+        return false;
+    }
+
+    for (size_t r = 0; r < m_result_num; ++r) {
+        HKU_IF_RETURN(m_pBuffer[r] == nullptr, false);
+        HKU_IF_RETURN(m_pBuffer[r]->size() != old_total, false);
+    }
+
+    // An operand of another length is merged with an index offset, and the offset changes with the
+    // context length, so the old results are not placed bar aligned any more. The bindings are
+    // rejected by the checks in prepareBinaryOp and calculate(); this stays as the back stop.
+    // Accepted residual: an operand carrying its own data whose length happens to equal the
+    // context length cannot be told apart by any length comparison, and binding one is a misuse
+    if (m_left && m_left->size() != operand_total) {
+        return false;
+    }
+    if (m_right && m_right->size() != operand_total) {
+        return false;
+    }
+    if (m_three && m_three->size() != operand_total) {
+        return false;
+    }
+
+    return true;
+}
+
+IndicatorImp::BinaryLayout IndicatorImp::prepareBinaryOp(bool weave) {
+    BinaryLayout ly;
+    size_t start_pos = increment_execute();
+    const bool increment = (start_pos != Null<size_t>());
+    if (!increment) {
+        m_right->calculate();
+        m_left->calculate();
+    }
+
+    size_t left_size = m_left->size();
+    size_t right_size = m_right->size();
+
+    // The framework invariant: a node result is as long as its context. Data only indicator trees
+    // have no context at all, then the longest operand keeps the historical anchor
+    size_t ctx_total = m_context.size();
+    ly.total = ctx_total > 0 ? ctx_total : std::max(left_size, right_size);
+    ly.left_offset = (int64_t)ly.total - (int64_t)left_size;
+    ly.right_offset = (int64_t)ly.total - (int64_t)right_size;
+
+    if (weave) {
+        ly.result_num = m_left->getResultNumber() + m_right->getResultNumber();
+        if (ly.result_num > MAX_RESULT_NUM) {
+            HKU_WARN("{}: weave result_num {} exceeds MAX_RESULT_NUM {}, right operands truncated!",
+                     name(), ly.result_num, MAX_RESULT_NUM);
+            ly.result_num = MAX_RESULT_NUM;
+        }
+    } else {
+        ly.result_num = std::min(m_left->getResultNumber(), m_right->getResultNumber());
+    }
+
+    // The leading bars covered by no operand are invalid, so the discard counts the offsets too
+    int64_t discard = std::max(ly.left_offset + (int64_t)m_left->discard(),
+                               ly.right_offset + (int64_t)m_right->discard());
+    ly.discard = discard > 0 ? (size_t)discard : 0;
+
+    // An operand bound to a context must cover every bar of it: an indicator carrying its own
+    // data (a sliced or filtered one) has no meaning per context date. Data only trees have no
+    // context, then the longest operand is the anchor and the others align at its right end
+    HKU_CHECK(ctx_total == 0 || (left_size == 0 || left_size == ctx_total),
+              "The left operand of {} must be as long as its context ({} vs {})!", name(),
+              ctx_total, left_size);
+    HKU_CHECK(ctx_total == 0 || (right_size == 0 || right_size == ctx_total),
+              "The right operand of {} must be as long as its context ({} vs {})!", name(),
+              ctx_total, right_size);
+
+    if (!increment) {
+        _readyBuffer(ly.total, ly.result_num);
+        start_pos = ly.discard;
+    } else if (start_pos < ly.discard) {
+        start_pos = ly.discard;
+    }
+
+    ly.start_pos = start_pos;
+    setDiscard(ly.discard);
+    return ly;
+}
+
 bool IndicatorImp::increment_execute_leaf_or_op(const Indicator &ind) {
     if (m_param_changed || !ms_enable_increment_calculate || !supportIncrementCalculate() ||
         !can_increment_calculate()) {
@@ -900,6 +1031,18 @@ bool IndicatorImp::increment_execute_leaf_or_op(const Indicator &ind) {
         return false;
     }
 
+    if (start_pos < ind.discard() + min_increment_start()) {
+        return false;
+    }
+
+    if (start_pos < m_discard) {
+        return false;
+    }
+
+    if (!can_shift_old_results(m_context.size())) {
+        return false;
+    }
+
     if (copy_len > 0) {
         for (size_t r = 0; r < m_result_num; ++r) {
             HKU_ASSERT(m_pBuffer[r]);
@@ -909,13 +1052,18 @@ bool IndicatorImp::increment_execute_leaf_or_op(const Indicator &ind) {
         }
     }
 
-    if (start_pos < m_discard) {
-        start_pos = m_discard;
-    }
-
     m_discard = 0;
 
     if (start_pos < total) {
+        // [start_pos, copy_len) keeps the shifted old values, which a recursive implementation may
+        // read as its seed; every bar of [copy_len, total) is computed by this call, so it starts
+        // as null and an implementation may simply skip an invalid point. Both contexts cover the
+        // same securities and calendar, so copy_len is start_pos + 1 and never exceeds total
+        for (size_t r = 0; r < m_result_num; ++r) {
+            HKU_ASSERT(m_pBuffer[r]);
+            auto *dst = this->data(r);
+            std::fill(dst + copy_len, dst + total, Null<value_t>());
+        }
         _increment_calculate(ind, start_pos);
     }
 
@@ -941,11 +1089,13 @@ Indicator IndicatorImp::calculate() {
                     _calculate(Indicator());
                 }
             } else {
-                // 动态周期叶子没有右子节点驱动 buffer 定长。当执行器跨股票重绑 context 时，
-                // 空输入会让 _dyn_calculate 在 total == 0 处提前返回而完全不触碰 buffer，
-                // 导致上一只股票的数据与长度残留在 buffer 中（脏缓冲区）。这里在调用前按
-                // 当前 context 长度预尺寸并 null 填充 buffer，使得即便 _dyn_calculate 什么都不写，
-                // size()/data() 也能返回正确（可能更短）的长度。
+                // A dynamic period leaf has no right child to drive its fixed-length buffer. When
+                // the executor rebinds the context across stocks, an empty input makes
+                // _dyn_calculate return early at total == 0 without touching the buffer at all,
+                // leaving the data and the length of the previous stock in the buffer (a dirty
+                // buffer). Here the buffer is pre-sized and null filled according to the current
+                // context length before the call, so that even if _dyn_calculate writes nothing,
+                // size()/data() return the correct (possibly shorter) length.
                 if (isNeedContext()) {
                     _readyBuffer(getContext().size(), m_result_num);
                 }
@@ -957,6 +1107,12 @@ Indicator IndicatorImp::calculate() {
             if (m_ind_params.empty()) {
                 if (!increment_execute_leaf_or_op(Indicator(m_right))) {
                     m_right->calculate();
+                    // The input of a unary indicator must cover every bar of the context, the same
+                    // rule as the operands of a merged node
+                    HKU_CHECK(m_context.empty() || m_right->size() == 0 ||
+                                m_right->size() == m_context.size(),
+                              "The input of {} must be as long as its context ({} vs {})!", name(),
+                              m_context.size(), m_right->size());
                     _readyBuffer(m_right->size(), m_result_num);
                     _calculate(Indicator(m_right));
                     onlySetContext(m_right->getContext());
@@ -1034,7 +1190,8 @@ Indicator IndicatorImp::calculate() {
             break;
     }
 
-    // 使用原型方式时，不加此判断无法立刻重新计算
+    // When the prototype way is used, the recalculation cannot happen immediately without this
+    // check
     if (size() != 0) {
         m_need_calculate = false;
     }
@@ -1046,8 +1203,9 @@ Indicator IndicatorImp::calculate() {
         result = shared_from_this();
     } catch (const std::exception &e) {
         if (runningInPython()) {
-            // Python中继承的实现会出现bad_weak_ptr错误，通过此方式避免
-            // 切换至 pybind11 后，目前应已不在出现，目前保留观察
+            // The implementation inherited in Python raised a bad_weak_ptr error, this way avoids
+            // it. After switching to pybind11 it should no longer happen, it is kept for
+            // observation for now.
             result = clone();
         } else {
             HKU_ERROR("IndicatorImp::calculate() error! {}", e.what());
@@ -1085,6 +1243,10 @@ size_t IndicatorImp::increment_execute() {
         return null_pos;
     }
 
+    if (!can_shift_old_results(m_context.size())) {
+        return null_pos;
+    }
+
     for (size_t r = 0; r < m_result_num; ++r) {
         HKU_ASSERT(m_pBuffer[r] != nullptr);
         m_pBuffer[r]->resize(total, Null<value_t>());
@@ -1096,734 +1258,194 @@ size_t IndicatorImp::increment_execute() {
 }
 
 void IndicatorImp::execute_weave() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    const IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t diff = maxp->size() - minp->size();
-    size_t total = maxp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = minp->getResultNumber() + maxp->getResultNumber();
-        if (result_number > MAX_RESULT_NUM) {
-            result_number = MAX_RESULT_NUM;
-        }
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    value_t const *src = nullptr;
-    value_t *dst = nullptr;
-    if (m_left->size() >= m_right->size()) {
-        size_t num = m_left->getResultNumber();
-        for (size_t r = 0; r < num; ++r) {
-            src = m_left->data(r);
-            dst = this->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                dst[i] = src[i];
-            }
-        }
-        for (size_t r = num; r < m_result_num; r++) {
-            src = m_right->data(r - num);
-            dst = this->data(r);
-            for (size_t i = start_pos; i < total; i++) {
-                dst[i] = src[i - diff];
-            }
-        }
-    } else {
-        size_t num = m_left->getResultNumber();
-        for (size_t r = 0; r < num; ++r) {
-            src = m_left->data(r);
-            dst = this->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                dst[i] = src[i - diff];
-            }
-        }
-        for (size_t r = num; r < m_result_num; r++) {
-            src = m_right->data(r - num);
-            dst = this->data(r);
-            for (size_t i = start_pos; i < total; i++) {
-                dst[i] = src[i];
-            }
+    BinaryLayout ly = prepareBinaryOp(true);
+    size_t left_num = m_left->getResultNumber();
+    for (size_t r = 0; r < ly.result_num; ++r) {
+        const bool from_left = (r < left_num);
+        auto const *src = from_left ? m_left->data(r) : m_right->data(r - left_num);
+        int64_t offset = from_left ? ly.left_offset : ly.right_offset;
+        auto *dst = this->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            dst[i] = src[i - offset];
         }
     }
 }
 
 void IndicatorImp::execute_add() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    for (size_t r = 0; r < m_result_num; ++r) {
-        auto const *data1 = maxp->data(r);
-        auto const *data2 = minp->data(r);
+    BinaryLayout ly = prepareBinaryOp();
+    for (size_t r = 0; r < ly.result_num; ++r) {
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
         auto *result = this->data(r);
-        for (size_t i = start_pos; i < total; ++i) {
-            result[i] = data1[i] + data2[i - diff];
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            result[i] = left[i - ly.left_offset] + right[i - ly.right_offset];
         }
     }
 }
 
 void IndicatorImp::execute_sub() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    if (m_left->size() > m_right->size()) {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            auto *data1 = m_left->data(r);
-            auto *data2 = m_right->data(r);
-            auto *result = this->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                result[i] = data1[i] - data2[i - diff];
-            }
-        }
-    } else {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            auto *data1 = m_left->data(r);
-            auto *data2 = m_right->data(r);
-            auto *result = this->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                result[i] = data1[i - diff] - data2[i];
-            }
+    BinaryLayout ly = prepareBinaryOp();
+    for (size_t r = 0; r < ly.result_num; ++r) {
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
+        auto *result = this->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            result[i] = left[i - ly.left_offset] - right[i - ly.right_offset];
         }
     }
 }
 
 void IndicatorImp::execute_mul() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    for (size_t r = 0; r < m_result_num; ++r) {
-        auto const *data1 = maxp->data(r);
-        auto const *data2 = minp->data(r);
+    BinaryLayout ly = prepareBinaryOp();
+    for (size_t r = 0; r < ly.result_num; ++r) {
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
         auto *result = this->data(r);
-        for (size_t i = start_pos; i < total; ++i) {
-            result[i] = data1[i] * data2[i - diff];
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            result[i] = left[i - ly.left_offset] * right[i - ly.right_offset];
         }
     }
 }
 
 void IndicatorImp::execute_div() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    if (m_left->size() > m_right->size()) {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            auto const *data1 = m_left->data(r);
-            auto const *data2 = m_right->data(r);
-            auto *result = this->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                result[i] = data1[i] / data2[i - diff];
-            }
-        }
-    } else {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            auto const *data1 = m_left->data(r);
-            auto const *data2 = m_right->data(r);
-            auto *result = this->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                result[i] = data1[i - diff] / data2[i];
-            }
+    BinaryLayout ly = prepareBinaryOp();
+    value_t null_value = Null<value_t>();
+    for (size_t r = 0; r < ly.result_num; ++r) {
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
+        auto *result = this->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            value_t rv = right[i - ly.right_offset];
+            result[i] = rv == 0.0 ? null_value : left[i - ly.left_offset] / rv;
         }
     }
 }
 
 void IndicatorImp::execute_mod() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
+    BinaryLayout ly = prepareBinaryOp();
 
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    value_t *dst = nullptr;
-    value_t const *left = nullptr;
-    value_t const *right = nullptr;
     value_t null_value = Null<value_t>();
-    if (m_left->size() > m_right->size()) {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            dst = this->data(r);
-            left = m_left->data(r);
-            right = m_right->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                if (right[i - diff] == 0.0) {
-                    dst[i] = null_value;
-                } else {
-                    dst[i] = int64_t(left[i]) % int64_t(right[i - diff]);
-                }
-            }
+    // Integer modulo. Reject NaN / Inf / out-of-int64-range operands (whose double to int64
+    // conversion is UB) and a zero divisor as null; special-case INT64_MIN % -1 which is UB
+    // (SIGFPE on x86) and whose true remainder is 0
+    auto safe_mod = [&](value_t l, value_t r) -> value_t {
+        static constexpr double INT64_BOUND = 9223372036854775808.0;  // 2^63
+        if (!std::isfinite(l) || !std::isfinite(r) || r == 0.0 || l < -INT64_BOUND ||
+            l >= INT64_BOUND || r < -INT64_BOUND || r >= INT64_BOUND) {
+            return null_value;
         }
-    } else {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            dst = this->data(r);
-            left = m_left->data(r);
-            right = m_right->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                if (right[i] == 0.0) {
-                    dst[i] = null_value;
-                } else {
-                    dst[i] = int64_t(left[i - diff]) % int64_t(right[i]);
-                }
-            }
+        int64_t li = int64_t(l);
+        int64_t ri = int64_t(r);
+        if (li == INT64_MIN && ri == -1) {
+            return 0.0;
+        }
+        return value_t(li % ri);
+    };
+
+    for (size_t r = 0; r < ly.result_num; ++r) {
+        auto *dst = this->data(r);
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            dst[i] = safe_mod(left[i - ly.left_offset], right[i - ly.right_offset]);
         }
     }
 }
 
 void IndicatorImp::execute_eq() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    for (size_t r = 0; r < m_result_num; ++r) {
+    BinaryLayout ly = prepareBinaryOp();
+    for (size_t r = 0; r < ly.result_num; ++r) {
         auto *dst = this->data(r);
-        auto const *maxdata = maxp->data(r);
-        auto const *mindata = minp->data(r);
-        for (size_t i = start_pos; i < total; ++i) {
-            dst[i] = (maxdata[i] == mindata[i - diff]) ? 1.0 : 0.0;
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            dst[i] = (left[i - ly.left_offset] == right[i - ly.right_offset]) ? 1.0 : 0.0;
         }
     }
 }
 
 void IndicatorImp::execute_ne() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    for (size_t r = 0; r < m_result_num; ++r) {
+    BinaryLayout ly = prepareBinaryOp();
+    for (size_t r = 0; r < ly.result_num; ++r) {
         auto *dst = this->data(r);
-        auto const *maxdata = maxp->data(r);
-        auto const *mindata = minp->data(r);
-        for (size_t i = start_pos; i < total; ++i) {
-            dst[i] = (maxdata[i] != mindata[i - diff]) ? 1.0 : 0.0;
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            dst[i] = (left[i - ly.left_offset] != right[i - ly.right_offset]) ? 1.0 : 0.0;
         }
     }
 }
 
 void IndicatorImp::execute_gt() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    value_t *dst = nullptr;
-    value_t const *left = nullptr;
-    value_t const *right = nullptr;
-    if (m_left->size() > m_right->size()) {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            dst = this->data(r);
-            left = m_left->data(r);
-            right = m_right->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                dst[i] = (left[i] > right[i - diff]) ? 1.0 : 0.0;
-            }
-        }
-    } else {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            dst = this->data(r);
-            left = m_left->data(r);
-            right = m_right->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                dst[i] = (left[i - diff] > right[i]) ? 1.0 : 0.0;
-            }
+    BinaryLayout ly = prepareBinaryOp();
+    for (size_t r = 0; r < ly.result_num; ++r) {
+        auto *dst = this->data(r);
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            dst[i] = (left[i - ly.left_offset] > right[i - ly.right_offset]) ? 1.0 : 0.0;
         }
     }
 }
 
 void IndicatorImp::execute_lt() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    value_t *dst = nullptr;
-    value_t const *left = nullptr;
-    value_t const *right = nullptr;
-    if (m_left->size() > m_right->size()) {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            dst = this->data(r);
-            left = m_left->data(r);
-            right = m_right->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                dst[i] = (left[i] < right[i - diff]) ? 1.0 : 0.0;
-            }
-        }
-    } else {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            dst = this->data(r);
-            left = m_left->data(r);
-            right = m_right->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                dst[i] = left[i - diff] < right[i] ? 1.0 : 0.0;
-            }
+    BinaryLayout ly = prepareBinaryOp();
+    for (size_t r = 0; r < ly.result_num; ++r) {
+        auto *dst = this->data(r);
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            dst[i] = (left[i - ly.left_offset] < right[i - ly.right_offset]) ? 1.0 : 0.0;
         }
     }
 }
 
 void IndicatorImp::execute_ge() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    value_t *dst = nullptr;
-    value_t const *left = nullptr;
-    value_t const *right = nullptr;
-    if (m_left->size() > m_right->size()) {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            dst = this->data(r);
-            left = m_left->data(r);
-            right = m_right->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                dst[i] = left[i] >= right[i - diff] ? 1.0 : 0.0;
-            }
-        }
-    } else {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            dst = this->data(r);
-            left = m_left->data(r);
-            right = m_right->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                dst[i] = left[i - diff] >= right[i] ? 1.0 : 0.0;
-            }
+    BinaryLayout ly = prepareBinaryOp();
+    for (size_t r = 0; r < ly.result_num; ++r) {
+        auto *dst = this->data(r);
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            dst[i] = (left[i - ly.left_offset] >= right[i - ly.right_offset]) ? 1.0 : 0.0;
         }
     }
 }
 
 void IndicatorImp::execute_le() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    value_t *dst = nullptr;
-    value_t const *left = nullptr;
-    value_t const *right = nullptr;
-    if (m_left->size() > m_right->size()) {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            dst = this->data(r);
-            left = m_left->data(r);
-            right = m_right->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                dst[i] = left[i] <= right[i - diff] ? 1.0 : 0.0;
-            }
-        }
-    } else {
-        for (size_t r = 0; r < m_result_num; ++r) {
-            dst = this->data(r);
-            left = m_left->data(r);
-            right = m_right->data(r);
-            for (size_t i = start_pos; i < total; ++i) {
-                dst[i] = left[i - diff] <= right[i] ? 1.0 : 0.0;
-            }
+    BinaryLayout ly = prepareBinaryOp();
+    for (size_t r = 0; r < ly.result_num; ++r) {
+        auto *dst = this->data(r);
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            dst[i] = (left[i - ly.left_offset] <= right[i - ly.right_offset]) ? 1.0 : 0.0;
         }
     }
 }
 
 void IndicatorImp::execute_and() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    for (size_t r = 0; r < m_result_num; ++r) {
+    BinaryLayout ly = prepareBinaryOp();
+    for (size_t r = 0; r < ly.result_num; ++r) {
         auto *dst = this->data(r);
-        auto const *maxdata = maxp->data(r);
-        auto const *mindata = minp->data(r);
-        for (size_t i = start_pos; i < total; ++i) {
-            dst[i] = (maxdata[i] > 0.0) && (mindata[i - diff] > 0.0) ? 1.0 : 0.0;
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            dst[i] =
+              (left[i - ly.left_offset] > 0.0) && (right[i - ly.right_offset] > 0.0) ? 1.0 : 0.0;
         }
     }
 }
 
 void IndicatorImp::execute_or() {
-    size_t start_pos = increment_execute();
-    if (start_pos == Null<size_t>()) {
-        m_right->calculate();
-        m_left->calculate();
-    }
-
-    IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
-
-    size_t total = maxp->size();
-    size_t diff = maxp->size() - minp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
-        _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
-    }
-
-    setDiscard(discard);
-
-    for (size_t r = 0; r < m_result_num; ++r) {
+    BinaryLayout ly = prepareBinaryOp();
+    for (size_t r = 0; r < ly.result_num; ++r) {
         auto *dst = this->data(r);
-        auto const *maxdata = maxp->data(r);
-        auto const *mindata = minp->data(r);
-        for (size_t i = start_pos; i < total; ++i) {
-            dst[i] = (maxdata[i] > 0.0) || (mindata[i - diff] > 0.0) ? 1.0 : 0.0;
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
+        for (size_t i = ly.start_pos; i < ly.total; ++i) {
+            dst[i] =
+              (left[i - ly.left_offset] > 0.0) || (right[i - ly.right_offset] > 0.0) ? 1.0 : 0.0;
         }
     }
 }
@@ -1855,6 +1477,10 @@ size_t IndicatorImp::increment_execute_if() {
         return null_pos;
     }
 
+    if (!can_shift_old_results(m_context.size())) {
+        return null_pos;
+    }
+
     for (size_t r = 0; r < m_result_num; ++r) {
         HKU_ASSERT(m_pBuffer[r]);
         m_pBuffer[r]->resize(total, Null<value_t>());
@@ -1867,62 +1493,61 @@ size_t IndicatorImp::increment_execute_if() {
 
 void IndicatorImp::execute_if() {
     size_t start_pos = increment_execute_if();
-    if (start_pos == Null<size_t>()) {
+    const bool increment = (start_pos != Null<size_t>());
+    if (!increment) {
         m_three->calculate();
         m_right->calculate();
         m_left->calculate();
     }
 
-    const IndicatorImp *maxp, *minp;
-    if (m_right->size() > m_left->size()) {
-        maxp = m_right.get();
-        minp = m_left.get();
-    } else {
-        maxp = m_left.get();
-        minp = m_right.get();
-    }
+    size_t cond_size = m_three->size();
+    size_t left_size = m_left->size();
+    size_t right_size = m_right->size();
 
-    size_t total = maxp->size();
-    size_t discard = maxp->size() - minp->size() + minp->discard();
-    if (discard < maxp->discard()) {
-        discard = maxp->discard();
-    }
-    if (discard < m_three->discard()) {
-        discard = m_three->discard();
-    }
+    // The same anchor as prepareBinaryOp: the result is as long as the context, or as the longest
+    // operand when the indicator tree has no context at all
+    size_t ctx_total = m_context.size();
+    size_t total = ctx_total > 0 ? ctx_total : std::max(cond_size, std::max(left_size, right_size));
+    int64_t cond_offset = (int64_t)total - (int64_t)cond_size;
+    int64_t left_offset = (int64_t)total - (int64_t)left_size;
+    int64_t right_offset = (int64_t)total - (int64_t)right_size;
 
-    if (m_three->size() >= maxp->size()) {
-        total = m_three->size();
-        discard = total + discard - maxp->size();
-    } else {
-        discard = total - m_three->size();
-    }
+    size_t result_number = std::min(m_left->getResultNumber(), m_right->getResultNumber());
 
-    size_t diff_right = total - m_right->size();
-    size_t diff_left = total - m_left->size();
-    size_t diff_cond = total - m_three->size();
+    int64_t discard = std::max(cond_offset + (int64_t)m_three->discard(),
+                               std::max(left_offset + (int64_t)m_left->discard(),
+                                        right_offset + (int64_t)m_right->discard()));
+    size_t discard_num = discard > 0 ? (size_t)discard : 0;
 
-    if (start_pos == Null<size_t>()) {
-        size_t result_number = std::min(minp->getResultNumber(), maxp->getResultNumber());
+    // The same binding rule as prepareBinaryOp, over the three operands
+    HKU_CHECK(ctx_total == 0 || (cond_size == 0 || cond_size == ctx_total),
+              "The condition of {} must be as long as its context ({} vs {})!", name(), ctx_total,
+              cond_size);
+    HKU_CHECK(ctx_total == 0 || (left_size == 0 || left_size == ctx_total),
+              "The left operand of {} must be as long as its context ({} vs {})!", name(),
+              ctx_total, left_size);
+    HKU_CHECK(ctx_total == 0 || (right_size == 0 || right_size == ctx_total),
+              "The right operand of {} must be as long as its context ({} vs {})!", name(),
+              ctx_total, right_size);
+
+    if (!increment) {
         _readyBuffer(total, result_number);
-        start_pos = discard;
-    } else if (start_pos < discard) {
-        start_pos = discard;
+        start_pos = discard_num;
+    } else if (start_pos < discard_num) {
+        start_pos = discard_num;
     }
 
-    setDiscard(discard);
+    setDiscard(discard_num);
 
-    auto *left = m_left->data(0);
-    auto *right = m_right->data(0);
-    auto *three = m_three->data(0);
-    for (size_t r = 0; r < m_result_num; ++r) {
+    auto const *three = m_three->data(0);
+    for (size_t r = 0; r < result_number; ++r) {
         auto *dst = this->data(r);
+        auto const *left = m_left->data(r);
+        auto const *right = m_right->data(r);
         for (size_t i = start_pos; i < total; ++i) {
-            if (three[i - diff_cond] > 0.0) {
-                dst[i] = left[i - diff_left];
-            } else {
-                dst[i] = right[i - diff_right];
-            }
+            value_t cond = three[i - cond_offset];
+            dst[i] =
+              std::isfinite(cond) && cond > 0.0 ? left[i - left_offset] : right[i - right_offset];
         }
     }
 }
@@ -1930,7 +1555,7 @@ void IndicatorImp::execute_if() {
 void IndicatorImp::_dyn_calculate(const Indicator &ind) {
     // SPEND_TIME(IndicatorImp__dyn_calculate);
     const auto &ind_param = getIndParamImp("n");
-    // CVAL或PRICELIST可能会大于ind.size()
+    // CVAL or PRICELIST may be larger than ind.size()
     HKU_CHECK(ind_param->size() >= ind.size(), "ind_param->size()={}, ind.size()={}!",
               ind_param->size(), ind.size());
     m_discard = std::max(ind.discard(), ind_param->discard());
@@ -1939,14 +1564,23 @@ void IndicatorImp::_dyn_calculate(const Indicator &ind) {
 
     const value_t *param_data = ind_param->data();
 
+    // A step of 0 is no window at all, not the expanding window of a static n=0; a non-finite /
+    // negative / fractional / oversized value would make size_t(v) UB or silently truncate. Those
+    // bars fall into the same Null slot the NaN branch already emits, rather than aborting the
+    // whole series
+    static constexpr value_t STEP_UPPER_BOUND = value_t(1ull << 53);
+    auto is_valid_step = [](value_t v) {
+        return std::isfinite(v) && v >= 1.0 && v < STEP_UPPER_BOUND && v == std::floor(v);
+    };
+
     static constexpr size_t minCircleLength = 400;
     if (total < minCircleLength || isSerial()) {
         for (size_t i = ind.discard(); i < total; i++) {
-            if (std::isnan(param_data[i])) {
-                _set(Null<value_t>(), i);
+            value_t v = param_data[i];
+            if (is_valid_step(v)) {
+                _dyn_run_one_step(ind, i, size_t(v));
             } else {
-                size_t step = size_t(param_data[i]);
-                _dyn_run_one_step(ind, i, step);
+                _set(Null<value_t>(), i);
             }
         }
         updateDiscard();
@@ -1955,12 +1589,12 @@ void IndicatorImp::_dyn_calculate(const Indicator &ind) {
 
     global_parallel_for_index_void(
       ind.discard(), total,
-      [&ind, param_data, this](size_t i) {
-          if (std::isnan(param_data[i])) {
-              _set(Null<value_t>(), i);
+      [&ind, param_data, is_valid_step, this](size_t i) {
+          value_t v = param_data[i];
+          if (is_valid_step(v)) {
+              _dyn_run_one_step(ind, i, size_t(v));
           } else {
-              size_t step = size_t(param_data[i]);
-              _dyn_run_one_step(ind, i, step);
+              _set(Null<value_t>(), i);
           }
       },
       minCircleLength);
@@ -1976,8 +1610,12 @@ void IndicatorImp::updateDiscard(bool force) noexcept {
     for (size_t result_index = 0; result_index < m_result_num; result_index++) {
         size_t discard = m_discard;
         const auto *dst = this->data(result_index);
+        // a cleared / partially swapped-out slot cannot be scanned from this result
+        if (!dst) {
+            continue;
+        }
         for (size_t i = m_discard; i < total; i++) {
-            if (!std::isnan(dst[i])) {
+            if (std::isfinite(dst[i])) {
                 break;
             }
             discard++;
@@ -2017,13 +1655,10 @@ bool IndicatorImp::alike(const IndicatorImp &other) const {
         HKU_IF_RETURN(this->size() != other.size(), false);
         auto const *d1 = this->data();
         auto const *d2 = other.data();
-        bool eq = true;
         for (size_t i = 0, len = this->size(); i < len; i++) {
-            if (d1[i] != d2[i]) {
-                eq = false;
-            }
+            HKU_IF_RETURN(!equalValue(d1[i], d2[i]), false);
         }
-        return eq;
+        return true;
     }
 
     HKU_IF_RETURN(bool(m_three) != bool(other.m_three) || bool(m_left) != bool(other.m_left) ||
@@ -2049,10 +1684,12 @@ bool IndicatorImp::contains(const string &name) const {
 }
 
 void IndicatorImp::getAllSubNodes(vector<IndicatorImpPtr> &nodes) const {
-    // 使用栈来模拟递归调用，避免深层递归导致的栈溢出
+    // Use a stack to simulate the recursive calls, avoiding the stack overflow caused by a deep
+    // recursion
     std::stack<IndicatorImpPtr> nodeStack;
 
-    // 将当前节点的子节点入栈（按相反顺序入栈以保持原有处理顺序）
+    // Push the child nodes of the current node onto the stack (in the reverse order to keep the
+    // original processing order)
     if (m_three) {
         nodeStack.push(m_three);
     }
@@ -2063,15 +1700,16 @@ void IndicatorImp::getAllSubNodes(vector<IndicatorImpPtr> &nodes) const {
         nodeStack.push(m_right);
     }
 
-    // 处理栈中的节点
+    // Process the nodes in the stack
     while (!nodeStack.empty()) {
         IndicatorImpPtr current = nodeStack.top();
         nodeStack.pop();
 
-        // 添加当前节点到结果列表
+        // Add the current node to the result list
         nodes.push_back(current);
 
-        // 将当前节点的子节点入栈（按相反顺序入栈以保持原有处理顺序）
+        // Push the child nodes of the current node onto the stack (in the reverse order to keep the
+        // original processing order)
         if (current->m_three) {
             nodeStack.push(current->m_three);
         }
@@ -2082,11 +1720,11 @@ void IndicatorImp::getAllSubNodes(vector<IndicatorImpPtr> &nodes) const {
             nodeStack.push(current->m_right);
         }
 
-        // 添加当前节点的内部节点（如果有的话）
+        // Add the internal node of the current node (if there is one)
         current->getSelfInnerNodesWithInputConext(nodes);
     }
 
-    // 添加当前节点的内部节点
+    // Add the internal node of the current node
     getSelfInnerNodesWithInputConext(nodes);
 }
 
@@ -2144,7 +1782,8 @@ void IndicatorImp::repeatALikeNodes() {
 }
 
 void IndicatorImp::repeatSeparateKTypeLeafALikeNodes() {
-    // 需要再上层节点已完成优化后，重新获取所有子节点
+    // All the child nodes need to be fetched again after the optimization of the upper layer is
+    // done
     vector<IndicatorImpPtr> all_nodes;
     getAllSubNodes(all_nodes);
 
@@ -2183,15 +1822,15 @@ void IndicatorImp::repeatSeparateKTypeLeafALikeNodes() {
 }
 
 void IndicatorImp::_printTree(int depth, bool isLast, bool show_long_name) const {
-    // 打印当前节点
+    // Print the current node
     std::string indent;
     if (depth > 0) {
-        // 构建层级缩进
+        // Build the level indentation
         indent = std::string((depth - 1) * 3, ' ');
         indent += isLast ? "└─ " : "├─ ";
     }
 
-    // 打印节点名称
+    // Print the node name
     std::string name = (show_long_name ? long_name() : this->name());
     if (m_parent) {
         if (this == m_parent->m_three.get()) {
@@ -2204,13 +1843,13 @@ void IndicatorImp::_printTree(int depth, bool isLast, bool show_long_name) const
     }
     std::cout << indent << name;
 
-    // 如果是叶子节点，直接换行
+    // If it is a leaf node, break the line directly
     if (isLeaf()) {
         std::cout << std::endl;
         return;
     }
 
-    // 有子节点，先换行再打印子节点
+    // When there are child nodes, break the line first and then print the child nodes
     std::cout << std::endl;
 
     std::vector<IndicatorImp *> children;
@@ -2227,7 +1866,7 @@ void IndicatorImp::_printTree(int depth, bool isLast, bool show_long_name) const
     if (children.empty())
         return;
 
-    // 递归打印子节点
+    // Print the child nodes recursively
     for (size_t i = 0; i < children.size(); ++i) {
         bool lastChild = (i == children.size() - 1);
         std::cout << std::string(depth * 3, ' ');

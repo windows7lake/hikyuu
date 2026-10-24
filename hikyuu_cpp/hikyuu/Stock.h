@@ -31,8 +31,16 @@ class HKU_API Parameter;
 class HKU_API Block;
 class HKU_API KDataSharedBufferImp;
 
+/** The price multiplier of one effective ex-rights record for the proportional adjustment: the
+ *  adjusted price is the raw price times the cumulative product of price_k, anchored by the caller
+ *  at the fixed baseline (the factor = the previous close / the ex-rights reference price) */
+struct HKU_API EqualRecoverFactor {
+    Datetime date;
+    price_t price_k{1.0};
+};
+
 /**
- * Stock基类，Application中一般使用StockPtr进行操作
+ * Base class of a security (Stock). Applications usually operate on it through StockPtr.
  * @ingroup StockManage
  */
 class HKU_API Stock {
@@ -74,56 +82,60 @@ public:
     bool operator!=(const Stock&) const;
 
     /**
-     * 获取内部id，一般用于作为map的键值使用，该id实际为m_data的内存地址
-     * @note 非数据库中的stockid
+     * Get the internal id, usually used as a map key. The id is actually the memory address of
+     * m_data.
+     * @note It is not the stockid stored in the database.
      */
     uint64_t id() const noexcept;
 
-    /** 获取所属市场简称，市场简称是市场的唯一标识 */
+    /** Get the market abbreviation, which uniquely identifies the market */
     const string& market() const noexcept;
 
-    /** 获取证券代码 */
+    /** Get the security code */
     const string& code() const noexcept;
 
-    /** 市场简称+证券代码，如: sh000001 */
+    /** Market abbreviation + security code, e.g. sh000001 */
     const string& market_code() const noexcept;
 
-    /** 获取证券名称 */
+    /** Get the security name */
     const string& name() const noexcept;
 
-    /** 获取证券类型 */
+    /** Get the security type */
     uint32_t type() const noexcept;
 
-    /** 该证券当前是否有效 */
+    /** Whether the security is currently valid */
     bool valid() const noexcept;
 
-    /** 获取证券起始日期 */
+    /** Get the start date of the security */
     const Datetime& startDatetime() const noexcept;
 
-    /** 获取证券最后日期 */
+    /** Get the last date of the security */
     const Datetime& lastDatetime() const noexcept;
 
-    /** 获取最小跳动量 */
+    /** Get the minimum tick size */
     price_t tick() const noexcept;
 
-    /** 最小跳动量价值 */
+    /** Value of the minimum tick */
     price_t tickValue() const noexcept;
 
-    /** 每单位价值 = tickValue / tick */
+    /** Value per unit = tickValue / tick */
     price_t unit() const noexcept;
 
-    /** 获取价格精度 */
+    /** Get the price precision */
     int precision() const noexcept;
 
-    /** 获取最小交易数量，同minTradeNumber */
+    /** Get the minimum trade quantity, same as minTradeNumber */
     double atom() const noexcept;
 
-    /** 获取最小交易数量 */
+    /** Get the minimum trade quantity */
     double minTradeNumber() const noexcept;
 
-    /** 获取最大交易量 */
+    /** Get the maximum trade quantity */
     double maxTradeNumber() const noexcept;
 
+    /** @note Mutate m_data's scalar fields WITHOUT a lock; call only during init /
+     *  loadAllStocks reload (no concurrent readers), else a data race with market()/code()
+     *  readers. */
     void market(const string& market_);
     void code(const string& code_);
     void name(const string& name_);
@@ -141,128 +153,168 @@ public:
     }
 
     /**
-     * 获取指定时间段[start,end)内的权息信息
-     * @param start 起始日期
-     * @param end 结束日期
-     * @return 满足要求的权息信息列表指针
+     * Get the equity/dividend adjustment (weight) information within [start, end)
+     * @param start start date
+     * @param end end date
+     * @return the list of weight records that satisfy the condition
+     * @note The weight cache strategy depends on the process role:
+     *       - Client mode (IPC): at startup, the full weight set is materialized according to the
+     *         load_stock_weight config (the source is the shared-memory snapshot published by the
+     *         main process: IpcBaseInfoDriver shm first, falling back to IPC/local when not
+     *         covered), so getWeight hits the local cache directly. Only when the config is
+     *         disabled (load_stock_weight=false), or for securities that were not materialized
+     *         (added by addStock, newly constructed, ...), the whole weight list of the security is
+     *         read through the driver on first access and then cached (an empty result is cached as
+     *         well, to avoid repeated empty queries).
+     *       - shm server role: after the base info snapshot containing finance data is published,
+     *         StockManager::releaseShmServerBaseInfoCache() releases the local weight cache of each
+     *         security to reclaim memory (clients read through shared memory, so the server does
+     * not need to keep a copy). Later access to a released security (IPC fallback reply, or the
+     *         in-process API) lazily reloads and caches it again, so the result stays correct.
+     *       - Plain standalone main process: only the local cache materialized at startup is read,
+     *         with no lazy-loading fallback.
      */
     StockWeightList getWeight(const Datetime& start = Datetime::min(),
                               const Datetime& end = Null<Datetime>()) const;
 
-    /** 获取不同类型K线数据量 */
+    /**
+     * Get the equal-ratio adjustment multipliers of the effective ex-rights records
+     * @return the (date, price factor, volume factor) list, built lazily from the weight cache and
+     *         the daily line
+     * @note The reference close of a record date is the daily close of the previous trading day, so
+     *       the result does not depend on the query ktype. The list is cached together with the
+     *       weight cache and is released by StockManager::releaseShmServerBaseInfoCache().
+     */
+    vector<EqualRecoverFactor> getEqualRecoverFactors() const;
+
+    /** Get the number of K-line (candlestick) bars of the given type */
     size_t getCount(KQuery::KType dataType = KQuery::DAY) const;
 
-    /** 获取指定日期时刻的市值，即小于等于指定日期的最后一条记录的收盘价, 如果证券已失效，则为0 */
+    /** Get the market value at the given datetime, i.e. the close price of the last record whose
+     *  date is not later than the given datetime; 0 if the security is no longer valid */
     price_t getMarketValue(const Datetime&, KQuery::KType) const;
 
     /**
-     * 根据KQuery指定的条件，获取对应的K线位置范围
-     * @param query [in] 指定的查询条件
-     * @param out_start [out] 对应的K线起始范围
-     * @param out_end [out] 对应的K线结束范围，不包含自身
-     * @return true 成功 | false 失败
+     * Get the K-line index range that matches the condition specified by the query
+     * @param query [in] the query condition
+     * @param out_start [out] the start index of the range
+     * @param out_end [out] the end index of the range, exclusive
+     * @return true on success | false on failure
      */
     bool getIndexRange(const KQuery& query, size_t& out_start, size_t& out_end) const;
 
-    /** 获取指定索引的K线数据记录，pos 无效时返回 KRecord::NullRecord */
+    /** Get the K-line record at the given index; returns KRecord::NullRecord if pos is invalid */
     KRecord getKRecord(size_t pos, const KQuery::KType& dataType = KQuery::DAY) const;
 
-    /** 根据数据类型（日线/周线等），获取指定日期的KRecord */
+    /** Get the KRecord of the given date according to the data type (daily / weekly / ...) */
     KRecord getKRecord(const Datetime&, const KQuery::KType& ktype = KQuery::DAY) const;
 
-    /** 获取K线数据 */
+    /** Get the K-line data */
     KData getKData(const KQuery&) const;
 
     /**
-     * 根据查询条件获取 KRecordList，不建议在客户端直接使用
-     * @note 该方法不支持复权
-     * @param query 查询条件
+     * Get the KRecordList that matches the query condition; not recommended for direct use in a
+     * client
+     * @note This method does not support price adjustment
+     * @param query the query condition
      */
     KRecordList getKRecordList(const KQuery& query) const;
 
-    /** 获取日期列表 */
+    /** Get the date list */
     DatetimeList getDatetimeList(const KQuery& query) const;
 
-    /** 获取分时线 */
+    /** Get the intraday time-line data */
     TimeLineList getTimeLineList(const KQuery& query) const;
 
-    /** 获取历史分笔数据 */
+    /** Get the historical tick (transaction) data */
     TransList getTransList(const KQuery& query) const;
 
     /**
-     * 获取当前财务信息
+     * Get the current financial information
      */
     Parameter getFinanceInfo() const;
 
     /**
-     * 获取所属板块列表
-     * @param category 指定的板块分类，如果为空，则返回所有板块分类的所属板块
+     * Get the sectors that this security belongs to
+     * @param category the sector category; if empty, the sectors of all categories are returned
      * @return BlockList
      */
     vector<Block> getBelongToBlockList(const string& category) const;
 
     /**
-     * 获取历史财务信息
+     * Get the historical financial information
+     * @note Returns a copy of the historical financial records. The main process (not in client
+     *       mode) returns a copy of its materialized internal cache; after that cache is released
+     * by StockManager::releaseShmServerBaseInfoCache() (invoked by the shm server role once the
+     *       snapshot containing finance data has been published), it is lazily reloaded on demand.
+     *       In client mode (IPC) it is not materialized locally; instead it is read on demand
+     *       through the base info driver from the shared-memory snapshot published by the main
+     *       process (IpcBaseInfoDriver shm first, falling back to IPC/local when not covered), so
+     *       that it does not duplicate the snapshot in the client's memory.
      */
-    const vector<HistoryFinanceInfo>& getHistoryFinance() const;
+    vector<HistoryFinanceInfo> getHistoryFinance() const;
 
     /**
-     * 获取自身市场的交易日日历（不是本身的交易日期）
+     * Get the trading calendar of its own market (not the trading dates of the security itself)
      * @param query
      * @return DatetimeList
      */
     DatetimeList getTradingCalendar(const KQuery& query) const;
 
     /**
-     * 判断是否在交易时间段内，忽略日期仅判断时分秒
-     * @param time 时间
+     * Whether the given time falls inside the trading session; the date part is ignored and only
+     * the hour/minute/second is checked
+     * @param time the time to check
      */
     bool isTransactionTime(Datetime time);
 
-    /** 设置K线数据驱动 */
+    /** Set the K-line data driver */
     void setKDataDriver(const KDataDriverConnectPoolPtr& kdataDriver);
 
-    /** 获取K线驱动*/
+    /** Get the K-line driver */
     KDataDriverConnectPoolPtr getKDataDirver() const;
 
     /**
-     * 将K线数据做自身缓存
-     *  @note 一般不主动调用，谨慎
+     * Cache the K-line data inside the security itself
+     * @note Generally not called directly; use with care
      */
     void loadKDataToBuffer(KQuery::KType) const;
 
-    /** 释放对应的K线缓存 */
+    /** Get a full copy of the cached K-line data of the given type; empty if not cached */
+    KRecordList getKRecordListFromBuffer(const KQuery::KType& ktype) const;
+
+    /** Release the K-line cache of the given type */
     void releaseKDataBuffer(KQuery::KType) const;
 
-    /** 指定类型的K线数据是否被缓存 */
+    /** Whether the K-line data of the given type is cached */
     bool isBuffer(KQuery::KType) const noexcept;
 
     bool isPreload(KQuery::KType ktype) const noexcept;
 
-    /** 是否为Null */
+    /** Whether it is Null */
     bool isNull() const noexcept;
 
-    /** （临时函数）只用于更新缓存中的K线数据 **/
+    /** (Temporary function) only used to update the K-line data in the cache */
     void realtimeUpdate(KRecord, const KQuery::KType& ktype = KQuery::DAY);
 
-    /** 获取指定K线数据类型最后更新时间 */
+    /** Get the last update time of the given K-line data type */
     Datetime getLastUpdateTime(const KQuery::KType& ktype) const;
 
     /**
-     * 部分临时创建的 Stock, 直接设置KRecordList
-     * @note 谨慎调用，通常供外部数据源直接设定数据
+     * Set the KRecordList directly, for some temporarily created Stock instances
+     * @note Call with care; usually used by an external data source to set the data directly
      */
     void setKRecordList(const KRecordList& ks, const KQuery::KType& ktype = KQuery::DAY);
     void setKRecordList(KRecordList&& ks, const KQuery::KType& ktype = KQuery::DAY);
 
-    /** 仅用于python的__str__ */
+    /** Only used by __str__ in python */
     string toString() const;
 
 private:
     bool _getIndexRangeByIndex(const KQuery&, size_t& out_start, size_t& out_end) const;
 
-    // 以下函数属于基础操作添加了读锁
-    const KRecord& _getKRecordFromBuffer(size_t pos, const KQuery::KType& ktype) const;
+    // The following functions are basic operations guarded by a read lock
+    KRecord _getKRecordFromBuffer(size_t pos, const KQuery::KType& ktype) const;
     KRecordList _getKRecordListFromBuffer(size_t start_ix, size_t end_ix,
                                           KQuery::KType ktype) const;
 
@@ -273,7 +325,7 @@ private:
 
     KRecordList _getKRecordList(const KQuery& query) const;
 
-    // 仅供 StockManager 初始化时调用
+    // Only called by StockManager during initialization
     void setPreload(const vector<KQuery::KType>& preload_ktypes);
 
     void loadKDataToBufferFromKRecordList(const KQuery::KType& ktype, KRecordList&& ks) const;
@@ -286,20 +338,42 @@ private:
 };
 
 struct HKU_API Stock::Data {
-    string m_market;       // 所属的市场简称
-    string m_code;         // 证券代码
-    string m_market_code;  // 市场简称证券代码
-    string m_name;         // 证券名称
-    uint32_t m_type;       // 证券类型
-    bool m_valid;          // 当前证券是否有效
-    Datetime m_startDate;  // 证券起始日期
-    Datetime m_lastDate;   // 证券最后日期
+    string m_market;       // The market abbreviation it belongs to
+    string m_code;         // Security code
+    string m_market_code;  // Market abbreviation + security code
+    string m_name;         // Security name
+    uint32_t m_type;       // Security type
+    bool m_valid;          // Whether the security is currently valid
+    Datetime m_startDate;  // Start date of the security
+    Datetime m_lastDate;   // Last date of the security
 
-    StockWeightList m_weightList;  // 权息信息列表
+    StockWeightList m_weightList;  // Equity/dividend adjustment (weight) record list
     std::shared_mutex m_weight_mutex;
+    // Whether the weight data has been initialized (materialized at startup or lazily loaded as a
+    // fallback; it may be empty). When it is set:
+    // - Client mode: set when materialized at startup while load_stock_weight is enabled; set on
+    // the
+    //   first lazy load for securities that were not materialized, e.g. added by addStock or newly
+    //   constructed, when the config is disabled;
+    // - shm server role: set to false by releaseShmServerBaseInfoCache() after the snapshot
+    //   containing finance data is published (the cache has been released and the memory returned),
+    //   then set again after the next access lazily reloads it through the driver;
+    // An empty result sets it as well, so securities without weight data do not hit the driver
+    // again on every query.
+    mutable std::atomic_bool m_weight_ready{false};
+
+    // The equal-ratio adjustment multipliers of the effective ex-rights records, built lazily from
+    // m_weightList (the reference close of a record date comes from the daily line) and guarded by
+    // m_weight_mutex; released together with the weight cache.
+    mutable vector<EqualRecoverFactor> m_recover_factors;
+    mutable std::atomic_bool m_recover_ready{false};
 
     mutable vector<HistoryFinanceInfo>
-      m_history_finance;  // 历史财务信息 [财务报告日期, 字段1, 字段2, ...]
+      m_history_finance;  // Historical financial info [report date, field 1, field 2, ...]
+    // Whether the historical finance data has been initialized (set when the main process preloads
+    // it at startup; set to false after it is released by releaseShmServerBaseInfoCache(), and set
+    // again after the next access lazily reloads it; in client mode it is never materialized
+    // locally, so it stays false)
     mutable std::atomic_bool m_history_finance_ready{false};
     mutable std::shared_mutex m_history_finance_mutex;
 
@@ -310,10 +384,11 @@ struct HKU_API Stock::Data {
     double m_minTradeNumber;
     double m_maxTradeNumber;
 
-    std::unordered_set<string> m_ktype_preload;  // 记录当前证券的K线数据是否需要预加载
-    unordered_map<string, KRecordList*> pKData;
+    std::unordered_set<string> m_ktype_preload;  // Records whether the K-line data of this security
+                                                 // needs to be preloaded
+    unordered_map<string, std::shared_ptr<KRecordList>> pKData;
     unordered_map<string, std::shared_mutex*> pMutex;
-    unordered_map<string, Datetime> m_lastUpdate;  // 记录各类型K线数据最后更新时间
+    unordered_map<string, Datetime> m_lastUpdate;  // Last update time of each K-line data type
 
     Data();
     Data(const string& market, const string& code, const string& name, uint32_t type, bool valid,
@@ -324,7 +399,8 @@ struct HKU_API Stock::Data {
 };
 
 /**
- * 输出Stock信息，如：Stock(market, code, name, type, valid, startDatetime, lastDatetime)
+ * Print the Stock information, e.g. Stock(market, code, name, type, valid, startDatetime,
+ * lastDatetime)
  * @ingroup StockManage
  */
 HKU_API std::ostream& operator<<(std::ostream& os, const Stock& stock);
@@ -333,15 +409,18 @@ HKU_API std::ostream& operator<<(std::ostream& os, const Stock& stock);
 typedef vector<Stock> StockList;
 
 /**
- * 获取Stock，目的是封装StockManager，客户端不直接使用StockManager对象
- * @param querystr 格式：“市场简称证券代码”，如"sh000001"
- * @return 对应的证券实例，如果实例不存在，则Null<Stock>()，不抛出异常
+ * Get a Stock instance; it wraps StockManager so that a client does not use the StockManager object
+ * directly
+ * @param querystr in the form of "market abbreviation + security code", e.g. "sh000001"
+ * @return the corresponding security instance; Null<Stock>() if it does not exist, no exception is
+ *         thrown
  * @ingroup StockManage
  */
 Stock HKU_API getStock(const string& querystr);
 
-/* 用于将Stock实例作为map的key，一般建议使用stock.id做键值，
- * 否则map还要利用拷贝构造函数，创建新对象，效率低 */
+/* Used to take a Stock instance as a map key; it is generally recommended to use stock.id as the
+ * key, otherwise the map has to build a new object through the copy constructor, which is
+ * inefficient */
 bool operator<(const Stock& s1, const Stock& s2);
 inline bool operator<(const Stock& s1, const Stock& s2) {
     return s1.id() < s2.id();

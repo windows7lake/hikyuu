@@ -9,13 +9,14 @@
 #ifndef POSITIONRECORD_H_
 #define POSITIONRECORD_H_
 
+#include "../serialization/PriceSerialization.h"
 #include "../StockManager.h"
 #include "../serialization/Stock_serialization.h"
 
 namespace hku {
 
 /**
- * 持仓记录
+ * Position record
  * @ingroup TradeManagerClass
  */
 class HKU_API PositionRecord {
@@ -31,31 +32,34 @@ public:
     PositionRecord(PositionRecord&& rhs);
     PositionRecord& operator=(PositionRecord&& rhs);
 
-    /** 仅用于python的__str__ */
+    /** Used by __str__ of python only */
     string str() const;
 
     /**
-     * @brief 盈亏 = 卖出资金 - 累计交易总成本 - 买入资金
-     * @note 只对已清仓的记录有效，未清仓将返回0.0
+     * @brief Profit and loss = sell funds - accumulated total trade cost - buy funds
+     * @note It is valid for the closed records only; Null (NaN) is returned for the ones not yet
+     * closed, so callers can tell "unclosed" apart from a genuine zero profit
      */
     price_t totalProfit() const;
 
-    Stock stock;              ///< 交易对象
-    Datetime takeDatetime;    ///< 初次建仓日期
-    Datetime cleanDatetime;   ///< 平仓日期，当前持仓记录中为Null<Datetime>()
-    double number{0.0};       ///< 当前持仓数量
-    price_t stoploss{0.0};    ///< 当前止损价
-    price_t goalPrice{0.0};   ///< 当前的目标价格
-    double totalNumber{0.0};  ///< 累计持仓数量
-    price_t buyMoney{0.0};    ///< 累计买入资金
-    price_t totalCost{0.0};   ///< 累计交易总成本
-    price_t totalRisk{0.0};   ///< 累计交易风险 = 各次 （买入价格-止损)*买入数量, 不包含交易成本
-    price_t sellMoney{0.0};   ///< 累计卖出资金
-    size_t buyCount{0};       ///< 买入次数
-    size_t sellCount{0};      ///< 卖出次数
+    Stock stock;              ///< Trading object
+    Datetime takeDatetime;    ///< Date of the first position opening
+    Datetime cleanDatetime;   ///< Closing date, it is Null<Datetime>() in the current position
+                              ///< records
+    double number{0.0};       ///< Current held quantity
+    price_t stoploss{0.0};    ///< Current stop-loss price
+    price_t goalPrice{0.0};   ///< Current target price
+    double totalNumber{0.0};  ///< Accumulated held quantity
+    price_t buyMoney{0.0};    ///< Accumulated buy funds
+    price_t totalCost{0.0};   ///< Accumulated total trade cost
+    price_t totalRisk{0.0};   ///< Accumulated trade risk = sum of (buy price - stop-loss) * buy
+                              ///< quantity, excluding the trade cost
+    price_t sellMoney{0.0};   ///< Accumulated sell funds
+    size_t buyCount{0};       ///< Number of buys
+    size_t sellCount{0};      ///< Number of sells
 
 //===================
-// 序列化支持
+// Serialization support
 //===================
 #if HKU_SUPPORT_SERIALIZATION
 private:
@@ -70,7 +74,8 @@ private:
         ar& bs::make_nvp("cleanDatetime", clean);
         ar& BOOST_SERIALIZATION_NVP(number);
         ar& BOOST_SERIALIZATION_NVP(stoploss);
-        ar& BOOST_SERIALIZATION_NVP(goalPrice);
+        std::string gp = priceToSerialString(goalPrice);
+        ar& bs::make_nvp("goalPrice", gp);
         ar& BOOST_SERIALIZATION_NVP(totalNumber);
         ar& BOOST_SERIALIZATION_NVP(buyMoney);
         ar& BOOST_SERIALIZATION_NVP(totalCost);
@@ -91,7 +96,9 @@ private:
         cleanDatetime = Datetime(clean);
         ar& BOOST_SERIALIZATION_NVP(number);
         ar& BOOST_SERIALIZATION_NVP(stoploss);
-        ar& BOOST_SERIALIZATION_NVP(goalPrice);
+        std::string gp;
+        ar& bs::make_nvp("goalPrice", gp);
+        goalPrice = priceFromSerialString(gp);
         ar& BOOST_SERIALIZATION_NVP(totalNumber);
         ar& BOOST_SERIALIZATION_NVP(buyMoney);
         ar& BOOST_SERIALIZATION_NVP(totalCost);
@@ -109,7 +116,7 @@ private:
 typedef vector<PositionRecord> PositionRecordList;
 
 /**
- * 输出持仓记录信息
+ * Output the position record information
  * @ingroup TradeManagerClass
  */
 HKU_API std::ostream& operator<<(std::ostream&, const PositionRecord&);

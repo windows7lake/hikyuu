@@ -1,7 +1,7 @@
 /*
  * FixedPercentSlippage.h
  *
- *  Created on: 2016年5月7日
+ *  Created on: 2016-5-7
  *      Author: Administrator
  */
 
@@ -21,6 +21,8 @@ public:
     FixedPercentSlippage();
     virtual ~FixedPercentSlippage();
     virtual void _checkParam(const string& name) const override;
+    virtual price_t _getRealBuyShortPrice(const Datetime&, price_t) override;
+    virtual price_t _getRealSellShortPrice(const Datetime&, price_t) override;
 };
 
 } /* namespace hku */

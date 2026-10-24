@@ -1,7 +1,7 @@
 /*
  * FixedCapitalMoneyManager.cpp
  *
- *  Created on: 2016年5月3日
+ *  Created on: 2016-5-3
  *      Author: Administrator
  */
 
@@ -26,10 +26,17 @@ void FixedCapitalMoneyManager::_checkParam(const string& name) const {
     }
 }
 
-double FixedCapitalMoneyManager ::_getBuyNumber(const Datetime& datetime, const Stock& stock,
-                                                price_t price, price_t risk, SystemPart from) {
+double FixedCapitalMoneyManager::_getBuyNumber(const Datetime& datetime, const Stock& stock,
+                                               price_t price, price_t risk, SystemPart from) {
     double capital = getParam<double>("capital");
     return m_tm->cash(datetime, m_query.kType()) / capital;
+}
+
+double FixedCapitalMoneyManager::_getSellShortNumber(const Datetime& datetime, const Stock& stock,
+                                                     price_t price, price_t risk, SystemPart from) {
+    // Base the size on the net assets: the borrowed proceeds in cash must not inflate it
+    double capital = getParam<double>("capital");
+    return m_tm->getFunds(datetime, m_query.kType()).net_assets() / capital;
 }
 
 MoneyManagerPtr HKU_API MM_FixedCapital(double capital) {

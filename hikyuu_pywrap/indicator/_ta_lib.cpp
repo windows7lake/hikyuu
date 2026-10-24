@@ -99,7 +99,7 @@ void export_Indicator_ta_lib(py::module& m) {
 :param KData data: input KData
 :param int n: Number of period (From 2 to 100000)
 :return: result(0) - Aroon down
-         result(2) - Aroon up)")
+         result(1) - Aroon up")
 
     TA_K_OUT_N_PY(TA_AROONOSC, 14, R"(TA_AROONOSC - Aroon Oscillator
 
@@ -131,7 +131,7 @@ void export_Indicator_ta_lib(py::module& m) {
 :param int n: Number of periode (From 1 to 100000)
 :param float nbdevup: Deviation multiplier for upper band
 :param float nbdevdn: Deviation multiplier for lower band
-:rtype: 具有三个结果集的 Indicator
+:rtype: an Indicator with three result sets
 
     * result(0): Upper Band
     * result(1): Middle Band
@@ -224,7 +224,8 @@ void export_Indicator_ta_lib(py::module& m) {
 :param KData data: input KData
 :param float penetration: Percentage of penetration of a candle within another candle (>=0))")
 
-    TA_K_OUT_P_D_PY(TA_CDLMORNINGSTAR, penetration, 3.000000e-1, R"(TA_CDLMORNINGSTAR - Morning Star
+    TA_K_OUT_P_D_PY(TA_CDLMORNINGSTAR, penetration, 3.000000e-1,
+                    R"(TA_CDLMORNINGSTAR - Morning Star
 
 :param KData data: input KData
 :param float penetration: Percentage of penetration of a candle within another candle (>=0))")
@@ -301,7 +302,7 @@ void export_Indicator_ta_lib(py::module& m) {
 
     TA_IN1_OUT_N_PY(TA_KAMA, 30, R"(TA_KAMA - Kaufman Adaptive Moving Average
 
-:param KData data: input KData
+:param Indicator data: input data
 :param int n: Number of period (From 2 to 100000))")
 
     TA_IN1_OUT_N_PY(TA_LINEARREG_ANGLE, 14, R"(TA_LINEARREG_ANGLE - Linear Regression Angle
@@ -339,7 +340,7 @@ void export_Indicator_ta_lib(py::module& m) {
     m.def("TA_MACD", py::overload_cast<int, int, int>(TA_MACD), py::arg("fast_n") = 12,
           py::arg("slow_n") = 26, py::arg("signal_n") = 9);
     m.def("TA_MACD", py::overload_cast<const Indicator&, int, int, int>(TA_MACD), py::arg("data"),
-          py::arg("fast_n") = 30, py::arg("slow_n") = 26, py::arg("signal_n") = 9,
+          py::arg("fast_n") = 12, py::arg("slow_n") = 26, py::arg("signal_n") = 9,
           R"(TA_MACD - Moving Average Convergence/Divergence
 
 :param Indicator data: input data
@@ -352,7 +353,7 @@ void export_Indicator_ta_lib(py::module& m) {
           py::arg("fast_matype") = 0, py::arg("slow_matype") = 0, py::arg("signal_matype") = 0);
     m.def("TA_MACDEXT",
           py::overload_cast<const Indicator&, int, int, int, int, int, int>(TA_MACDEXT),
-          py::arg("data"), py::arg("fast_n") = 30, py::arg("slow_n") = 26, py::arg("signal_n") = 9,
+          py::arg("data"), py::arg("fast_n") = 12, py::arg("slow_n") = 26, py::arg("signal_n") = 9,
           py::arg("fast_matype") = 0, py::arg("slow_matype") = 0, py::arg("signal_matype") = 0,
           R"(TA_MACDEXT - MACD with controllable MA type
 
@@ -388,7 +389,7 @@ void export_Indicator_ta_lib(py::module& m) {
     m.def("TA_MAVP",
           py::overload_cast<const Indicator&, const Indicator&, int, int, int, bool>(TA_MAVP),
           py::arg("ind1"), py::arg("ind2"), py::arg("min_n") = 2, py::arg("max_n") = 30,
-          py::arg("fill_null") = true, py::arg("matype") = 0,
+          py::arg("matype") = 0, py::arg("fill_null") = true,
           R"(TA_MAVP - Moving average with variable period
 
 :param Indicator ind1: input1
@@ -396,14 +397,15 @@ void export_Indicator_ta_lib(py::module& m) {
 :param int min_n: Value less than minimum will be changed to Minimum period (From 2 to 100000)
 :param int max_n: Value higher than maximum will be changed to Maximum period (From 2 to 100000)
 :param int matype: Type of Moving Average
-:param bool fill_null: 日期对齐时，缺失日期数据填充nan值)");
+:param bool fill_null: fill the missing date data with the nan values during the date alignment)");
 
     TA_IN1_OUT_N_PY(TA_MAX, 30, R"(TA_MAX - Highest value over a specified period
 
 :param Indicator data: input data
 :param int n: Number of period (From 2 to 100000))")
 
-    TA_IN1_OUT_N_PY(TA_MAXINDEX, 30, R"(TA_MAXINDEX - Index of highest value over a specified period
+    TA_IN1_OUT_N_PY(TA_MAXINDEX, 30,
+                    R"(TA_MAXINDEX - Index of highest value over a specified period
 
 :param Indicator data: input data
 :param int n: Number of period (From 2 to 100000))")
@@ -441,15 +443,16 @@ void export_Indicator_ta_lib(py::module& m) {
 :return: result(0) - outMin
          result(1) - outMax)")
 
-    TA_IN1_OUT_N_PY(TA_MINMAXINDEX, 30,
-                    R"(TA_MINMAXINDEX - Indexes of lowest and highest values over a specified period
+    TA_IN1_OUT_N_PY(
+      TA_MINMAXINDEX, 30,
+      R"(TA_MINMAXINDEX - Indexes of lowest and highest values over a specified period
     
 :param Indicator data: input
 :param int n: Number of period (From 2 to 100000)
 :return: result(0) - outMinIdx
          result(1) - outMaxIdx)")
 
-    TA_K_OUT_N_PY(TA_MINUS_DI, 14, R"(A_MINUS_DI - Minus Directional Indicator
+    TA_K_OUT_N_PY(TA_MINUS_DI, 14, R"(TA_MINUS_DI - Minus Directional Indicator
 
 :param KData data: input KData
 :param int n: Number of period (From 1 to 100000))")
@@ -497,7 +500,8 @@ void export_Indicator_ta_lib(py::module& m) {
 :param Indicator data: input data
 :param int n: Number of period (From 1 to 100000))")
 
-    TA_IN1_OUT_N_PY(TA_ROCP, 10, R"(TA_ROCP - Rate of change Percentage: (price-prevPrice)/prevPrice
+    TA_IN1_OUT_N_PY(TA_ROCP, 10,
+                    R"(TA_ROCP - Rate of change Percentage: (price-prevPrice)/prevPrice
 
 :param Indicator data: input data
 :param int n: Number of period (From 1 to 100000))")

@@ -3,10 +3,11 @@
  *
  *  Copyright (c) 2019 hikyuu.org
  *
- *  Created on: 2016年4月1日
+ *  Created on: 2016-4-1
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IHighLine.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -23,7 +24,7 @@ IHighLine::~IHighLine() {}
 
 void IHighLine::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 0);
+        HKU_ASSERT(getParam<int>("n") >= 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -101,7 +102,6 @@ size_t IHighLine::min_increment_start() const {
 
 void IHighLine::_increment_calculate(const Indicator& ind, size_t start_pos) {
     size_t total = ind.size();
-    m_discard = ind.discard();
     if (1 == total) {
         if (0 == m_discard) {
             _set(ind[0], 0);
@@ -116,10 +116,9 @@ void IHighLine::_increment_calculate(const Indicator& ind, size_t start_pos) {
     if (n >= total) {
         dst[m_discard] = src[m_discard];
         for (size_t i = m_discard + 1; i < total; i++) {
-            if (src[i] > dst[i - 1]) {
-                dst[i] = src[i];
-            }
+            dst[i] = src[i] > dst[i - 1] ? src[i] : dst[i - 1];
         }
+        return;
     }
 
     price_t max = src[start_pos];
@@ -149,7 +148,7 @@ void IHighLine::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t st
     size_t start = _get_step_start(curPos, step, ind.discard());
     price_t max_val = ind[start];
     for (size_t i = start + 1; i <= curPos; i++) {
-        if (ind[i] > max_val) {
+        if (ind[i] >= max_val) {
             max_val = ind[i];
         }
     }

@@ -20,7 +20,7 @@ public:
 
     virtual void _reset() override;
     virtual SelectorPtr _clone() override;
-    virtual bool isMatchAF(const AFPtr& af) override;
+
     virtual void _calculate() override;
     virtual SystemWeightList _getSelected(Datetime date) override {
         return SystemWeightList();
@@ -32,8 +32,20 @@ public:
 protected:
     virtual void bindRealToProto(const SYSPtr& real, const SYSPtr& proto) override {
         m_real_to_proto[real] = proto;
+        // The operand may be a logical selector itself (e.g. (a + b) + c), the binding must reach
+        // it, otherwise the nested level would never learn its prototypes and select nothing
+        if (m_se1) {
+            m_se1->bindRealToProto(real, proto);
+        }
+        if (m_se2) {
+            m_se2->bindRealToProto(real, proto);
+        }
     }
 
+    // The weight is the raw func result and may be negative (e.g. 0 - w in SE_Sub): it is an
+    // intermediate value for the downstream filter to flip or screen, not an invalid state. The
+    // list is sorted by weight only; the tie order stays undefined on purpose (getSelected runs
+    // per bar by default, a market_code tie-break would cost more than it is worth).
     SystemWeightList getUnionSelected(Datetime date,
                                       const std::function<double(double, double)>&& func);
 
@@ -49,8 +61,8 @@ protected:
 protected:
     SelectorPtr m_se1;
     SelectorPtr m_se2;
-    std::unordered_set<SYSPtr> m_se1_set;  // se1 的原型系统实例集合
-    std::unordered_set<SYSPtr> m_se2_set;  // se2 的原型系统实例集合
+    std::unordered_set<SYSPtr> m_se1_set;  // The prototype system instance set of se1
+    std::unordered_set<SYSPtr> m_se2_set;  // The prototype system instance set of se2
     std::unordered_map<SYSPtr, SYSPtr> m_real_to_proto;
 
 private:
@@ -59,7 +71,7 @@ private:
 
 private:
     //============================================
-    // 序列化支持
+    // Serialization support
     //============================================
 #if HKU_SUPPORT_SERIALIZATION
     friend class boost::serialization::access;
@@ -77,6 +89,8 @@ private:
         ar& BOOST_SERIALIZATION_NVP(m_se2);
         build();
     }
+
+    BOOST_SERIALIZATION_SPLIT_MEMBER()
 #endif
 };
 
@@ -90,7 +104,9 @@ public:                                                            \
     virtual SystemWeightList _getSelected(Datetime date) override; \
                                                                    \
     virtual SelectorPtr _clone() override {                        \
-        HKU_THROW("OperatorSelector Could't support clone!");      \
+        auto p = std::make_shared<classname>();                    \
+        p->cloneRebuild(m_se1, m_se2);                             \
+        return p;                                                  \
     }
 
 #if HKU_SUPPORT_SERIALIZATION

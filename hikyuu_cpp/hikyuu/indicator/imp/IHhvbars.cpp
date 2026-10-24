@@ -7,6 +7,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IHhvbars.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -23,7 +24,7 @@ IHhvbars::~IHhvbars() {}
 
 void IHhvbars::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 0);
+        HKU_ASSERT(getParam<int>("n") >= 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -152,7 +153,7 @@ void IHhvbars::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t ste
     price_t maxVal = ind[start];
     size_t maxPos = start;
     for (size_t i = start + 1; i <= curPos; i++) {
-        if (ind[i] > maxVal) {
+        if (ind[i] >= maxVal) {
             maxVal = ind[i];
             maxPos = i;
         }

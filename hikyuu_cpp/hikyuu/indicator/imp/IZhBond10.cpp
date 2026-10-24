@@ -5,6 +5,7 @@
  *      Author: fasiondog
  */
 
+#include <algorithm>
 #include "hikyuu/StockManager.h"
 #include "IZhBond10.h"
 
@@ -15,7 +16,8 @@ BOOST_CLASS_EXPORT(hku::IZhBond10)
 namespace hku {
 
 IZhBond10::IZhBond10() : IndicatorImp("ZHBOND10") {
-    // 在没有上下文时使用该参数，否则使用上下文中的日期, 数据应该是按升序排列的
+    // This parameter is used when there is no context, otherwise the dates in the context are used;
+    // the data should be sorted in ascending order
     setParam<DatetimeList>("dates", DatetimeList());
     setParam<double>("default", 4.0);
 }
@@ -43,13 +45,16 @@ void IZhBond10::_calculate(const Indicator& data) {
 
     size_t total = dates.size();
     HKU_IF_RETURN(0 == total, void());
+    HKU_CHECK(std::is_sorted(dates.begin(), dates.end()),
+              "IZhBond10 requires the dates to be sorted in ascending order!");
 
     _readyBuffer(total, 1);
 
     value_t default_val = (value_t)getParam<double>("default");
     auto* dst = this->data();
 
-    // 需要获取全部数据，在指定日期超过已有数据时，取最后一条数据的值作为当前值
+    // All the data needs to be fetched; when the given date is later than the existing data, the
+    // value of the last record is taken as the current value
     const auto& bonds = StockManager::instance().getZhBond10();
     size_t bonds_size = bonds.size();
     if (0 == bonds_size) {
@@ -59,25 +64,14 @@ void IZhBond10::_calculate(const Indicator& data) {
         return;
     }
 
+    // dates is ascending, so the matched bond index only moves forward; each step binary-searches
+    // the remaining records for the first one later than dates[i]
     size_t bondix = 0;
     for (size_t i = 0; i < total; i++) {
-        bool found = false;
-        for (size_t j = bondix; j < bonds_size; j++) {
-            if (bonds[j].date > dates[i]) {
-                found = true;
-                bondix = j;
-                break;
-            }
-        }
-        if (found) {
-            if (bondix != 0) {
-                dst[i] = bonds[bondix - 1].value;
-            } else {
-                dst[i] = default_val;
-            }
-        } else {
-            dst[i] = bonds[bonds_size - 1].value;
-        }
+        bondix = std::upper_bound(bonds.begin() + bondix, bonds.end(), dates[i],
+                                  [](const Datetime& d, const ZhBond10& b) { return d < b.date; }) -
+                 bonds.begin();
+        dst[i] = bondix > 0 ? bonds[bondix - 1].value : default_val;
     }
 }
 

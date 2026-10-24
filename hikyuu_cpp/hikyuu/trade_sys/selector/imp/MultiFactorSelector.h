@@ -21,7 +21,7 @@ public:
     virtual void _reset() override;
     virtual SelectorPtr _clone() override;
     virtual SystemWeightList _getSelected(Datetime date) override;
-    virtual bool isMatchAF(const AFPtr& af) override;
+
     virtual void _calculate() override;
 
     void setFactorSet(const FactorSet& factorset) {
@@ -42,7 +42,7 @@ private:
     unordered_map<Stock, SYSPtr> m_stk_sys_dict;
 
     //============================================
-    // 序列化支持
+    // Serialization support
     //============================================
 #if HKU_SUPPORT_SERIALIZATION
     friend class boost::serialization::access;

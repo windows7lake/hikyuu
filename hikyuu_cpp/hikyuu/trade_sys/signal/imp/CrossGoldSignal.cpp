@@ -1,10 +1,12 @@
 /*
  * CrossGoldSignal.cpp
  *
- *  Created on: 2017年6月13日
+ *  Created on: 2017-6-13
  *      Author: fasiondog
  */
 
+#include <cmath>
+#include "../../../indicator/crt/ALIGN.h"
 #include "../../../indicator/crt/KDATA.h"
 #include "CrossGoldSignal.h"
 
@@ -30,8 +32,16 @@ SignalPtr CrossGoldSignal::_clone() {
 
 void CrossGoldSignal::_calculate(const KData& kdata) {
     Indicator fast = m_fast(kdata);
+    if (fast.size() != kdata.size()) {
+        fast = ALIGN(fast, kdata);
+    }
     Indicator slow = m_slow(kdata);
-    HKU_ERROR_IF_RETURN(fast.size() != slow.size(), void(), "fast.size() != slow.size()");
+    if (slow.size() != kdata.size()) {
+        slow = ALIGN(slow, kdata);
+    }
+    HKU_WARN_IF_RETURN(fast.size() != slow.size() || fast.size() != kdata.size(), void(),
+                       "Failed to align! fast.size()({}), slow.size()({}), kdata.size()({})!",
+                       fast.size(), slow.size(), kdata.size());
 
     size_t discard = fast.discard() > slow.discard() ? fast.discard() : slow.discard();
     size_t total = fast.size();
@@ -39,6 +49,10 @@ void CrossGoldSignal::_calculate(const KData& kdata) {
     auto const* slowdata = slow.data();
     auto const* ks = kdata.data();
     for (size_t i = discard + 1; i < total; ++i) {
+        if (!std::isfinite(fastdata[i - 1]) || !std::isfinite(slowdata[i - 1]) ||
+            !std::isfinite(fastdata[i]) || !std::isfinite(slowdata[i])) {
+            continue;
+        }
         if (fastdata[i - 1] < slowdata[i - 1] && fastdata[i] > slowdata[i] &&
             fastdata[i - 1] < fastdata[i] && slowdata[i - 1] < slowdata[i]) {
             _addBuySignal(ks[i].datetime);

@@ -1,9 +1,11 @@
 /*
  * BandSignal2.cpp
  *
- *   Created on: 2023年09月23日
+ *   Created on: 2023-09-23
  *       Author: yangrq1018
  */
+#include <cmath>
+#include "../../../indicator/crt/ALIGN.h"
 #include "../../../indicator/crt/KDATA.h"
 #include "BandSignal2.h"
 
@@ -13,10 +15,10 @@ BOOST_CLASS_EXPORT(hku::BandSignal2)
 
 namespace hku {
 
-BandSignal2::BandSignal2() : SignalBase("SG_Band") {}
+BandSignal2::BandSignal2() : SignalBase("SG_Band2") {}
 
 BandSignal2::BandSignal2(const Indicator& ind, const Indicator& lower, const Indicator& upper)
-: SignalBase("SG_Band"), m_ind(ind.clone()), m_lower(lower.clone()), m_upper(upper.clone()) {}
+: SignalBase("SG_Band2"), m_ind(ind.clone()), m_lower(lower.clone()), m_upper(upper.clone()) {}
 
 BandSignal2::~BandSignal2() {}
 
@@ -30,9 +32,23 @@ SignalPtr BandSignal2::_clone() {
 
 void BandSignal2::_calculate(const KData& kdata) {
     Indicator ind = m_ind(kdata);
+    if (ind.size() != kdata.size()) {
+        ind = ALIGN(ind, kdata);
+    }
     Indicator upper = m_upper(kdata);
+    if (upper.size() != kdata.size()) {
+        upper = ALIGN(upper, kdata);
+    }
     Indicator lower = m_lower(kdata);
-    HKU_ASSERT(ind.size() == upper.size() && ind.size() == lower.size());
+    if (lower.size() != kdata.size()) {
+        lower = ALIGN(lower, kdata);
+    }
+    HKU_WARN_IF_RETURN(
+      ind.size() != kdata.size() || upper.size() != kdata.size() || lower.size() != kdata.size(),
+      void(),
+      "Failed to align! ind.size()({}), upper.size()({}), lower.size()({}), "
+      "kdata.size()({})!",
+      ind.size(), upper.size(), lower.size(), kdata.size());
 
     size_t discard = ind.discard();
     if (discard < upper.discard()) {
@@ -48,9 +64,10 @@ void BandSignal2::_calculate(const KData& kdata) {
     auto const* lowerdata = lower.data();
     auto const* ks = kdata.data();
     for (size_t i = discard; i < total; ++i) {
-        if (inddata[i] > upperdata[i]) {
+        if (std::isfinite(inddata[i]) && std::isfinite(upperdata[i]) && inddata[i] > upperdata[i]) {
             _addBuySignal(ks[i].datetime);
-        } else if (inddata[i] < lowerdata[i]) {
+        } else if (std::isfinite(inddata[i]) && std::isfinite(lowerdata[i]) &&
+                   inddata[i] < lowerdata[i]) {
             _addSellSignal(ks[i].datetime);
         }
     }

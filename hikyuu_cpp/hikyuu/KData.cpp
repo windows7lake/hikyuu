@@ -9,6 +9,7 @@
 #include "StockManager.h"
 #include "KDataSharedBufferImp.h"
 #include "KDataPrivatedBufferImp.h"
+#include "KDataShmBufferImp.h"
 #include "indicator/crt/KDATA.h"
 #include "plugin/hkuextra.h"
 #include <fstream>
@@ -47,7 +48,6 @@ KData::KData() : m_imp(get_null_kdata_imp()) {}
 KData::KData(KDataImpPtr imp) : m_imp(imp ? imp : get_null_kdata_imp()) {}
 
 KData::KData(const Stock& stock, const KQuery& query) {
-    // 在重加载或setKDateList时，已存在KData存在数据无效风险（但无内存访问问题)
     if (stock.isNull()) {
         m_imp = get_null_kdata_imp();
         return;
@@ -57,20 +57,42 @@ KData::KData(const Stock& stock, const KQuery& query) {
         stock.loadKDataToBuffer(query.kType());
     }
 
-    // 非预加载也可能被主动加载至缓存
+    // A non-preloaded type may also be loaded into the cache actively
     if (query.recoverType() == KQuery::NO_RECOVER && stock.isBuffer(query.kType())) {
-        // 当Stock已缓存了该类型的K线数据，且不进行复权
+        // When the Stock has already cached the K-line data of that type and no adjustment is
+        // applied
         m_imp = make_shared<KDataSharedBufferImp>(stock, query);
         return;
+    }
+
+    // The client shared memory zero-copy view: with NO_RECOVER and the main process snapshot
+    // covering this security / type, a raw pointer view is used directly; when it does not apply
+    // (not a client / not covered / reverse scaling needed / invalid range) create returns nullptr
+    // and it falls back to the private copy path below
+    if (query.recoverType() == KQuery::NO_RECOVER) {
+        if (auto view_imp = KDataShmBufferImp::create(stock, query)) {
+            m_imp = std::move(view_imp);
+            return;
+        }
     }
 
     m_imp = getKDataImp(stock, query);
 }
 
 bool KData::operator==(const KData& thr) const noexcept {
-    return this == &thr || m_imp == thr.m_imp ||
-           (getStock() == thr.getStock() && getQuery() == thr.getQuery() && size() == thr.size()) ||
-           (getStock().isNull() && thr.getStock().isNull());
+    if (this == &thr || m_imp == thr.m_imp)
+        return true;
+    if (getStock() != thr.getStock())
+        return false;
+    if (getStock().isNull())
+        return true;
+    if (getQuery() != thr.getQuery() || size() != thr.size())
+        return false;
+    // Different imp paths may serve the same sequence; compare the last record so a freshly built
+    // KData over a right-open real-time query differs when the tail bar is revised or extended,
+    // letting the cache guards recompute; reusing the same imp (or an aliased buffer) is short-
+    // circuited above and cannot be detected here
+    return m_imp->back() == thr.m_imp->back();
 }
 
 size_t KData::getPosInStock(Datetime datetime) const {
@@ -82,7 +104,7 @@ void KData::tocsv(const string& filename) {
     std::ofstream file(filename.c_str());
     HKU_ERROR_IF_RETURN(!file, void(), "Can't open file! ({})", filename);
 
-    file << "date, open, high, low, close, amount, count" << std::endl;
+    file << "date, open, high, low, close, amount, count\n";
     file.setf(std::ios_base::fixed);
     file.precision(4);
     string sep = ",";
@@ -91,7 +113,7 @@ void KData::tocsv(const string& filename) {
         record = getKRecord(i);
         file << record.datetime << sep << record.openPrice << sep << record.highPrice << sep
              << record.lowPrice << sep << record.closePrice << sep << record.transAmount << sep
-             << record.transCount << std::endl;
+             << record.transCount << '\n';
     }
 
     file.close();
@@ -116,10 +138,12 @@ KData KData::getKData(const KQuery& query) const {
         return ret;
     }
 
+    // The sub-range fast path reuses the already adjusted buffer of self; it applies to every type
+    // because the adjustment is anchored at a fixed baseline (a sub-range equals the corresponding
+    // slice of the whole series)
     const auto& self_query = getQuery();
     if (empty() || self_query.recoverType() != query.recoverType() ||
-        query.kType() != self_query.kType() || self_query.recoverType() == KQuery::FORWARD ||
-        self_query.recoverType() == KQuery::EQUAL_FORWARD) {
+        query.kType() != self_query.kType()) {
         ret = KData(stk, query);
         return ret;
     }
@@ -167,9 +191,8 @@ KQuery KData::getOtherQueryByDate(const Datetime& start_datetime, const Datetime
         return KQueryByDate(Null<Datetime>(), Null<Datetime>(), ktype, query.recoverType());
     }
 
-    if (empty() && query.queryType() == KQuery::INDEX) {
-        return KQuery(Null<Datetime>(), Null<Datetime>(), ktype, query.recoverType());
-    }
+    HKU_IF_RETURN(
+      empty(), KQuery(Null<Datetime>(), Null<Datetime>(), ktype, query.recoverType()));
 
     Datetime end_;
     if ((query.queryType() == KQuery::INDEX && query.end() == Null<int64_t>()) ||
@@ -183,12 +206,12 @@ KQuery KData::getOtherQueryByDate(const Datetime& start_datetime, const Datetime
     }
 
     Datetime start = this->front().datetime;
-    if (start_datetime > start) {
+    if (start_datetime != Null<Datetime>() && start_datetime > start) {
         start = start_datetime;
     }
 
     auto day_ktype_seconds = KQuery::getKTypeInSeconds(KQuery::DAY);
-    // 从日线及以上转日线以下
+    // Convert from the daily line and above to below the daily line
     if (KQuery::getKTypeInSeconds(ktype) < day_ktype_seconds &&
         KQuery::getKTypeInSeconds(query.kType()) >= day_ktype_seconds) {
         if (end_ != Null<Datetime>()) {
@@ -196,7 +219,7 @@ KQuery KData::getOtherQueryByDate(const Datetime& start_datetime, const Datetime
         }
     }
 
-    // 从日线以下转日线及以上
+    // Convert from below the daily line to the daily line and above
     if (KQuery::getKTypeInSeconds(ktype) >= day_ktype_seconds &&
         KQuery::getKTypeInSeconds(query.kType()) < day_ktype_seconds) {
         start = start.startOfDay();
@@ -209,9 +232,13 @@ KData KData::getKData(const KQuery::KType& ktype) const {
     KData ret;
     const Stock& stk = getStock();
     HKU_IF_RETURN(stk.isNull(), ret);
-    if (ktype == getQuery().kType()) {
+    std::string ktype_upper = ktype;
+    to_upper(ktype_upper);
+    if (ktype_upper == getQuery().kType()) {
         return KData(m_imp);
     }
+ 
+    HKU_IF_RETURN(empty(), KData(stk, KQuery(0, 0, ktype, getQuery().recoverType())));
     ret = stk.getKData(getOtherQueryByDate(front().datetime, back().datetime, ktype));
     return ret;
 }

@@ -14,11 +14,19 @@ BOOST_CLASS_EXPORT(hku::IKalman)
 namespace hku {
 
 IKalman::IKalman() : IndicatorImp("KALMAN", 1) {
-    setParam<double>("q", 0.01);  // 过程噪声协方差
-    setParam<double>("r", 0.1);   // 测量噪声协方差
+    setParam<double>("q", 0.01);  // Process noise covariance
+    setParam<double>("r", 0.1);   // Measurement noise covariance
 }
 
 IKalman::~IKalman() {}
+
+void IKalman::_checkParam(const string &name) const {
+    if ("q" == name) {
+        HKU_ASSERT(getParam<double>("q") > 0.);
+    } else if ("r" == name) {
+        HKU_ASSERT(getParam<double>("r") > 0.);
+    }
+}
 
 void IKalman::_calculate(const Indicator &data) {
     size_t total = data.size();
@@ -34,16 +42,27 @@ void IKalman::_calculate(const Indicator &data) {
     auto const *src = data.data();
     auto *dst = this->data();
 
-    value_t x = src[m_discard];  // 状态估计值
-    value_t p = 1.0;             // 估计误差协方差
+    value_t x = src[m_discard];  // State estimate
+    value_t p = 1.0;             // Estimation error covariance
 
     dst[m_discard] = x;
     for (size_t i = m_discard + 1; i < total; ++i) {
-        p = p + q;
-        value_t k = p / (p + r);
-        x = x + k * (src[i] - x);
-        p = (1 - k) * p;
-        dst[i] = x;
+        if (!std::isfinite(x)) {
+            // Not yet seeded (leading src was non-finite): wait for the first valid observation
+            x = src[i];
+            p = 1.0;
+            dst[i] = x;
+        } else if (!std::isfinite(src[i])) {
+            // Missing observation: predict-only (uncertainty grows, state held)
+            p = p + q;
+            dst[i] = x;
+        } else {
+            p = p + q;
+            value_t k = p / (p + r);
+            x = x + k * (src[i] - x);
+            p = (1 - k) * p;
+            dst[i] = x;
+        }
     }
 }
 

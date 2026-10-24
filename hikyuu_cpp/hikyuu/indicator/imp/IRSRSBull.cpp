@@ -5,6 +5,7 @@
  *  Author: fasiondog
  */
 
+#include <climits>
 #include "IRSRSBull.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -15,17 +16,17 @@ namespace hku {
 
 IRSRSBull::IRSRSBull() : IndicatorImp("RSRS_BULL", 4) {
     m_need_context = true;
-    setParam<int>("n", 20);  // 回归窗口
-    setParam<int>("m", 60);  // Z-score窗口
+    setParam<int>("n", 20);  // Regression window
+    setParam<int>("m", 60);  // Z-score window
 }
 
 IRSRSBull::~IRSRSBull() {}
 
 void IRSRSBull::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 2);
+        HKU_ASSERT(getParam<int>("n") >= 2 && getParam<int>("n") < INT_MAX);
     } else if ("m" == name) {
-        HKU_ASSERT(getParam<int>("m") >= 2);
+        HKU_ASSERT(getParam<int>("m") >= 2 && getParam<int>("m") < INT_MAX);
     }
 }
 
@@ -47,115 +48,138 @@ void IRSRSBull::_calculate(const Indicator&) {
         return;
     }
 
-    auto* bull = this->data(0);  // 层级4修正值（右偏修正）
-    auto* beta = this->data(1);  // β 值
-    auto* r2 = this->data(2);    // R² 值
-    auto* z = this->data(3);     // Z-score 值
+    auto* bull = this->data(0);  // The level 4 correction value (the right skew correction)
+    auto* beta = this->data(1);  // The beta value
+    auto* r2 = this->data(2);    // The R2 value
+    auto* z = this->data(3);     // The Z-score value
+    value_t null_price = Null<price_t>();
 
-    // 第一步：计算每个点的 β 和 R²（从 start_idx 开始）
-    value_t sum_x = 0.0, sum_y = 0.0, sum_xy = 0.0, sum_x2 = 0.0, sum_y2 = 0.0;
+    // Centered accumulation with a valid_count filter (ST-034/ST-N03 contract)
+    value_t kx = k[0].lowPrice;
+    value_t ky = k[0].highPrice;
+    if (!std::isfinite(kx))
+        kx = 0.0;
+    if (!std::isfinite(ky))
+        ky = 0.0;
+
+    // Step 1: calculate the beta and the R2 of every point (starting from start_idx)
+    value_t ex = 0.0, ey = 0.0, exx = 0.0, eyy = 0.0, exy = 0.0;
+    size_t valid = 0;
     for (size_t i = 0; i < static_cast<size_t>(n); i++) {
         value_t x = k[i].lowPrice;
         value_t y = k[i].highPrice;
-        sum_x += x;
-        sum_y += y;
-        sum_xy += x * y;
-        sum_x2 += x * x;
-        sum_y2 += y * y;
-    }
-
-    // 计算第 n-1 个点的 β 和 R²
-    value_t denom_beta = n * sum_x2 - sum_x * sum_x;
-    value_t denom_r2 = n * sum_y2 - sum_y * sum_y;
-
-    if (denom_beta != 0.0 && denom_r2 != 0.0) {
-        beta[start_idx] = (n * sum_xy - sum_x * sum_y) / denom_beta;
-        value_t ssr = beta[start_idx] * beta[start_idx] * denom_beta / n;
-        value_t sst = denom_r2 / n;
-        r2[start_idx] = ssr / sst;
-    }
-
-    // 滚动计算后续点的 β 和 R²
-    for (size_t i = n; i < total; i++) {
-        value_t old_x = k[i - n].lowPrice;
-        value_t old_y = k[i - n].highPrice;
-        value_t new_x = k[i].lowPrice;
-        value_t new_y = k[i].highPrice;
-
-        sum_x += new_x - old_x;
-        sum_y += new_y - old_y;
-        sum_xy += new_x * new_y - old_x * old_y;
-        sum_x2 += new_x * new_x - old_x * old_x;
-        sum_y2 += new_y * new_y - old_y * old_y;
-
-        denom_beta = n * sum_x2 - sum_x * sum_x;
-        denom_r2 = n * sum_y2 - sum_y * sum_y;
-
-        if (denom_beta != 0.0 && denom_r2 != 0.0) {
-            beta[i] = (n * sum_xy - sum_x * sum_y) / denom_beta;
-            value_t ssr = beta[i] * beta[i] * denom_beta / n;
-            value_t sst = denom_r2 / n;
-            r2[i] = ssr / sst;
+        if (std::isfinite(x) && std::isfinite(y)) {
+            value_t ix = x - kx;
+            value_t iy = y - ky;
+            ex += ix;
+            ey += iy;
+            exx += ix * ix;
+            eyy += iy * iy;
+            exy += ix * iy;
+            valid++;
         }
     }
 
-    // 第二步：计算滚动 M 日的 Z-score
-    // 计算前 M 个 β 的均值和标准差（从 start_idx 到 z_start）
+    auto emit_beta_r2 = [&](size_t i) {
+        if (valid < 2)
+            return;
+        value_t nv = (value_t)valid;
+        value_t varx = exx - ex * ex / nv;
+        value_t vary = eyy - ey * ey / nv;
+        value_t cov = exy - ex * ey / nv;
+        if (!(varx > 0.0 && vary > 0.0 && std::isfinite(varx) && std::isfinite(vary) &&
+              std::isfinite(cov))) {
+            return;
+        }
+        beta[i] = cov / varx;
+        // R2 = beta^2 * varx / vary (SSR/SST under the same sample count)
+        r2[i] = (beta[i] * beta[i]) * varx / vary;
+    };
+    emit_beta_r2(start_idx);
+
+    for (size_t i = n; i < total; i++) {
+        value_t old_x = k[i - n].lowPrice;
+        value_t old_y = k[i - n].highPrice;
+        if (std::isfinite(old_x) && std::isfinite(old_y)) {
+            value_t pix = old_x - kx;
+            value_t piy = old_y - ky;
+            ex -= pix;
+            ey -= piy;
+            exx -= pix * pix;
+            eyy -= piy * piy;
+            exy -= pix * piy;
+            valid--;
+        }
+        value_t new_x = k[i].lowPrice;
+        value_t new_y = k[i].highPrice;
+        if (std::isfinite(new_x) && std::isfinite(new_y)) {
+            value_t pix = new_x - kx;
+            value_t piy = new_y - ky;
+            ex += pix;
+            ey += piy;
+            exx += pix * pix;
+            eyy += piy * piy;
+            exy += pix * piy;
+            valid++;
+        }
+        emit_beta_r2(i);
+    }
+
+    // Step 2: calculate the Z-score of the rolling M days
+    // Each window judges its own valid betas: a first window without enough of them must not skip
+    // every following one
     value_t sum_beta = 0.0, sum_beta2 = 0.0;
-    int valid_count = 0;
+    size_t valid_count = 0;
     for (size_t i = start_idx; i <= z_start; i++) {
-        if (!std::isnan(beta[i])) {
+        if (std::isfinite(beta[i])) {
             sum_beta += beta[i];
             sum_beta2 += beta[i] * beta[i];
             valid_count++;
         }
     }
 
-    if (valid_count >= 2) {
-        value_t mean_beta = sum_beta / valid_count;
-        value_t var_beta = (sum_beta2 - sum_beta * sum_beta / valid_count) / (valid_count - 1);
+    auto emit_z_bull = [&](size_t i) {
+        if (valid_count < 2 || !std::isfinite(beta[i]) || !std::isfinite(r2[i]))
+            return;
+        value_t nv = (value_t)valid_count;
+        value_t mean_beta = sum_beta / nv;
+        // clamp to 0.0 to guard against the tiny negative caused by float rounding on a
+        // near-constant beta sequence (ST-014 pattern)
+        value_t var_beta =
+          std::max<value_t>(0.0, (sum_beta2 - sum_beta * sum_beta / nv) / (nv - 1.0));
         value_t std_beta = std::sqrt(var_beta);
+        if (std_beta > 0.0) {
+            z[i] = (beta[i] - mean_beta) / std_beta;
+            bull[i] = z[i] * r2[i] * beta[i];
+        }
+    };
+    emit_z_bull(z_start);
 
-        if (std_beta > 0.0 && !std::isnan(beta[z_start])) {
-            z[z_start] = (beta[z_start] - mean_beta) / std_beta;
-            bull[z_start] = z[z_start] * r2[z_start] * beta[z_start];
+    // Calculate the following Z-scores and the level 4 correction values in a rolling way
+    for (size_t i = z_start + 1; i < total; i++) {
+        // Remove the oldest beta
+        size_t oldest_idx = i - m;
+        if (oldest_idx >= start_idx && std::isfinite(beta[oldest_idx])) {
+            sum_beta -= beta[oldest_idx];
+            sum_beta2 -= beta[oldest_idx] * beta[oldest_idx];
+            valid_count--;
         }
 
-        // 滚动计算后续的 Z-score 和层级4修正值
-        for (size_t i = z_start + 1; i < total; i++) {
-            // 移除最旧的 β
-            size_t oldest_idx = i - m;
-            if (oldest_idx >= start_idx && !std::isnan(beta[oldest_idx])) {
-                sum_beta -= beta[oldest_idx];
-                sum_beta2 -= beta[oldest_idx] * beta[oldest_idx];
-                valid_count--;
-            }
-
-            // 添加新的 β
-            if (!std::isnan(beta[i])) {
-                sum_beta += beta[i];
-                sum_beta2 += beta[i] * beta[i];
-                valid_count++;
-            }
-
-            if (valid_count >= 2) {
-                mean_beta = sum_beta / valid_count;
-                var_beta = (sum_beta2 - sum_beta * sum_beta / valid_count) / (valid_count - 1);
-                std_beta = std::sqrt(var_beta);
-
-                if (std_beta > 0.0 && !std::isnan(beta[i])) {
-                    z[i] = (beta[i] - mean_beta) / std_beta;
-                    bull[i] = z[i] * r2[i] * beta[i];
-                }
-            }
+        // Add the new beta
+        if (std::isfinite(beta[i])) {
+            sum_beta += beta[i];
+            sum_beta2 += beta[i] * beta[i];
+            valid_count++;
         }
+
+        emit_z_bull(i);
     }
 
-    // 设置 discard，并将 beta 和 r2 前面的位置置为 Null（参考 ADX 处理方式）
+    // Set the discard and set the positions before beta and r2 to Null (refer to the ADX way)
     m_discard = z_start;
     for (size_t i = 0; i < z_start; i++) {
-        beta[i] = Null<value_t>();
-        r2[i] = Null<value_t>();
+        beta[i] = null_price;
+        r2[i] = null_price;
     }
 }
 

@@ -21,14 +21,22 @@ public:
     virtual void _reset() override;
     virtual SignalPtr _clone() override;
     virtual void _calculate(const KData& kdata) override {}
+    virtual void setCycleDates(const DatetimeList& dates) override;
+
+    virtual bool hasPythonPart() const noexcept override {
+        return m_is_python_object || (m_sg && m_sg->hasPythonPart());
+    }
+
+protected:
+    void sub_sg_calculate(const KData& kdata);
 
 protected:
     double m_value{0.0};
     SignalPtr m_sg;
-    int m_mode{0};  // 仅对-、/有效，0：(sg, value), 1: (value, sg)
+    int m_mode{0};  // Operand order for - and /: 0: sg op value, 1: value op sg
 
 //============================================
-// 序列化支持
+// Serialization support
 //============================================
 #if HKU_SUPPORT_SERIALIZATION
     friend class boost::serialization::access;
@@ -46,9 +54,11 @@ protected:
 public:                                                                                    \
     classname() : OperatorValueSignal(name) {}                                             \
     classname(const SignalPtr& sg, double value) : OperatorValueSignal(name, sg, value) {} \
+    classname(const SignalPtr& sg, double value, int mode)                                 \
+    : OperatorValueSignal(name, sg, value, mode) {}                                        \
     virtual ~classname() override {}                                                       \
     virtual SignalPtr _clone() override {                                                  \
-        return make_shared<classname>(m_sg, m_value);                                      \
+        return make_shared<classname>(m_sg, m_value, m_mode);                              \
     }                                                                                      \
     virtual void _calculate(const KData&) override;
 
@@ -58,7 +68,6 @@ private:                                                              \
     friend class boost::serialization::access;                        \
     template <class Archive>                                          \
     void serialize(Archive& ar, const unsigned int version) {         \
-        ar& BOOST_SERIALIZATION_BASE_OBJECT_NVP(SignalBase);          \
         ar& BOOST_SERIALIZATION_BASE_OBJECT_NVP(OperatorValueSignal); \
     }
 #else

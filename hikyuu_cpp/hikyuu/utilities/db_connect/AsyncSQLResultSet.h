@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <iterator>
 #include "hikyuu/utilities/arithmetic.h"
 #include "hikyuu/utilities/Log.h"
@@ -20,16 +21,21 @@ template <class TableT, size_t page_size>
 class AsyncSQLResultSetIterator;
 
 /**
- * 异步 SQL 查询结果集
- * @tparam TableT 数据结构
- * @tparam page_size 每页包含的数据数量
+ * Asynchronous SQL query result set
+ * @tparam TableT data structure
+ * @tparam page_size the number of the data contained in every page
  * @ingroup DBConnect
  *
- * 提供基于 boost::asio 协程的异步分页查询接口。
- * 所有 I/O 操作（如 size、getPage、迭代器访问）都返回 awaitable。
+ * It provides an asynchronous paged query interface based on the boost::asio coroutine.
+ * All the I/O operations (such as size, getPage and the iterator access) return an awaitable.
  *
- * @note 保持与 SQLResultSet 相同的 API 设计，仅将 I/O 操作改为异步
- * @note 适用于高并发场景下的分页查询
+ * @note It keeps the same API design as SQLResultSet, only the I/O operations are made asynchronous
+ * @note It is suitable for the paged query under the high concurrency scenarios
+ *
+ * @note Precondition: same as SQLResultSet — TableT must be bound through the TABLE_BIND macros,
+ *       which make the ORM layer rely on an integer primary key column named "id"; the flat paged
+ *       query orders by it (`... ORDER BY id LIMIT/OFFSET`), so a table without an "id" column is
+ *       not supported by any query path (paged or not)
  */
 template <class TableT, size_t page_size = 100>
 class AsyncSQLResultSet {
@@ -45,33 +51,29 @@ public:
     AsyncSQLResultSet() = default;
 
     /**
-     * 构建新的异步分页查询结果实例
-     * @param connect 异步数据库连接
-     * @param sql 查询条件
+     * Build a new asynchronous paged query result instance
+     * @param connect asynchronous database connection
+     * @param sql query condition
      */
     AsyncSQLResultSet(const AsyncDBConnectPtr& connect, const std::string& sql)
-    : m_connect(connect),
-      m_where(sql),
-      m_sql_template("SELECT * FROM {} WHERE {} {} LIMIT {} OFFSET {}") {
-        trim(m_where);
-        if (m_where.empty()) {
-            m_where = "1=1";
-            m_orderby_inner = "ORDER BY id";
-            return;
-        }
-
-        std::string tmp = utf8_to_upper(m_where);
-        size_t pos = tmp.rfind("ORDER");
-        if (pos != std::string::npos) {
-            m_orderby_inner = fmt::format("{}, id ASC", m_where.substr(pos));
-            m_orderby_outer = m_orderby_inner;
-            m_where = m_where.erase(pos, std::string::npos);
-        } else {
-            m_orderby_inner = "ORDER BY id";
-        }
+    : m_connect(connect), m_sql_template("SELECT * FROM {} WHERE {} {} LIMIT {} OFFSET {}") {
+        // the plain path: the clauses can only be located in the text the caller wrote
+        WhereParts parts = splitWhereParts(sql);
+        _setup(parts.where, parts.orderBy, parts.limit, BoundValues{});
     }
 
-    /** 获取其数据库连接 */
+    /**
+     * Build a new asynchronous paged query result instance from a condition
+     * @param connect asynchronous database connection
+     * @param cond the query condition, whose values stay bound to placeholders
+     */
+    AsyncSQLResultSet(const AsyncDBConnectPtr& connect, const DBCondition& cond)
+    : m_connect(connect), m_sql_template("SELECT * FROM {} WHERE {} {} LIMIT {} OFFSET {}") {
+        // a condition already carries its parts, nothing has to be parsed out of the text
+        _setup(cond.sql(), cond.getOrderBy(), cond.getLimit(), cond.params());
+    }
+
+    /** Get its database connection */
     const AsyncDBConnectPtr& getConnect() const {
         return m_connect;
     }
@@ -80,41 +82,41 @@ public:
     using iterator = AsyncSQLResultSetIterator<TableT, page_size>;
 
     /**
-     * @brief 获取起始迭代器
-     * @return 异步迭代器
+     * @brief Get the begin iterator
+     * @return asynchronous iterator
      */
     net::awaitable<const_iterator> cbegin() {
         co_return const_iterator(this, 0);
     }
 
     /**
-     * @brief 获取结束迭代器
-     * @return 异步迭代器
+     * @brief Get the end iterator
+     * @return asynchronous iterator
      */
     const_iterator cend() {
         return const_iterator(this, Null<size_t>());
     }
 
     /**
-     * @brief 获取起始迭代器
-     * @return 异步迭代器
+     * @brief Get the begin iterator
+     * @return asynchronous iterator
      */
     net::awaitable<iterator> begin() {
         co_return iterator(this, 0);
     }
 
     /**
-     * @brief 获取结束迭代器
-     * @return 异步迭代器
+     * @brief Get the end iterator
+     * @return asynchronous iterator
      */
     iterator end() {
         return iterator(this, Null<size_t>());
     }
 
     /**
-     * @brief 获取当前时刻数据集大小
-     * @note 数据集大小会根据当前的数据库内容发生变化，并非一直不变
-     * @return size_t 数据集大小
+     * @brief Get the data set size at the current moment
+     * @note The data set size changes with the current database content, it is not always constant
+     * @return size_t the data set size
      */
     net::awaitable<size_t> size() const {
         if (!m_connect) {
@@ -122,13 +124,15 @@ public:
         }
         std::string sql =
           fmt::format("select count(1) from {} where {}", TableT::getTableName(), m_where);
-        co_return co_await m_connect->queryNumber<size_t>(sql, 0);
+        size_t total = co_await m_connect->queryNumber<size_t>(sql, 0, m_params);
+        // the row limit of the condition caps the reported size, the pages are cut the same way
+        co_return m_limit >= 0 ? std::min(total, static_cast<size_t>(m_limit)) : total;
     }
 
     /**
-     * @brief 当前数据集是否为空
-     * @return true 空
-     * @return false 非空
+     * @brief Whether the current data set is empty
+     * @return true empty
+     * @return false not empty
      */
     net::awaitable<bool> empty() const {
         size_t sz = co_await size();
@@ -136,9 +140,10 @@ public:
     }
 
     /**
-     * @brief 获取当前数据集分页数量
-     * @note 仅为调用时刻获取的相应数据集分页数量
-     * @return size_t 分页数量
+     * @brief Get the number of the pages of the current data set
+     * @note It is the number of the pages of the corresponding data set obtained at the calling
+     * moment only
+     * @return size_t the number of the pages
      */
     net::awaitable<size_t> getPageCount() {
         size_t total = co_await size();
@@ -147,31 +152,21 @@ public:
     }
 
     /**
-     * @brief 获取指定页中的全部数据
-     * @param page 指定页
-     * @return std::vector<TableT> 该页包含的所有有效数据集
+     * @brief Get all the data in the given page
+     * @param page the given page
+     * @return std::vector<TableT> all the valid data sets contained in this page
      */
     net::awaitable<std::vector<TableT>> getPage(size_t page) {
-        std::vector<TableT> result;
-        std::string sql = fmt::format(fmt::runtime(m_sql_template), TableT::getTableName(), m_where,
-                                      m_orderby_inner, page_size, page * page_size);
-
-        auto st = co_await m_connect->getStatement(sql);
-        co_await st->exec();
-
-        while (co_await st->moveNext()) {
-            TableT tmp;
-            tmp.load(st);
-            result.push_back(tmp);
+        if (!_connectOrPage(page)) {
+            co_return std::vector<TableT>{};
         }
-
-        co_return result;
+        co_return co_await _loadPage(page);
     }
 
     /**
-     * @brief 获取指定索引的数据
-     * @param index 索引位置
-     * @return TableT 数据对象
+     * @brief Get the data of the given index
+     * @param index the index position
+     * @return TableT the data object
      */
     net::awaitable<TableT> at(size_t index) {
         TableT result = co_await get(index);
@@ -180,19 +175,76 @@ public:
     }
 
     /**
-     * @brief 获取指定索引的数据（下标操作符）
-     * @param index 索引位置
-     * @return TableT 数据对象
+     * @brief Get the data of the given index (the subscript operator)
+     * @param index the index position
+     * @return TableT the data object
      */
     net::awaitable<TableT> operator_bracket(size_t index) {
         co_return co_await get(index);
     }
 
 private:
+    /** Prepare the parts of the query: the filter, the order-by of the select */
+    void _setup(const std::string& where, const std::string& orderBy, int limit,
+                BoundValues params) {
+        m_params = std::move(params);
+        m_limit = limit;
+
+        std::string text = where;
+        trim(text);
+        m_where = text.empty() ? "1=1" : text;
+
+        if (orderBy.empty()) {
+            m_orderby_inner = "ORDER BY id";
+        } else {
+            m_orderby_inner = fmt::format("{}, id ASC", orderBy);
+            m_orderby_outer = m_orderby_inner;
+        }
+    }
+
     /**
-     * @brief 内部获取方法
-     * @param index 索引位置
-     * @return TableT 数据对象
+     * The number of rows the given page has to fetch, or 0 when the row limit of the condition is
+     * already used up by the earlier pages
+     */
+    size_t _pageLimit(size_t page) const {
+        if (m_limit < 0) {
+            return page_size;
+        }
+
+        const size_t offset = page * page_size;
+        const size_t left = static_cast<size_t>(m_limit);
+        return offset >= left ? 0 : std::min(page_size, left - offset);
+    }
+
+    /** Whether the given page can be fetched at all */
+    bool _connectOrPage(size_t page) const {
+        return m_connect && _pageLimit(page) > 0;
+    }
+
+    /** The full select statement of the given page, the values still bound to placeholders */
+    std::string _selectSQL(size_t page) const {
+        return fmt::format(fmt::runtime(m_sql_template), TableT::getTableName(), m_where,
+                           m_orderby_inner, _pageLimit(page), page * page_size);
+    }
+
+    /** Run the select of the given page and collect its rows */
+    net::awaitable<std::vector<TableT>> _loadPage(size_t page) {
+        std::vector<TableT> result;
+        auto st = co_await m_connect->getStatementWithParams(_selectSQL(page), m_params);
+        co_await st->exec();
+
+        while (co_await st->moveNext()) {
+            TableT tmp;
+            tmp.load(st);
+            result.push_back(tmp);
+        }
+        co_return result;
+    }
+
+    /**
+     * @brief The internal get method
+     * @param index the index position
+     * @return TableT the data object
      */
     net::awaitable<TableT> get(size_t index) {
         TableT result{Null<TableT>()};
@@ -203,18 +255,9 @@ private:
         size_t page = index / page_size;
         if (m_connect && page != m_current_page) {
             m_buffer.clear();
-            std::string sql = fmt::format(fmt::runtime(m_sql_template), TableT::getTableName(),
-                                          m_where, m_orderby_inner, page_size, page * page_size);
-
-            auto st = co_await m_connect->getStatement(sql);
-            co_await st->exec();
-
-            while (co_await st->moveNext()) {
-                TableT tmp;
-                tmp.load(st);
-                m_buffer.push_back(tmp);
+            if (_connectOrPage(page)) {
+                m_buffer = co_await _loadPage(page);
             }
-
             m_current_page = page;
         }
 
@@ -238,6 +281,8 @@ private:
     std::string m_sql_template;
     std::string m_orderby_inner;
     std::string m_orderby_outer;
+    BoundValues m_params;
+    int m_limit = -1;
     size_t m_current_page = Null<size_t>();
 };
 
@@ -251,12 +296,13 @@ public:
 
     explicit AsyncSQLResultSetIterator(ResultSet* result_set, size_t index)
     : m_set(result_set), m_index(index) {
-        // 注意：构造函数中不能直接使用 co_await，需要在外部初始化
+        // Note: co_await cannot be used directly in the constructor, it needs to be initialized
+        // outside
     }
 
     /**
-     * @brief 初始化迭代器值
-     * @note 必须在协程中调用此方法完成初始化
+     * @brief Initialize the iterator values
+     * @note This method must be called in a coroutine to complete the initialization
      */
     net::awaitable<void> init() {
         if (m_index != Null<size_t>()) {
@@ -297,8 +343,8 @@ public:
     }
 
     /**
-     * @brief 前置递增运算符
-     * @return 新的迭代器
+     * @brief Prefix increment operator
+     * @return the new iterator
      */
     net::awaitable<AsyncSQLResultSetIterator> operator_pre_increment() {
         HKU_CHECK_THROW(m_index != Null<size_t>(), std::logic_error,

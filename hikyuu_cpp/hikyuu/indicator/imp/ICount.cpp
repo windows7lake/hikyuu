@@ -1,10 +1,11 @@
 /*
  * Icount.cpp
  *
- *  Created on: 2019年3月25日
+ *  Created on: 2019-3-25
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "ICount.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -21,7 +22,7 @@ ICount::~ICount() {}
 
 void ICount::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 0);
+        HKU_ASSERT(getParam<int>("n") >= 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -46,7 +47,7 @@ void ICount::_calculate(const Indicator& data) {
         m_discard = data.discard();
         int count = 0;
         for (size_t i = m_discard; i < total; ++i) {
-            if (src[i] != 0) {
+            if (std::isfinite(src[i]) && src[i] != 0) {
                 count++;
             }
             dst[i] = count;
@@ -64,7 +65,7 @@ void ICount::_calculate(const Indicator& data) {
     int sum = 0;
     size_t first_end = startPos + n >= total ? total : startPos + n;
     for (size_t i = startPos; i < first_end; ++i) {
-        if (src[i] != 0) {
+        if (std::isfinite(src[i]) && src[i] != 0) {
             sum++;
         }
     }
@@ -74,10 +75,10 @@ void ICount::_calculate(const Indicator& data) {
     }
 
     for (size_t i = first_end; i < total; ++i) {
-        if (src[i] != 0) {
+        if (std::isfinite(src[i]) && src[i] != 0) {
             sum++;
         }
-        if (src[i - n] != 0) {
+        if (std::isfinite(src[i - n]) && src[i - n] != 0) {
             sum--;
         }
         dst[i] = sum;
@@ -85,17 +86,13 @@ void ICount::_calculate(const Indicator& data) {
 }
 
 void ICount::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step) {
-    size_t start = 0;
-    if (0 == step) {
-        start = ind.discard();
-    } else if (curPos < ind.discard() + step - 1) {
+    if (curPos < ind.discard() + step - 1) {
         return;
-    } else {
-        start = curPos + 1 - step;
     }
+    size_t start = curPos + 1 - step;
     price_t count = 0;
     for (size_t i = start; i <= curPos; i++) {
-        if (ind[i] != 0.0) {
+        if (std::isfinite(ind[i]) && ind[i] != 0.0) {
             count++;
         }
     }

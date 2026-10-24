@@ -5,10 +5,15 @@
  *      Author: fasiondog
  */
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <set>
 #include "GlobalInitializer.h"
 #include "StockManager.h"
 #include "data_driver/KDataDriver.h"
+#include "data_driver/ipc/ShmClientHook.h"
+#include "data_driver/ipc/ShmMirrorSink.h"
 #include "plugin/hkuextra.h"
 #include "KData.h"
 
@@ -120,12 +125,6 @@ string Stock::Data::marketCode() const {
 }
 
 Stock::Data::~Data() {
-    for (auto iter = pKData.begin(); iter != pKData.end(); ++iter) {
-        if (iter->second) {
-            delete iter->second;
-        }
-    }
-
     for (auto iter = pMutex.begin(); iter != pMutex.end(); ++iter) {
         if (iter->second) {
             delete iter->second;
@@ -394,7 +393,6 @@ void Stock::setKDataDriver(const KDataDriverConnectPoolPtr& kdataDriver) {
         auto ktype_list = KQuery::getBaseKTypeList();
         for (auto& ktype : ktype_list) {
             std::unique_lock<std::shared_mutex> lock(*(m_data->pMutex[ktype]));
-            delete m_data->pKData[ktype];
             m_data->pKData[ktype] = nullptr;
         }
     }
@@ -406,11 +404,10 @@ KDataDriverConnectPoolPtr Stock::getKDataDirver() const {
 
 bool Stock::isBuffer(KQuery::KType ktype) const noexcept {
     HKU_IF_RETURN(!m_data, false);
-    string nktype(ktype);
-    to_upper(nktype);
-    HKU_IF_RETURN(m_data->pMutex.find(nktype) == m_data->pMutex.end(), false);
+    to_upper(ktype);
+    HKU_IF_RETURN(m_data->pMutex.find(ktype) == m_data->pMutex.end(), false);
     std::shared_lock<std::shared_mutex> lock(*(m_data->pMutex[ktype]));
-    return m_data->pKData.find(nktype) != m_data->pKData.end() && m_data->pKData[nktype];
+    return m_data->pKData.find(ktype) != m_data->pKData.end() && m_data->pKData[ktype];
 }
 
 void Stock::setPreload(const vector<KQuery::KType>& preload_ktypes) {
@@ -438,12 +435,12 @@ void Stock::releaseKDataBuffer(KQuery::KType ktype) const {
         std::unique_lock<std::shared_mutex> lock(*(m_data->pMutex[ktype]));
         auto iter = m_data->pKData.find(ktype);
         if (iter->second) {
-            delete iter->second;
             iter->second = nullptr;
         }
     }
 
-    // 同时释放掉历史财务信息，以便重加载时获取最新数据
+    // Release the historical financial information at the same time, so that the latest data is
+    // fetched on a reload
     {
         std::unique_lock<std::shared_mutex> lock(m_data->m_history_finance_mutex);
         m_data->m_history_finance_ready = false;
@@ -451,7 +448,7 @@ void Stock::releaseKDataBuffer(KQuery::KType ktype) const {
     }
 }
 
-// 仅在初始化时调用
+// Called during the initialization only
 void Stock::loadKDataToBuffer(KQuery::KType kType) const {
     HKU_IF_RETURN(!m_data || !m_kdataDriver, void());
 
@@ -461,40 +458,36 @@ void Stock::loadKDataToBuffer(KQuery::KType kType) const {
     auto driver = m_kdataDriver->getConnect();
     size_t total = driver->getCount(m_data->m_market, m_data->m_code, kType);
 
-    // CSV 直接全部加载至内存，其他类型依据配置的预加载参数进行加载
-    KQuery query = KQuery(0, Null<int64_t>(), kType);
+    // Load the K-line data according to the configured preload parameters
+    const auto& param = StockManager::instance().getPreloadParameter();
+    string preload_type = fmt::format("{}_max", kType);
+    to_lower(preload_type);
+    int64_t max_num = param.tryGet<int64_t>(preload_type, 4096);
+    HKU_ERROR_IF_RETURN(max_num < 0, void(), "Invalid preload {} param: {}", preload_type, max_num);
+    int64_t start = total <= (size_t)max_num ? 0 : total - max_num;
+    KQuery query = KQuery(start, Null<int64_t>(), kType);
+    if (driver->isColumnFirst() && market_code() != "SH000001") {
+        Stock sh000001 = StockManager::instance().getStock("SH000001");
+        if (!sh000001.isNull()) {
+            if (!sh000001.isBuffer(kType)) {
+                sh000001.loadKDataToBuffer(kType);
+            }
 
-    if (driver->name() != "TMPCSV") {
-        const auto& param = StockManager::instance().getPreloadParameter();
-        string preload_type = fmt::format("{}_max", kType);
-        to_lower(preload_type);
-        int64_t max_num = param.tryGet<int64_t>(preload_type, 4096);
-        HKU_ERROR_IF_RETURN(max_num < 0, void(), "Invalid preload {} param: {}", preload_type,
-                            max_num);
-        int64_t start = total <= (size_t)max_num ? 0 : total - max_num;
-        query = KQuery(start, Null<int64_t>(), kType);
-        if (driver->isColumnFirst() && market_code() != "SH000001") {
-            Stock sh000001 = StockManager::instance().getStock("SH000001");
-            if (!sh000001.isNull()) {
-                if (!sh000001.isBuffer(kType)) {
-                    sh000001.loadKDataToBuffer(kType);
-                }
-
-                auto k = sh000001.getKRecord(0, kType);
-                if (k.isValid()) {
-                    query = KQueryByDate(k.datetime, Null<Datetime>(), kType);
-                }
+            auto k = sh000001.getKRecord(0, kType);
+            if (k.isValid()) {
+                query = KQueryByDate(k.datetime, Null<Datetime>(), kType);
             }
         }
     }
 
     {
         std::unique_lock<std::shared_mutex> lock(*(m_data->pMutex[kType]));
-        // 需要对是否已缓存进行二次判定，防止加锁之前已被缓存
+        // A second check of the caching is needed, to prevent it from having been cached before the
+        // lock
         if (m_data->pKData.find(kType) != m_data->pKData.end() && m_data->pKData[kType]) {
             return;
         }
-        KRecordList* ptr_klist = new KRecordList;
+        auto ptr_klist = std::make_shared<KRecordList>();
         m_data->pKData[kType] = ptr_klist;
         if (total != 0) {
             (*ptr_klist) = driver->getKRecordList(m_data->m_market, m_data->m_code, query);
@@ -510,6 +503,20 @@ void Stock::loadKDataToBuffer(KQuery::KType kType) const {
     }
 }
 
+KRecordList Stock::getKRecordListFromBuffer(const KQuery::KType& inkType) const {
+    KRecordList result;
+    HKU_IF_RETURN(!m_data, result);
+    string kType(inkType);
+    to_upper(kType);
+    auto mutex_iter = m_data->pMutex.find(kType);
+    HKU_IF_RETURN(mutex_iter == m_data->pMutex.end(), result);
+    std::shared_lock<std::shared_mutex> lock(*(mutex_iter->second));
+    auto iter = m_data->pKData.find(kType);
+    HKU_IF_RETURN(iter == m_data->pKData.end() || !iter->second, result);
+    result = *(iter->second);
+    return result;
+}
+
 void Stock::loadKDataToBufferFromKRecordList(const KQuery::KType& inkType, KRecordList&& ks) const {
     HKU_IF_RETURN(!m_data || !m_kdataDriver, void());
 
@@ -523,7 +530,7 @@ void Stock::loadKDataToBufferFromKRecordList(const KQuery::KType& inkType, KReco
         if (m_data->pKData.find(kType) != m_data->pKData.end() && m_data->pKData[kType]) {
             return;
         }
-        KRecordList* ptr_klist = new KRecordList;
+        auto ptr_klist = std::make_shared<KRecordList>();
         (*ptr_klist) = std::move(ks);
         ptr_klist->shrink_to_fit();
         m_data->pKData[kType] = ptr_klist;
@@ -534,7 +541,62 @@ void Stock::loadKDataToBufferFromKRecordList(const KQuery::KType& inkType, KReco
 StockWeightList Stock::getWeight(const Datetime& start, const Datetime& end) const {
     StockWeightList result;
     HKU_IF_RETURN(!m_data || start >= end, result);
+    // The readiness policy of the ex-rights/ex-dividend cache (materialization / lazy loading
+    // fallback / re-reading after a release) differs by the process role:
+    // - The client mode: all the ex-rights/ex-dividend data has been materialized at the startup
+    // according to the load_stock_weight config (see
+    //   StockManager::loadAllStockWeights); here only the not materialized securities are handled
+    //   on demand, covering the config being off (load_stock_weight=false, no preload at the
+    //   startup) and the securities added by addStock or newly constructed that are out of the
+    //   materialization scope, which are read as a whole through the driver (IpcBaseInfoDriver, shm
+    //   first, falling back to IPC / local when not covered) and cached;
+    // - The shm server role: after the basic snapshot with the finance is published,
+    // StockManager::releaseShmServerBaseInfoCache()
+    //   has released the local ex-rights/ex-dividend cache of every security (see the description
+    //   of that method; the clients all read through the shared memory), and here the released
+    //   securities are re-read lazily through the driver for self healing on demand (the IPC
+    //   fallback reply and the API access in the same process), guaranteeing a correct result;
+    // - The ordinary standalone mode of the main process: it reads the local m_weightList directly
+    // with no lazy loading fallback (everything is materialized at the startup). The concurrent
+    // lazy loading of a not ready security may be duplicated, the results are the same and it is
+    // tolerable (the same as the getHistoryFinance lazy loading). An empty result also sets
+    // m_weight_ready, avoiding the repeated driver access of the securities without the
+    // ex-rights/ex-dividend data on every query.
+    StockManager& sm = StockManager::instance();
+    auto lazy_load_weight = [this, &sm]() {
+        // The caller must already hold the unique lock of m_weight_mutex
+        StockWeightList full_list = sm.getStockWeightList(*this, Datetime::min(), Null<Datetime>());
+        full_list.shrink_to_fit();
+        m_data->m_weightList.swap(full_list);
+        m_data->m_weight_ready.store(true, std::memory_order_release);
+    };
+    if ((sm.isIpcClientMode() || isShmServerRole()) &&
+        !m_data->m_weight_ready.load(std::memory_order_acquire)) {
+        std::unique_lock<std::shared_mutex> unique_lock(m_data->m_weight_mutex);
+        if (!m_data->m_weight_ready.load(std::memory_order_relaxed)) {
+            lazy_load_weight();
+        }
+    }
     std::shared_lock<std::shared_mutex> lock(m_data->m_weight_mutex);
+    // The release window concurrent with releaseShmServerBaseInfoCache(): a read thread that passed
+    // the ready check above may find inside the read lock that the cache has just been cleared and
+    // ready is set to false (a security really without the data appears as a ready=true empty table
+    // and does not enter this branch); it gives up the read lock, performs one more lazy loading
+    // and queries again, avoiding an IPC fallback reply returning empty ex-rights/ex-dividend data.
+    // The supplementary query is limited to the roles with the lazy loading fallback (client /
+    // server); in the ordinary standalone mode the existing semantics of "reading the materialized
+    // cache only" are kept even if the cache is cleared (a release normally does not happen in that
+    // mode)
+    if (m_data->m_weightList.empty() && !m_data->m_weight_ready.load(std::memory_order_acquire) &&
+        (sm.isIpcClientMode() || isShmServerRole())) {
+        lock.unlock();
+        std::unique_lock<std::shared_mutex> unique_lock(m_data->m_weight_mutex);
+        if (!m_data->m_weight_ready.load(std::memory_order_relaxed)) {
+            lazy_load_weight();
+        }
+        unique_lock.unlock();
+        lock.lock();
+    }
     StockWeightList::const_iterator start_iter, end_iter;
     start_iter = lower_bound(m_data->m_weightList.begin(), m_data->m_weightList.end(),
                              StockWeight(start), std::less<StockWeight>());
@@ -544,15 +606,81 @@ StockWeightList Stock::getWeight(const Datetime& start, const Datetime& end) con
 
     end_iter = lower_bound(start_iter, (StockWeightList::const_iterator)m_data->m_weightList.end(),
                            StockWeight(end), std::less<StockWeight>());
-    for (; start_iter != end_iter; ++start_iter) {
-        result.push_back(*start_iter);
-    }
+    result.assign(start_iter, end_iter);
 
     return result;
 }
 
 KData Stock::getKData(const KQuery& query) const {
     return KData(*this, query);
+}
+
+vector<EqualRecoverFactor> Stock::getEqualRecoverFactors() const {
+    HKU_IF_RETURN(!m_data, vector<EqualRecoverFactor>());
+    {
+        std::shared_lock<std::shared_mutex> lock(m_data->m_weight_mutex);
+        if (m_data->m_recover_ready.load(std::memory_order_relaxed)) {
+            return m_data->m_recover_factors;
+        }
+    }
+
+    // getWeight also handles the lazy loading / the release window; the daily line provides the
+    // reference close of every record date and the last data day
+    StockWeightList weights = getWeight(Datetime::min(), Null<Datetime>());
+    KRecordList days = getKRecordList(KQueryByDate(Datetime::min(), Null<Datetime>(), KQuery::DAY));
+
+    std::unique_lock<std::shared_mutex> lock(m_data->m_weight_mutex);
+    if (!m_data->m_recover_ready.load(std::memory_order_relaxed)) {
+        vector<EqualRecoverFactor>& factors = m_data->m_recover_factors;
+        factors.clear();
+
+        const Datetime last_day = days.empty() ? Null<Datetime>() : days.back().datetime;
+        price_t close = 0.0;
+        size_t day_pos = 0;
+        for (const auto& weight : weights) {
+            const Datetime& date = weight.datetime();
+            // The ex-rights beyond the last data day cannot affect any bar
+            if (!last_day.isNull() && date > last_day) {
+                break;
+            }
+            if (weight.countAsGift() == 0.0 && weight.countForSell() == 0.0 &&
+                weight.priceForSell() == 0.0 && weight.bonus() == 0.0 &&
+                weight.increasement() == 0.0 && weight.suogu() == 0.0) {
+                continue;
+            }
+
+            // The close of the record date: the daily close of the previous trading day
+            while (day_pos < days.size() && days[day_pos].datetime < date) {
+                close = days[day_pos].closePrice;
+                day_pos++;
+            }
+            if (close == 0.0) {
+                continue;
+            }
+
+            price_t denominator = 0.0, temp = close;
+            if (weight.suogu() != 0.0) {
+                denominator = weight.suogu();
+            } else {
+                price_t change =
+                  0.1 * (weight.countAsGift() + weight.countForSell() + weight.increasement());
+                denominator = 1.0 + change;
+                temp = close + weight.priceForSell() * change - 0.1 * weight.bonus();
+            }
+            if (temp == 0.0 || denominator == 0.0) {
+                continue;
+            }
+
+            EqualRecoverFactor factor;
+            factor.date = date;
+            factor.price_k = (denominator * close) / temp;
+            factors.push_back(factor);
+        }
+
+        factors.shrink_to_fit();
+        m_data->m_recover_ready.store(true, std::memory_order_release);
+    }
+    return m_data->m_recover_factors;
 }
 
 size_t Stock::getCount(KQuery::KType ktype) const {
@@ -566,7 +694,9 @@ size_t Stock::getCount(KQuery::KType ktype) const {
 
         if (isBuffer(ktype)) {
             std::shared_lock<std::shared_mutex> lock(*(m_data->pMutex[ktype]));
-            return m_data->pKData[ktype]->size();
+            if (auto* buf = m_data->pKData[ktype].get()) {
+                return buf->size();
+            }
         }
 
         return m_kdataDriver->getConnect()->getCount(market(), code(), ktype);
@@ -591,13 +721,13 @@ price_t Stock::getMarketValue(const Datetime& datetime, KQuery::KType ktype) con
             loadKDataToBuffer(ktype);
         }
 
-        // 如果为内存缓存或者数据驱动为索引优先，则按索引方式获取
+        // If it is an in-memory cache or the data driver prefers the index, acquire it by index
         if (isBuffer(ktype)) {
             KQuery query = KQueryByDate(datetime, Null<Datetime>(), ktype);
             size_t out_start, out_end;
 
             if (_getIndexRangeFromBuffer(query, out_start, out_end)) {
-                // 找到的是>=datetime的记录
+                // The record found is >= datetime
                 KRecord k = _getKRecordFromBuffer(out_start, ktype);
                 if (k.datetime == datetime) {
                     return k.closePrice;
@@ -606,13 +736,14 @@ price_t Stock::getMarketValue(const Datetime& datetime, KQuery::KType ktype) con
                     k = _getKRecordFromBuffer(out_start - 1, ktype);
                     return k.closePrice;
                 }
+                return 0.0;
             }
 
         } else if (m_kdataDriver->getConnect()->isIndexFirst()) {
             KQuery query = KQueryByDate(datetime, Null<Datetime>(), ktype);
             size_t out_start, out_end;
             if (getIndexRange(query, out_start, out_end)) {
-                // 找到的是>=datetime的记录
+                // The record found is >= datetime
                 KRecord k = getKRecord(out_start, ktype);
                 if (k.datetime == datetime) {
                     return k.closePrice;
@@ -621,16 +752,21 @@ price_t Stock::getMarketValue(const Datetime& datetime, KQuery::KType ktype) con
                     k = getKRecord(out_start - 1, ktype);
                     return k.closePrice;
                 }
+                return 0.0;
             }
 
         } else {
-            // 未在缓存中，且日期优先的情况下
-            // 先尝试获取等于该日期的K线数据
-            // 如未找到，则获取小于该日期的最后一条记录
+            // It is not in the cache and the date is preferred
+            // Try to get the K-line data equal to that date first
+            // If it is not found, get the last record earlier than that date
             KQuery query = KQueryByDate(datetime, datetime + Minutes(1), ktype);
             auto k_list = getKRecordList(query);
             if (k_list.size() > 0 && k_list[0].datetime == datetime) {
                 return k_list[0].closePrice;
+            }
+
+            if (datetime < startDatetime()) {
+                return 0.0;
             }
 
             query = KQueryByDate(startDatetime(), datetime, ktype);
@@ -638,9 +774,10 @@ price_t Stock::getMarketValue(const Datetime& datetime, KQuery::KType ktype) con
             if (k_list.size() > 0) {
                 return k_list[k_list.size() - 1].closePrice;
             }
+            return 0.0;
         }
 
-        // 没有找到，则取最后一条记录
+        // If it is not found, take the last record
         price_t price = 0.0;
         size_t total = getCount(ktype);
         if (total > 0) {
@@ -654,7 +791,7 @@ price_t Stock::getMarketValue(const Datetime& datetime, KQuery::KType ktype) con
         KQuery query = KQueryByDate(datetime, Null<Datetime>(), ktype);
         size_t out_start, out_end;
         if (getIndexRange(query, out_start, out_end)) {
-            // 找到的是>=datetime的记录
+            // The record found is >= datetime
             KRecord k = getKRecord(out_start, ktype);
             if (k.datetime == datetime) {
                 return k.closePrice;
@@ -663,9 +800,13 @@ price_t Stock::getMarketValue(const Datetime& datetime, KQuery::KType ktype) con
                 k = getKRecord(out_start - 1, ktype);
                 return k.closePrice;
             }
+            // out_start == 0 yet the first record is already after datetime: the query time
+            // precedes the first K-line record, so no market value exists yet. Return 0 rather
+            // than the latest close, which would leak future data into valuation.
+            return 0.0;
         }
 
-        // 没有找到，则取最后一条记录
+        // If it is not found, take the last record
         price_t price = 0.0;
         size_t total = getCount(ktype);
         if (total > 0) {
@@ -783,7 +924,9 @@ bool Stock::_getIndexRangeByIndexFromBuffer(const KQuery& query, size_t& out_sta
     out_start = 0;
     out_end = 0;
 
-    size_t total = m_data->pKData[query.kType()]->size();
+    auto* buf = m_data->pKData[query.kType()].get();
+    HKU_IF_RETURN(!buf, false);
+    size_t total = buf->size();
     HKU_IF_RETURN(0 == total, false);
 
     int64_t startix, endix;
@@ -836,7 +979,9 @@ bool Stock::_getIndexRangeByDateFromBuffer(const KQuery& query, size_t& out_star
     out_start = 0;
     out_end = 0;
 
-    const KRecordList& kdata = *(m_data->pKData[query.kType()]);
+    auto* buf = m_data->pKData[query.kType()].get();
+    HKU_IF_RETURN(!buf, false);
+    const KRecordList& kdata = *buf;
     size_t total = kdata.size();
     HKU_IF_RETURN(0 == total, false);
 
@@ -899,29 +1044,32 @@ bool Stock::_getIndexRangeByDateFromBuffer(const KQuery& query, size_t& out_star
     return true;
 }
 
-const KRecord& Stock::_getKRecordFromBuffer(size_t pos, const KQuery::KType& ktype) const {
+KRecord Stock::_getKRecordFromBuffer(size_t pos, const KQuery::KType& ktype) const {
     std::shared_lock<std::shared_mutex> lock(*(m_data->pMutex[ktype]));
-    const auto& buf = *(m_data->pKData[ktype]);
-    return pos >= buf.size() ? KRecord::NullKRecord : buf[pos];
+    auto* buf = m_data->pKData[ktype].get();
+    HKU_IF_RETURN(!buf, KRecord::NullKRecord);
+    return pos >= buf->size() ? KRecord::NullKRecord : (*buf)[pos];
 }
 
 KRecord Stock::getKRecord(size_t pos, const KQuery::KType& kType) const {
     HKU_IF_RETURN(!m_data, KRecord::NullKRecord);
+    string nkType(kType);
+    to_upper(nkType);
 
-    if (KQuery::isBaseKType(kType)) {
-        if (isPreload(kType) && !isBuffer(kType)) {
-            loadKDataToBuffer(kType);
+    if (KQuery::isBaseKType(nkType)) {
+        if (isPreload(nkType) && !isBuffer(nkType)) {
+            loadKDataToBuffer(nkType);
         }
 
-        if (isBuffer(kType)) {
-            return _getKRecordFromBuffer(pos, kType);
+        if (isBuffer(nkType)) {
+            return _getKRecordFromBuffer(pos, nkType);
         }
 
         HKU_IF_RETURN(!m_kdataDriver || pos >= size_t(Null<int64_t>()), KRecord::NullKRecord);
         auto klist = m_kdataDriver->getConnect()->getKRecordList(market(), code(),
-                                                                 KQuery(pos, pos + 1, kType));
+                                                                 KQuery(pos, pos + 1, nkType));
         if (klist.size() > 0) {
-            if ((kType == KQuery::TIMELINE || kType == KQuery::TRANS) &&
+            if ((nkType == KQuery::TIMELINE || nkType == KQuery::TRANS) &&
                 (type() == STOCKTYPE_ETF || type() == STOCKTYPE_FUND || type() == STOCKTYPE_B)) {
                 klist[0].closePrice *= 0.1;
             }
@@ -930,8 +1078,8 @@ KRecord Stock::getKRecord(size_t pos, const KQuery::KType& kType) const {
         return KRecord::NullKRecord;
     }
 
-    if (KQuery::isExtraKType(kType)) {
-        auto ks = getExtraKRecordList(*this, KQueryByIndex(pos, pos + 1, kType));
+    if (KQuery::isExtraKType(nkType)) {
+        auto ks = getExtraKRecordList(*this, KQueryByIndex(pos, pos + 1, nkType));
         return ks.empty() ? KRecord::NullKRecord : ks[0];
     }
 
@@ -942,23 +1090,25 @@ KRecord Stock::getKRecord(size_t pos, const KQuery::KType& kType) const {
 KRecord Stock::getKRecord(const Datetime& datetime, const KQuery::KType& ktype) const {
     KRecord result;
     HKU_IF_RETURN(isNull(), result);
+    string nktype(ktype);
+    to_upper(nktype);
 
-    if (KQuery::isBaseKType(ktype)) {
-        if (isPreload(ktype) && !isBuffer(ktype)) {
-            loadKDataToBuffer(ktype);
+    if (KQuery::isBaseKType(nktype)) {
+        if (isPreload(nktype) && !isBuffer(nktype)) {
+            loadKDataToBuffer(nktype);
         }
 
-        KQuery query = KQueryByDate(datetime, datetime + Minutes(1), ktype);
+        KQuery query = KQueryByDate(datetime, datetime + Minutes(1), nktype);
         auto driver = m_kdataDriver->getConnect();
         if (isBuffer(query.kType()) || driver->isIndexFirst()) {
             size_t startix = 0, endix = 0;
-            return getIndexRange(query, startix, endix) ? getKRecord(startix, ktype)
+            return getIndexRange(query, startix, endix) ? getKRecord(startix, nktype)
                                                         : KRecord::NullKRecord;
         }
 
         auto klist = driver->getKRecordList(market(), code(), query);
         if (klist.size() > 0) {
-            if ((ktype == KQuery::TIMELINE || ktype == KQuery::TRANS) &&
+            if ((nktype == KQuery::TIMELINE || nktype == KQuery::TRANS) &&
                 (type() == STOCKTYPE_ETF || type() == STOCKTYPE_FUND || type() == STOCKTYPE_B)) {
                 klist[0].closePrice *= 0.1;
             }
@@ -967,8 +1117,8 @@ KRecord Stock::getKRecord(const Datetime& datetime, const KQuery::KType& ktype) 
         return KRecord::NullKRecord;
     }
 
-    if (KQuery::isExtraKType(ktype)) {
-        auto ks = getExtraKRecordList(*this, KQueryByDate(datetime, datetime + Minutes(1), ktype));
+    if (KQuery::isExtraKType(nktype)) {
+        auto ks = getExtraKRecordList(*this, KQueryByDate(datetime, datetime + Minutes(1), nktype));
         return ks.empty() ? KRecord::NullKRecord : ks[0];
     }
 
@@ -980,15 +1130,15 @@ KRecordList Stock::_getKRecordListFromBuffer(size_t start_ix, size_t end_ix,
                                              KQuery::KType ktype) const {
     std::shared_lock<std::shared_mutex> lock(*(m_data->pMutex[ktype]));
     KRecordList result;
-    size_t total = m_data->pKData[ktype]->size();
-    HKU_IF_RETURN(total == 0, result);
+    auto* buf = m_data->pKData[ktype].get();
+    HKU_IF_RETURN(!buf || buf->empty(), result);
+    size_t total = buf->size();
     HKU_WARN_IF_RETURN(start_ix >= end_ix || start_ix >= total, result,
-                       "Invalid param (start_ix: {}, end_ix: {})! current total: {}", start_ix,
-                       end_ix, total);
+                       "Invalid param (start_ix: {}, end_ix: {})! current total: {} | {} | {}",
+                       start_ix, end_ix, total, name(), ktype);
     size_t length = end_ix > total ? total - start_ix : end_ix - start_ix;
     result.resize(length);
-    memcpy((void*)&(result.front()), &((*m_data->pKData[ktype])[start_ix]),
-           sizeof(KRecord) * length);
+    memcpy((void*)&(result.front()), &((*buf)[start_ix]), sizeof(KRecord) * length);
     return result;
 }
 
@@ -1012,7 +1162,7 @@ KRecordList Stock::_getKRecordList(const KQuery& query) const {
         loadKDataToBuffer(query.kType());
     }
 
-    // 如果是在内存缓存中
+    // If it is in the in-memory cache
     if (isBuffer(query.kType())) {
         size_t start_ix = 0, end_ix = 0;
         if (query.queryType() == KQuery::DATE) {
@@ -1021,7 +1171,7 @@ KRecordList Stock::_getKRecordList(const KQuery& query) const {
             }
         } else {
             if (query.start() < 0 || query.end() < 0) {
-                // 处理负数索引
+                // Handle a negative index
                 if (!getIndexRange(query, start_ix, end_ix)) {
                     return result;
                 }
@@ -1040,7 +1190,7 @@ KRecordList Stock::_getKRecordList(const KQuery& query) const {
             size_t start_ix = 0, end_ix = 0;
             if (query.queryType() == KQuery::INDEX) {
                 if (query.start() < 0 || query.end() < 0) {
-                    // 处理负数索引
+                    // Handle a negative index
                     if (!getIndexRange(query, start_ix, end_ix)) {
                         return result;
                     }
@@ -1116,7 +1266,10 @@ vector<Block> Stock::getBelongToBlockList(const string& category) const {
     return StockManager::instance().getStockBelongs(*this, category);
 }
 
-// 判断是否在交易时间段内（不判断日期）
+// Judge whether the given moment falls within the current day's trading session. The window is
+// anchored to today (openTime/closeTime are TimeDelta offsets added to Datetime::today()), so only
+// the intraday time range is checked; the date itself is not validated as a trading day
+// (holidays/weekends are not excluded) and the input is assumed to be today.
 bool Stock::isTransactionTime(Datetime time) {
     MarketInfo market_info = StockManager::instance().getMarketInfo(market());
     HKU_IF_RETURN(market_info == Null<MarketInfo>(), false);
@@ -1125,7 +1278,8 @@ bool Stock::isTransactionTime(Datetime time) {
                           market_info.openTime2() > market_info.closeTime2(),
                         false, "Error transaction time in market({})!", market_info.market());
 
-    // 如果交易时间段的起始和终止时间都相等则认未做限定，全天都为可交易时间
+    // When the start and the end time of the trading time range are equal it is regarded as
+    // unlimited and the whole day is tradable
     HKU_IF_RETURN(market_info.openTime1() == market_info.closeTime1() &&
                     market_info.openTime2() == market_info.closeTime2(),
                   true);
@@ -1133,7 +1287,8 @@ bool Stock::isTransactionTime(Datetime time) {
     Datetime today = Datetime::today();
     Datetime openTime1 = today + market_info.openTime1();
     Datetime closeTime1 = today + market_info.closeTime1();
-    // 某些行情闭市最后一天tick时间可能延迟数秒，补充余量
+    // The tick time of the last day of some market data may be delayed by a few seconds, so a
+    // margin is added
     HKU_IF_RETURN(time >= openTime1 && time <= closeTime1 + Seconds(30), true);
 
     Datetime openTime2 = today + market_info.openTime2();
@@ -1141,7 +1296,55 @@ bool Stock::isTransactionTime(Datetime time) {
     return time >= openTime2 && time <= closeTime2 + Seconds(30);
 }
 
+// The market data is not trusted (it may come from a remote server or external input): reject the
+// abnormal bars before they land in the memory cache and are mirrored to the shared memory of all
+// the IPC clients
+static bool isValidRealtimeKRecord(const KRecord& record) {
+    if (record.datetime.isNull()) {
+        return false;
+    }
+
+    if (!std::isfinite(record.openPrice) || record.openPrice <= 0.0 ||
+        !std::isfinite(record.highPrice) || record.highPrice <= 0.0 ||
+        !std::isfinite(record.lowPrice) || record.lowPrice <= 0.0 ||
+        !std::isfinite(record.closePrice) || record.closePrice <= 0.0) {
+        return false;
+    }
+
+    if (record.highPrice < record.lowPrice || record.highPrice < record.openPrice ||
+        record.highPrice < record.closePrice || record.lowPrice > record.openPrice ||
+        record.lowPrice > record.closePrice) {
+        return false;
+    }
+
+    if (!std::isfinite(record.transAmount) || record.transAmount < 0.0 ||
+        !std::isfinite(record.transCount) || record.transCount < 0.0) {
+        return false;
+    }
+
+    return true;
+}
+
 void Stock::realtimeUpdate(KRecord record, const KQuery::KType& inktype) {
+    HKU_WARN_IF_RETURN(!isValidRealtimeKRecord(record), void(),
+                       "The invalid krecord, skip it! {} {}", market_code(), record);
+
+    // The client mode without a local buffer (an ordinary proxy security): it is forwarded to the
+    // main process to apply (updating its buffer and mirroring to the shared memory segment, from
+    // which all the clients read), keeping the ability of the client to update the market data
+    // actively; it falls back to the original behavior (silently ignored) when no forwarding
+    // connection is registered or the forwarding fails. Conversely, if there is already a local
+    // buffer (such as a temporary security with external data given by setKRecordList, isBuffer is
+    // true), that data is visible to this client only and the main process does not have this
+    // security, so the local buffer must be updated in place without sending it out; therefore the
+    // !isBuffer gate is used (it falls to the local logic below; the client has no publisher and
+    // shmMirror is a safe no-op).
+    if (StockManager::instance().isIpcClientMode() && !isBuffer(inktype)) {
+        HKU_IF_RETURN(
+          record.datetime.isNull() || StockManager::instance().isHoliday(record.datetime), void());
+        ipc::forwardRealtimeUpdate(market_code(), inktype, record);
+        return;
+    }
     HKU_IF_RETURN(!isBuffer(inktype) || record.datetime.isNull() ||
                     StockManager::instance().isHoliday(record.datetime),
                   void());
@@ -1149,22 +1352,28 @@ void Stock::realtimeUpdate(KRecord record, const KQuery::KType& inktype) {
     string ktype(inktype);
     to_upper(ktype);
 
-    // 加写锁
+    // Acquire the write lock
     std::unique_lock<std::shared_mutex> lock(*(m_data->pMutex[ktype]));
 
-    // 需要对是否已缓存进行二次判定，防止加锁之前缓存被释放
+    // A second check of the caching is needed, to prevent the cache from being released before the
+    // lock
     if (m_data->pKData.find(ktype) == m_data->pKData.end() || !m_data->pKData[ktype]) {
         return;
     }
 
     if (m_data->pKData[ktype]->empty()) {
         m_data->pKData[ktype]->push_back(record);
+        // Mirrored to the shared memory segment (silently skipped when this security / type is not
+        // published); called inside the write lock of the security x ktype, guaranteeing the single
+        // writer serialization within the segment
+        ipc::shmMirrorRealtimeUpdate(market_code(), inktype, record);
         return;
     }
 
     KRecord& tmp = m_data->pKData[ktype]->back();
 
-    // 如果传入的记录日期等于最后一条记录日期，则更新最后一条记录；否则，追加入缓存
+    // When the date of the passed record equals the date of the last record, update the last
+    // record; otherwise append it to the cache
     if (tmp.datetime == record.datetime) {
         if (tmp.highPrice < record.highPrice) {
             tmp.highPrice = record.highPrice;
@@ -1185,31 +1394,41 @@ void Stock::realtimeUpdate(KRecord record, const KQuery::KType& inktype) {
         HKU_DEBUG("Ignore record, datetime({}) < last record.datetime({})! {} {}", record.datetime,
                   tmp.datetime, market_code(), inktype);
     }
+
+    // Mirrored to the shared memory segment (silently skipped when it is not published; an expired
+    // record is ignored by the mirror rule as well), so the client processes read the near realtime
+    // data without an IPC round trip
+    ipc::shmMirrorRealtimeUpdate(market_code(), inktype, record);
 }
 
 Datetime Stock::getLastUpdateTime(const KQuery::KType& inktype) const {
+    HKU_IF_RETURN(!m_data, Datetime::min());
     auto ktype = inktype;
     to_upper(ktype);
-    if (m_data->pMutex.find(ktype) == m_data->pMutex.end()) {
+    // The client mode without a local buffer (an ordinary proxy security): m_lastUpdate is always
+    // Datetime::min(), so it is forwarded to the main process to get its buffer refresh moment,
+    // staying consistent with the data the client reads through the shared memory (when no
+    // forwarding connection is registered / it fails it degrades to returning min()). If there is
+    // already a local buffer (such as a temporary security given by setKRecordList), m_lastUpdate
+    // is written locally and the local value should be returned directly instead of forwarding, so
+    // the !isBuffer gate is used.
+    if (StockManager::instance().isIpcClientMode() && !isBuffer(ktype)) {
+        return ipc::forwardGetLastUpdateTime(market_code(), ktype);
+    }
+    auto pmutex_iter = m_data->pMutex.find(ktype);
+    if (pmutex_iter == m_data->pMutex.end()) {
         auto iter = m_data->m_lastUpdate.find(ktype);
-        if (iter == m_data->m_lastUpdate.end()) {
-            // 可能新增的扩展K线类型
-            if (KQuery::isExtraKType(ktype)) {
-                m_data->m_lastUpdate[ktype] = Datetime::min();
-            }
-            return Datetime::min();
-        }
-        return iter->second;
+        return iter == m_data->m_lastUpdate.end() ? Datetime::min() : iter->second;
     }
 
-    std::shared_lock<std::shared_mutex> lock(*(m_data->pMutex[ktype]));
+    std::shared_lock<std::shared_mutex> lock(*(pmutex_iter->second));
     auto iter = m_data->m_lastUpdate.find(ktype);
     return iter == m_data->m_lastUpdate.end() ? Datetime::min() : iter->second;
 }
 
 void Stock::setKRecordList(const KRecordList& ks, const KQuery::KType& ktype) {
     HKU_CHECK(
-      isNull(),
+      m_data,
       "The stock is Null, can't set kdata! Please create a stock using the format Stock(market, "
       "code, name)! Calling Stock() will create a special null instance.");
 
@@ -1217,12 +1436,12 @@ void Stock::setKRecordList(const KRecordList& ks, const KQuery::KType& ktype) {
     string nktype(ktype);
     to_upper(nktype);
 
-    // 写锁
-    std::unique_lock<std::shared_mutex> lock(*(m_data->pMutex[ktype]));
+    // Write lock
+    std::unique_lock<std::shared_mutex> lock(*(m_data->pMutex[nktype]));
     HKU_CHECK(m_data->pKData.find(nktype) != m_data->pKData.end(), "Invalid ktype: {}", ktype);
 
     if (!m_data->pKData[nktype]) {
-        m_data->pKData[nktype] = new KRecordList();
+        m_data->pKData[nktype] = std::make_shared<KRecordList>();
     }
 
     (*(m_data->pKData[nktype])) = ks;
@@ -1239,7 +1458,7 @@ void Stock::setKRecordList(const KRecordList& ks, const KQuery::KType& ktype) {
 
 void Stock::setKRecordList(KRecordList&& ks, const KQuery::KType& ktype) {
     HKU_CHECK(
-      isNull(),
+      m_data,
       "The stock is Null, can't set kdata! Please create a stock using the format Stock(market, "
       "code, name)! Calling Stock() will create a special null instance.");
 
@@ -1247,12 +1466,12 @@ void Stock::setKRecordList(KRecordList&& ks, const KQuery::KType& ktype) {
     string nktype(ktype);
     to_upper(nktype);
 
-    // 写锁
-    std::unique_lock<std::shared_mutex> lock(*(m_data->pMutex[ktype]));
+    // Write lock
+    std::unique_lock<std::shared_mutex> lock(*(m_data->pMutex[nktype]));
     HKU_CHECK(m_data->pKData.find(nktype) != m_data->pKData.end(), "Invalid ktype: {}", ktype);
 
     if (!m_data->pKData[nktype]) {
-        m_data->pKData[nktype] = new KRecordList();
+        m_data->pKData[nktype] = std::make_shared<KRecordList>();
     }
 
     (*m_data->pKData[nktype]) = std::move(ks);
@@ -1267,30 +1486,98 @@ void Stock::setKRecordList(KRecordList&& ks, const KQuery::KType& ktype) {
     m_data->m_lastDate = (*m_data->pKData[nktype]).back().datetime;
 }
 
-const vector<HistoryFinanceInfo>& Stock::getHistoryFinance() const {
+vector<HistoryFinanceInfo> Stock::getHistoryFinance() const {
     HKU_ASSERT(m_data);
-    if (!m_data->m_history_finance_ready) {
-        // 目前 m_history_finance_ready 和 m_history_finance_mutex
-        // 分离，并行时短时间可能造成多次获取，可以容忍
-        std::unique_lock<std::shared_mutex> lock(m_data->m_history_finance_mutex);
-        m_data->m_history_finance =
-          StockManager::instance().getHistoryFinance(*this, Datetime::min(), Null<Datetime>());
+    // The historical finance reading policy:
+    // - The client mode: the historical finance is not materialized locally (see the early return
+    // of the client mode in StockManager::loadAllKData) and it is read on demand
+    //   through the driver from the shared memory snapshot published by the main process
+    //   (IpcBaseInfoDriver prefers shm and falls back to IPC / local when not covered), avoiding a
+    //   duplicated occupation of the client memory with the snapshot, and every call reflects the
+    //   current cache of the main process;
+    // - The shm server role: after the basic snapshot with the finance is published,
+    // StockManager::releaseShmServerBaseInfoCache()
+    //   has released the local historical finance cache (the clients all read through the shared
+    //   memory and the server does not need to keep a copy); a released security is re-read lazily
+    //   for self healing on the next access (the IPC fallback reply and the API access in the same
+    //   process);
+    // - The ordinary main process mode: the materialized cache is preloaded at the startup and its
+    // copy is returned. getHistoryFinance is not a per-K-line hot path (it is called once per
+    // indicator / query), so the on-demand shm read and decoding cost is negligible. The return
+    // type must be by value: the client mode has no local cache and cannot return a reference.
+    StockManager& sm = StockManager::instance();
+    if (sm.isIpcClientMode()) {
+        return sm.getHistoryFinance(*this, Datetime::min(), Null<Datetime>());
+    }
+    auto lazy_load_finance = [this, &sm]() {
+        // The caller must already hold the unique lock of m_history_finance_mutex
+        m_data->m_history_finance = sm.getHistoryFinance(*this, Datetime::min(), Null<Datetime>());
         m_data->m_history_finance.shrink_to_fit();
         m_data->m_history_finance_ready = true;
-        return m_data->m_history_finance;
-    } else {
-        std::shared_lock<std::shared_mutex> lock(m_data->m_history_finance_mutex);
-        return m_data->m_history_finance;
+    };
+    if (!m_data->m_history_finance_ready) {
+        // At present m_history_finance_ready and m_history_finance_mutex are separate, so in
+        // parallel a short period may cause multiple acquisitions, which is tolerable
+        std::unique_lock<std::shared_mutex> lock(m_data->m_history_finance_mutex);
+        if (!m_data->m_history_finance_ready) {
+            lazy_load_finance();
+        }
     }
+    std::shared_lock<std::shared_mutex> lock(m_data->m_history_finance_mutex);
+    // The release window concurrent with releaseShmServerBaseInfoCache(): the description is the
+    // same as Stock::getWeight
+    if (m_data->m_history_finance.empty() && !m_data->m_history_finance_ready) {
+        lock.unlock();
+        std::unique_lock<std::shared_mutex> unique_lock(m_data->m_history_finance_mutex);
+        if (!m_data->m_history_finance_ready) {
+            lazy_load_finance();
+        }
+        unique_lock.unlock();
+        lock.lock();
+    }
+    return m_data->m_history_finance;
 }
 
 void Stock::setHistoryFinance(vector<HistoryFinanceInfo>&& history_finance) {
     HKU_IF_RETURN(!m_data, void());
+    // The client mode: the historical finance is not materialized locally (symmetric with the
+    // client branch of getHistoryFinance(); the local cache is always empty and the reading side
+    // queries shm/IPC through the baseInfo driver uniformly); the batch import result is discarded
+    // directly, avoiding a duplicated occupation of the client memory with the snapshot. In the
+    // normal flow the client preload (loadAllKData) returns early and would not reach here at all;
+    // this is the foolproof invariant at the Stock layer: this function is the only batch writing
+    // entry of the finance cache (the column-oriented getAllHistoryFinance, see design §11.23①) and
+    // no future call path (such as reload or a plugin) may recreate a local copy in the client
+    // mode.
+    if (StockManager::instance().isIpcClientMode()) {
+        return;
+    }
+    // Deduplicate by (reportDate, fileDate): the batch getAllHistoryFinance of the column-oriented
+    // driver may return duplicate rows for the same key (in the real test ClickHouse returned 124
+    // rows in a batch for a security versus 123 rows by a direct per-security query, and the keys
+    // unique to the cache were empty, i.e. a pure multiplicity duplication). The deduplication
+    // makes the cache consistent with the other three paths (the direct per-security query, the SHM
+    // snapshot and the IPC fallback); semantically every (reportDate, fileDate) should be unique,
+    // so the first occurrence is kept (remove_if is stable and keeps the original relative order;
+    // the sorting is the responsibility of the publishing side)
+    std::set<std::pair<uint64_t, uint64_t>> seen;
+    history_finance.erase(
+      std::remove_if(history_finance.begin(), history_finance.end(),
+                     [&seen](const HistoryFinanceInfo& r) {
+                         return !seen.emplace(r.reportDate.number(), r.fileDate.number()).second;
+                     }),
+      history_finance.end());
     history_finance.shrink_to_fit();
+    std::unique_lock<std::shared_mutex> lock(m_data->m_history_finance_mutex);
     if (!m_data->m_history_finance_ready) {
-        std::unique_lock<std::shared_mutex> lock(m_data->m_history_finance_mutex);
         m_data->m_history_finance = std::move(history_finance);
         m_data->m_history_finance_ready = true;
+    } else if (m_data->m_history_finance.empty()) {
+        // The lazy read had materialized an empty cache: the batch result is the authoritative fill
+        m_data->m_history_finance = std::move(history_finance);
+    } else {
+        HKU_TRACE("The history finance cache of {} is already materialized, batch import discarded",
+                  market_code());
     }
 }
 

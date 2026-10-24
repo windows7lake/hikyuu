@@ -1,7 +1,7 @@
 /*
  * OPCondition.h
  *
- *  Created on: 2016年5月9日
+ *  Created on: 2016-5-9
  *      Author: Administrator
  */
 
@@ -23,11 +23,23 @@ public:
     virtual void _calculate() override;
     virtual ConditionPtr _clone() override;
 
+    virtual bool hasPythonPart() const noexcept override {
+        return m_is_python_object || m_op.hasPythonPart();
+    }
+
 private:
     Indicator m_op;
 
+    // Cache of the last embedded-backtest result, keyed by (stock, query, sg). The backtest is the
+    // dominant cost of this condition, so identical inputs reuse the result. m_op is the only other
+    // input and is immutable (no setter), so it needs no keying; adding an m_op setter would.
+    Stock m_last_stock;
+    KQuery m_last_query;
+    SGPtr m_last_sg;
+    Indicator m_last_x;
+
 //============================================
-// 序列化支持
+// Serialization support
 //============================================
 #if HKU_SUPPORT_SERIALIZATION
     friend class boost::serialization::access;

@@ -7,6 +7,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IFilter.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -24,7 +25,7 @@ IFilter::~IFilter() {}
 
 void IFilter::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 0);
+        HKU_ASSERT(getParam<int>("n") >= 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -36,13 +37,12 @@ void IFilter::_calculate(const Indicator& ind) {
         return;
     }
 
-    auto const* src = ind.data();
-    auto* dst = this->data();
-
     int n = getParam<int>("n");
     if (0 == n) {
+        auto const* src = ind.data();
+        auto* dst = this->data();
         for (size_t i = m_discard; i < total; i++) {
-            dst[i] = src[i] != 0.0 ? 1.0 : 0.0;
+            dst[i] = (std::isfinite(src[i]) && src[i] != 0.0) ? 1.0 : 0.0;
         }
         return;
     }
@@ -62,7 +62,7 @@ void IFilter::_increment_calculate(const Indicator& ind, size_t start_pos) {
 
     size_t i = start_pos;
     while (i < total) {
-        if (src[i] == 0.0) {
+        if (!std::isfinite(src[i]) || src[i] == 0.0) {
             dst[i] = 0.0;
             i++;
         } else {
@@ -81,8 +81,8 @@ void IFilter::_increment_calculate(const Indicator& ind, size_t start_pos) {
 
 void IFilter::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step) {
     price_t val = get(curPos);
-    HKU_IF_RETURN(!std::isnan(val) && val == 0.0, void());
-    if (ind[curPos] == 0.0) {
+    HKU_IF_RETURN(std::isfinite(val) && val == 0.0, void());
+    if (!std::isfinite(ind[curPos]) || ind[curPos] == 0.0) {
         _set(0.0, curPos);
     } else {
         _set(1.0, curPos);

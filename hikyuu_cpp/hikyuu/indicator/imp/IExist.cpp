@@ -7,6 +7,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IExist.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -23,7 +24,7 @@ IExist::~IExist() {}
 
 void IExist::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 0);
+        HKU_ASSERT(getParam<int>("n") >= 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -36,15 +37,12 @@ void IExist::_calculate(const Indicator& ind) {
         auto const* src = ind.data();
         auto* dst = this->data();
         m_discard = ind.discard();
+        bool any_true = false;
         for (size_t i = m_discard; i < total; i++) {
-            price_t exist = 0.0;
-            for (size_t j = m_discard; j <= i; j++) {
-                if (src[j] != 0.0) {
-                    exist = 1.0;
-                    break;
-                }
+            if (!any_true && std::isfinite(src[i]) && src[i] != 0.0) {
+                any_true = true;
             }
-            dst[i] = exist;
+            dst[i] = any_true ? 1.0 : 0.0;
         }
         return;
     }
@@ -74,8 +72,8 @@ void IExist::_increment_calculate(const Indicator& ind, size_t start_pos) {
 
     price_t exist = 0;
     size_t pre_pos = start_pos + n - 1;
-    for (size_t i = start_pos + 1 - n; i <= m_discard; i++) {
-        if (src[i] != 0) {
+    for (size_t i = start_pos + 1 - n; i <= start_pos; i++) {
+        if (std::isfinite(src[i]) && src[i] != 0) {
             pre_pos = i;
             exist = 1.0;
         }
@@ -87,9 +85,9 @@ void IExist::_increment_calculate(const Indicator& ind, size_t start_pos) {
         size_t j = i + 1 - n;
         if (pre_pos < j) {
             pre_pos = j;
-            exist = src[j] != 0 ? 1 : 0;
+            exist = (std::isfinite(src[j]) && src[j] != 0) ? 1.0 : 0.0;
         }
-        if (src[i] != 0) {
+        if (std::isfinite(src[i]) && src[i] != 0) {
             pre_pos = i;
             exist = 1;
         }
@@ -98,7 +96,7 @@ void IExist::_increment_calculate(const Indicator& ind, size_t start_pos) {
 
     exist = 0;
     for (size_t i = total - n; i < total; i++) {
-        if (src[i] != 0) {
+        if (std::isfinite(src[i]) && src[i] != 0) {
             exist = 1;
             break;
         }
@@ -107,18 +105,14 @@ void IExist::_increment_calculate(const Indicator& ind, size_t start_pos) {
 }
 
 void IExist::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step) {
-    size_t start = 0;
-    if (0 == step) {
-        start = ind.discard();
-    } else if (curPos < ind.discard() + step - 1) {
+    if (curPos < ind.discard() + step - 1) {
         return;
-    } else {
-        start = curPos + 1 - step;
     }
+    size_t start = curPos + 1 - step;
 
     price_t exist = 0.0;
     for (size_t i = start; i <= curPos; i++) {
-        if (ind[i] != 0.0) {
+        if (std::isfinite(ind[i]) && ind[i] != 0.0) {
             exist = 1.0;
             break;
         }

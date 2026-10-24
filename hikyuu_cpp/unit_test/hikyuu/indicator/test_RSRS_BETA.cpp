@@ -8,7 +8,10 @@
  */
 
 #include "../test_config.h"
+#include <cmath>
 #include <fstream>
+#include <limits>
+#include <hikyuu/KDataPrivatedBufferImp.h>
 #include <hikyuu/StockManager.h>
 #include <hikyuu/indicator/crt/RSRS_BETA.h>
 #include <hikyuu/indicator/crt/KDATA.h>
@@ -21,29 +24,57 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_RSRS_BETA") {
-    // 非法参数 n
+    // The invalid parameter n
     CHECK_THROWS_AS(RSRS_BETA(1), std::exception);
     CHECK_THROWS_AS(RSRS_BETA(0), std::exception);
+}
+
+/** @par Test points: a non-finite bar is excluded from the regression, sums do not get poisoned */
+TEST_CASE("test_RSRS_BETA_inf_middle") {
+    Stock stock = StockManager::instance().getStock("sh000001");
+    REQUIRE_FALSE(stock.isNull());
+
+    const price_t inf = std::numeric_limits<price_t>::infinity();
+    Datetime date(2010, 1, 1);
+    KRecordList records;
+    // 6 bars, n = 4: bar 2 has Inf high, so its pair is excluded from every window that contains it
+    for (size_t i = 0; i < 6; ++i) {
+        price_t high = (i == 2) ? inf : (20.0 + i);
+        price_t low = 10.0 + i;
+        records.push_back(KRecord(date + Days(i), low, high, low, high, 1000.0, 100.0));
+    }
+    KData kdata =
+      KData(make_shared<KDataPrivatedBufferImp>(stock, KQuery(0, records.size()), records));
+
+    Indicator result = RSRS_BETA(kdata, 4);
+    REQUIRE_EQ(result.size(), 6);
+
+    /** @arg outputs after the Inf bar rolls in/out stay finite (valid_count drops to 3 then 4) */
+    // Windows covering bar 2 have valid_count == 3 (still >= 2, produces finite beta)
+    CHECK_UNARY(std::isfinite(result[3]));
+    CHECK_UNARY(std::isfinite(result[4]));
+    // Bar 5 window [2..5] contains the Inf bar again -> valid == 3, still finite
+    CHECK_UNARY(std::isfinite(result[5]));
 }
 
 TEST_CASE("test_RSRS_BETA_kdata") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-100));
 
-    // 正常情况，n = 20
+    // The normal case, n = 20
     Indicator result = RSRS_BETA(kdata, 20);
     CHECK_EQ(result.name(), "RSRS_BETA");
     CHECK_EQ(result.size(), kdata.size());
     CHECK_EQ(result.discard(), 19);
 
-    // 验证前几个值为 nan（需要足够数据才能计算）
+    // Verify that the first few values are nan (enough data is needed to calculate)
     for (size_t i = 0; i < result.discard(); ++i) {
         CHECK_UNARY(std::isnan(result[i]));
     }
 
-    // 验证具体计算结果（固定值检查）
+    // Verify the concrete calculation result (a fixed value check)
     CHECK_EQ(result[19], doctest::Approx(0.791453).epsilon(0.001));
     CHECK_EQ(result[39], doctest::Approx(0.711802).epsilon(0.001));
     CHECK_EQ(result[59], doctest::Approx(0.882348).epsilon(0.001));
@@ -55,7 +86,7 @@ TEST_CASE("test_RSRS_BETA_consistency") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-50));
 
-    // 多次计算相同输入应得到相同结果
+    // Calculating the same input several times should give the same result
     Indicator result1 = RSRS_BETA(kdata, 20);
     Indicator result2 = RSRS_BETA(kdata, 20);
 
@@ -70,7 +101,7 @@ TEST_CASE("test_RSRS_BETA_different_n") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-100));
 
-    // 不同窗口大小的测试
+    // The test with different window sizes
     Indicator result10 = RSRS_BETA(kdata, 10);
     Indicator result20 = RSRS_BETA(kdata, 20);
     Indicator result30 = RSRS_BETA(kdata, 30);
@@ -105,7 +136,7 @@ TEST_CASE("test_RSRS_BETA_benchmark") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_RSRS_BETA_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

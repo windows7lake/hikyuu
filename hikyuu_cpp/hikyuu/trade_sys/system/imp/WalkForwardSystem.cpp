@@ -63,7 +63,8 @@ void WalkForwardSystem::initParam() {
     setParam<int>("test_len", 20);
     setParam<bool>("se_trace", false);
 
-    // 当前选中的系统和上次的系统不一致时，在开盘时清空已有持仓
+    // When the currently selected system differs from the previous one, clear the existing position
+    // at the open
     setParam<bool>("clean_hold_when_select_changed", true);
 }
 
@@ -72,8 +73,6 @@ void WalkForwardSystem::_checkParam(const string& name) const {
         HKU_ASSERT(getParam<int>("train_len") > 0);
     } else if ("test_len" == name) {
         HKU_ASSERT(getParam<int>("test_len") > 0);
-    } else if ("depend_on_proto_sys" == name) {
-        HKU_ASSERT(getParam<bool>("depend_on_proto_sys"));
     } else if ("market" == name) {
         string market = getParam<string>(name);
         auto market_info = StockManager::instance().getMarketInfo(market);
@@ -82,18 +81,20 @@ void WalkForwardSystem::_checkParam(const string& name) const {
 }
 
 void WalkForwardSystem::_reset() {
-    m_cur_kdata = 0;
+    m_cur_window = Null<size_t>();
     m_cur_sys.reset();
     m_se->reset();
     if (m_train_tm) {
         m_train_tm->reset();
     }
 
+    m_train_kdata_list.clear();
+    m_run_ranges.clear();
     m_trade_list.clear();
-    m_buyRequest.clear();
-    m_sellRequest.clear();
-    m_sellShortRequest.clear();
-    m_buyShortRequest.clear();
+    m_buyRequestList.clear();
+    m_sellRequestList.clear();
+    m_sellShortRequestList.clear();
+    m_buyShortRequestList.clear();
 }
 
 void WalkForwardSystem::_forceResetAll() {
@@ -101,13 +102,13 @@ void WalkForwardSystem::_forceResetAll() {
 }
 
 SystemPtr WalkForwardSystem::_clone() {
-    WalkForwardSystem* p = new WalkForwardSystem();
+    auto p = make_shared<WalkForwardSystem>();
     p->m_se = m_se->clone();
     p->m_se->reset();
     if (m_train_tm) {
         p->m_train_tm = m_train_tm->clone();
     }
-    return SystemPtr(p);
+    return p;
 }
 
 void WalkForwardSystem::syncDataFromSystem(const SYSPtr& sys, bool isMoment) {
@@ -118,31 +119,27 @@ void WalkForwardSystem::syncDataFromSystem(const SYSPtr& sys, bool isMoment) {
         }
     }
 
-    m_buyRequest = sys->getBuyTradeRequest();
-    m_sellRequest = sys->getSellTradeRequest();
-    m_sellShortRequest = sys->getSellShortTradeRequest();
-    m_buyShortRequest = sys->getBuyShortTradeRequest();
+    m_buyRequestList = sys->getBuyTradeRequestList();
+    m_sellRequestList = sys->getSellTradeRequestList();
+    m_sellShortRequestList = sys->getSellShortTradeRequestList();
+    m_buyShortRequestList = sys->getBuyShortTradeRequestList();
 
     // m_pre_ev_valid = sys->m_pre_ev_valid;
     // m_pre_cn_valid = sys->m_pre_cn_valid;
 
-    m_buy_days = sys->m_buy_days;
-    m_sell_short_days = sys->m_sell_short_days;
     m_lastTakeProfit = sys->m_lastTakeProfit;
     m_lastShortTakeProfit = sys->m_lastShortTakeProfit;
 }
 
 void WalkForwardSystem::syncDataToSystem(const SYSPtr& sys) {
-    sys->m_buyRequest = m_buyRequest;
-    sys->m_sellRequest = m_sellRequest;
-    sys->m_sellShortRequest = m_sellShortRequest;
-    sys->m_buyShortRequest = m_buyShortRequest;
+    sys->m_buyRequestList = m_buyRequestList;
+    sys->m_sellRequestList = m_sellRequestList;
+    sys->m_sellShortRequestList = m_sellShortRequestList;
+    sys->m_buyShortRequestList = m_buyShortRequestList;
 
     // sys->m_pre_ev_valid = m_pre_ev_valid;
     // sys->m_pre_cn_valid = m_pre_cn_valid;
 
-    sys->m_buy_days = m_buy_days;
-    sys->m_sell_short_days = m_sell_short_days;
     sys->m_lastTakeProfit = m_lastTakeProfit;
     sys->m_lastShortTakeProfit = m_lastShortTakeProfit;
 }
@@ -169,6 +166,62 @@ void WalkForwardSystem::readyForRun() {
     m_se->calculate(SystemList(), m_kdata.getQuery());
 }
 
+void WalkForwardSystem::ensureWindows() {
+    HKU_CHECK(m_se, "WalkForwardSystem needs an SE! [{}]", name());
+    OptimalSelectorBase* se_ptr = dynamic_cast<OptimalSelectorBase*>(m_se.get());
+    HKU_CHECK(se_ptr, "WalkForwardSystem only supports OptimalSelectorBase! [{}]", name());
+
+    const auto& ranges = se_ptr->getRunRanges();
+    if (ranges.size() == m_run_ranges.size() && m_train_kdata_list.size() == ranges.size()) {
+        bool same = true;
+        for (size_t i = 0; i < ranges.size(); ++i) {
+            if (ranges[i].start != m_run_ranges[i].start ||
+                ranges[i].run_start != m_run_ranges[i].run_start ||
+                ranges[i].end != m_run_ranges[i].end) {
+                same = false;
+                break;
+            }
+        }
+        if (same) {
+            return;
+        }
+    }
+    m_run_ranges = ranges;
+    m_train_kdata_list.assign(ranges.size(), KData());
+    m_cur_window = Null<size_t>();
+    // m_cur_sys is kept: it is the clean-hold baseline, so a rebuilt table with the same
+    // restored candidate is not misjudged as a switch
+}
+
+KData WalkForwardSystem::windowKDataAt(size_t index) {
+    HKU_ASSERT(index < m_train_kdata_list.size());
+    if (m_train_kdata_list[index].empty()) {
+        const KQuery& query = m_kdata.getQuery();
+        m_train_kdata_list[index] = m_stock.getKData(KQueryByDate(
+          m_run_ranges[index].start, m_run_ranges[index].end, query.kType(), query.recoverType()));
+    }
+    return m_train_kdata_list[index];
+}
+
+size_t WalkForwardSystem::windowIndexAt(const Datetime& datetime) const {
+    // The run windows are contiguous and [run_start, end) is end-exclusive; a datetime in a
+    // training period (before the first run_start) or after the last end belongs to no window
+    size_t lo = 0, hi = m_run_ranges.size();
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (m_run_ranges[mid].run_start <= datetime) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo == 0) {
+        return Null<size_t>();
+    }
+    size_t index = lo - 1;
+    return datetime >= m_run_ranges[index].end ? Null<size_t>() : index;
+}
+
 void WalkForwardSystem::run(const KData& kdata, bool reset, bool resetAll) {
     SPEND_TIME(WalkForwardSystem_run);
     HKU_IF_RETURN(kdata.empty(), void());
@@ -184,23 +237,16 @@ void WalkForwardSystem::run(const KData& kdata, bool reset, bool resetAll) {
     m_stock = m_kdata.getStock();
     readyForRun();
 
-    OptimalSelectorBase* se_ptr = dynamic_cast<OptimalSelectorBase*>(m_se.get());
-    m_run_ranges = se_ptr->getRunRanges();
+    m_run_ranges.clear();  // a full run always re-reads the windows and window data
+    ensureWindows();
     size_t run_ranges_len = m_run_ranges.size();
     HKU_IF_RETURN(run_ranges_len == 0, void());
 
-    const KQuery& query = kdata.getQuery();
     const Stock& stock = kdata.getStock();
-
-    for (size_t i = 0; i < run_ranges_len; i++) {
-        m_train_kdata_list.emplace_back(stock.getKData(KQueryByDate(
-          m_run_ranges[i].start, m_run_ranges[i].end, query.kType(), query.recoverType())));
-    }
-
     bool trace = getParam<bool>("trace");
     SYSPtr pre_selected_sys;
-    for (size_t i = 0, total = m_train_kdata_list.size(); i < total; i++) {
-        const auto& run_kdata = m_train_kdata_list[i];
+    for (size_t i = 0, total = run_ranges_len; i < total; i++) {
+        KData run_kdata = windowKDataAt(i);
         if (run_kdata.empty()) {
             CLS_INFO_IF(
               trace,
@@ -242,10 +288,18 @@ void WalkForwardSystem::run(const KData& kdata, bool reset, bool resetAll) {
                       [](const KRecord& a, const KRecord& b) { return a.datetime < b.datetime; });
                     if (it != kr_end) {
                         KRecord src_kr = stock.getKRecord(it->datetime);
-                        auto tr =
-                          m_tm->sell(src_kr.datetime, m_stock, src_kr.openPrice, MAX_DOUBLE);
-                        if (!tr.isNull()) {
-                            CLS_INFO_IF(trace, "clean_hold_when_select_changed on open: {}", tr);
+                        if (src_kr.openPrice > 0.0) {
+                            auto tr =
+                              m_tm->sell(src_kr.datetime, m_stock, src_kr.openPrice, MAX_DOUBLE);
+                            if (!tr.isNull()) {
+                                CLS_INFO_IF(trace, "clean_hold_when_select_changed on open: {}",
+                                            tr);
+                                m_trade_list.push_back(tr);
+                            }
+                        } else {
+                            CLS_INFO_IF(
+                              trace, "clean_hold_when_select_changed skipped: no open price at {}.",
+                              src_kr.datetime);
                         }
                     }
                 }
@@ -282,10 +336,18 @@ void WalkForwardSystem::run(const KData& kdata, bool reset, bool resetAll) {
                       [](const KRecord& a, const KRecord& b) { return a.datetime < b.datetime; });
                     if (it != kr_end) {
                         KRecord src_kr = stock.getKRecord(it->datetime);
-                        auto tr =
-                          m_tm->sell(src_kr.datetime, m_stock, src_kr.openPrice, MAX_DOUBLE);
-                        if (!tr.isNull()) {
-                            CLS_INFO_IF(trace, "clean_hold_when_select_changed on open: {}", tr);
+                        if (src_kr.openPrice > 0.0) {
+                            auto tr =
+                              m_tm->sell(src_kr.datetime, m_stock, src_kr.openPrice, MAX_DOUBLE);
+                            if (!tr.isNull()) {
+                                CLS_INFO_IF(trace, "clean_hold_when_select_changed on open: {}",
+                                            tr);
+                                m_trade_list.push_back(tr);
+                            }
+                        } else {
+                            CLS_INFO_IF(
+                              trace, "clean_hold_when_select_changed skipped: no open price at {}.",
+                              src_kr.datetime);
                         }
                     }
                 }
@@ -296,40 +358,151 @@ void WalkForwardSystem::run(const KData& kdata, bool reset, bool resetAll) {
     m_calculated = true;
 }
 
-TradeRecord WalkForwardSystem::runMoment(const Datetime& datetime) {
-    TradeRecord ret;
-    auto sw_list = m_se->getSelected(datetime);
-    HKU_IF_RETURN(sw_list.empty(), ret);
+MomentResult WalkForwardSystem::driveMoment(const Datetime& datetime, bool open, bool close) {
+    MomentResult ret;
+    ret.datetime = datetime;
+    ensureWindows();
+    HKU_CHECK(m_tm, "Not TradeManager was specified! {}", name());
+    HKU_CHECK(!m_run_ranges.empty(),
+              "The WalkForwardSystem has no windows: the SE was never calculated (call run or "
+              "drive it through a strategy first)! [{}]",
+              name());
 
-    const auto& sys = sw_list.front().sys;
-    if (sys && sys != m_cur_sys) {
-        m_cur_kdata++;
-        if (m_cur_kdata < m_train_kdata_list.size()) {
-            m_cur_sys = sys;
+    const bool composite = open && close;
+    KQuery::KType ktype = m_kdata.getQuery().kType();
+    if (composite) {
+        ret.funds_before_open = m_tm->getFunds(datetime, ktype);
+    }
+
+    size_t idx = windowIndexAt(datetime);
+    if (idx == Null<size_t>()) {
+        // A training period or a past-the-end moment drives nothing; keep the current candidate
+        // as the clean-hold baseline so a restored candidate is not misjudged as a switch
+        m_cur_window = idx;
+        return ret;
+    }
+
+    if (idx != m_cur_window) {
+        m_cur_window = idx;
+        auto sw_list = m_se->getSelected(m_run_ranges[idx].run_start);
+        SYSPtr new_sys = sw_list.empty() ? SYSPtr() : sw_list.front().sys;
+        if (new_sys != m_cur_sys && new_sys && getParam<bool>("clean_hold_when_select_changed") &&
+            m_tm->have(m_stock)) {
+            price_t open_price = srcOpenPriceAt(datetime);
+            if (open_price > 0.0) {
+                TradeRecord tr = m_tm->sell(datetime, m_stock, open_price, MAX_DOUBLE);
+                if (!tr.isNull()) {
+                    ret.tradesOnOpen.push_back(tr);
+                    m_trade_list.push_back(tr);
+                }
+            } else {
+                HKU_WARN("clean_hold_when_select_changed skipped, {} has no open price at {}!",
+                         m_stock.market_code(), datetime);
+            }
+        }
+        m_cur_sys = new_sys;
+        if (m_cur_sys) {
             m_cur_sys->setParam<bool>("shared_tm", true);
             m_cur_sys->setParam<bool>("trace", getParam<bool>("trace"));
-            m_cur_sys->setTM(crtWalkForwardTM(getTM(), m_run_ranges[m_cur_kdata].run_start));
+            m_cur_sys->setTM(crtWalkForwardTM(getTM(), m_run_ranges[idx].run_start));
             m_cur_sys->readyForRun();
-            m_cur_sys->setTO(m_train_kdata_list[m_cur_kdata]);
+            m_cur_sys->setTO(windowKDataAt(idx));
             syncDataToSystem(m_cur_sys);
-        } else {
-            m_cur_sys.reset();
         }
     }
 
     if (m_cur_sys) {
-        ret = m_cur_sys->runMoment(datetime);
-        m_trade_list.push_back(ret);
-        syncDataFromSystem(m_cur_sys, true);
+        if (open) {
+            MomentResult r = m_cur_sys->runMomentOnOpen(datetime);
+            for (auto& tr : r.tradesOnOpen) {
+                if (!tr.isNull()) {
+                    ret.tradesOnOpen.push_back(tr);
+                    m_trade_list.push_back(tr);
+                }
+            }
+            syncDataFromSystem(m_cur_sys, true);
+        }
+        if (close) {
+            if (composite) {
+                ret.funds_before_close = m_tm->getFunds(datetime, ktype);
+            }
+            MomentResult r = m_cur_sys->runMomentOnClose(datetime);
+            for (auto& tr : r.tradesOnClose) {
+                if (!tr.isNull()) {
+                    ret.tradesOnClose.push_back(tr);
+                    m_trade_list.push_back(tr);
+                }
+            }
+            ret.funds = m_tm->getFunds(datetime, ktype);
+            syncDataFromSystem(m_cur_sys, true);
+            if (composite) {
+                PositionRecord position = m_tm->getPosition(datetime, m_stock);
+                if (position.number > 0.0) {
+                    ret.positions.push_back(position);
+                }
+                PositionRecord short_position = m_tm->getShortPosition(m_stock);
+                if (short_position.number > 0.0) {
+                    ret.positions.push_back(short_position);
+                }
+                for (const auto& req : m_buyRequestList) {
+                    if (req.valid) {
+                        ret.delayOnNextOpen.push_back(req);
+                    }
+                }
+                for (const auto& req : m_sellRequestList) {
+                    if (req.valid) {
+                        ret.delayOnNextOpen.push_back(req);
+                    }
+                }
+                for (const auto& req : m_sellShortRequestList) {
+                    if (req.valid) {
+                        ret.delayOnNextOpen.push_back(req);
+                    }
+                }
+                for (const auto& req : m_buyShortRequestList) {
+                    if (req.valid) {
+                        ret.delayOnNextOpen.push_back(req);
+                    }
+                }
+            }
+        }
     }
     return ret;
+}
+
+price_t WalkForwardSystem::srcOpenPriceAt(const Datetime& datetime) {
+    Stock stock = m_stock;
+    if (stock.isNull()) {
+        stock = m_kdata.getStock();
+    }
+    KRecord src = stock.getKRecord(datetime.startOfDay());
+    return src.openPrice > 0.0 ? src.openPrice : 0.0;
+}
+
+MomentResult WalkForwardSystem::runMoment(const Datetime& datetime) {
+    return driveMoment(datetime, true, true);
+}
+
+MomentResult WalkForwardSystem::runMomentOnOpen(const Datetime& datetime) {
+    return driveMoment(datetime, true, false);
+}
+
+MomentResult WalkForwardSystem::runMomentOnClose(const Datetime& datetime) {
+    return driveMoment(datetime, false, true);
+}
+
+bool WalkForwardSystem::hasPythonPart() const {
+    return System::hasPythonPart() || (m_se && m_se->hasPythonPart()) ||
+           (m_train_tm && m_train_tm->hasPythonPart()) || (m_cur_sys && m_cur_sys->hasPythonPart());
 }
 
 TradeRecord WalkForwardSystem::sellForceOnOpen(const Datetime& date, double num, Part from) {
     TradeRecord ret;
     if (m_cur_sys) {
         ret = m_cur_sys->sellForceOnOpen(date, num, from);
-        m_trade_list.push_back(ret);
+        if (!ret.isNull()) {
+            m_trade_list.push_back(ret);
+        }
         syncDataFromSystem(m_cur_sys, true);
     }
     return ret;
@@ -339,7 +512,9 @@ TradeRecord WalkForwardSystem::sellForceOnClose(const Datetime& date, double num
     TradeRecord ret;
     if (m_cur_sys) {
         ret = m_cur_sys->sellForceOnClose(date, num, from);
-        m_trade_list.push_back(ret);
+        if (!ret.isNull()) {
+            m_trade_list.push_back(ret);
+        }
         syncDataFromSystem(m_cur_sys, true);
     }
     return ret;
@@ -348,7 +523,7 @@ TradeRecord WalkForwardSystem::sellForceOnClose(const Datetime& date, double num
 void WalkForwardSystem::clearDelayBuyRequest() {
     if (m_cur_sys) {
         m_cur_sys->clearDelayBuyRequest();
-        m_buyRequest.clear();
+        m_buyRequestList.clear();
     }
 }
 
@@ -356,7 +531,9 @@ TradeRecord WalkForwardSystem::pfProcessDelaySellRequest(const Datetime& date) {
     TradeRecord ret;
     if (m_cur_sys) {
         ret = m_cur_sys->pfProcessDelaySellRequest(date);
-        m_trade_list.push_back(ret);
+        if (!ret.isNull()) {
+            m_trade_list.push_back(ret);
+        }
         syncDataFromSystem(m_cur_sys, true);
     }
     return ret;

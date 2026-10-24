@@ -18,7 +18,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_ADX2") {
     auto k = getKData("sh000001", KQuery(-100));
 
@@ -28,7 +28,7 @@ TEST_CASE("test_ADX2") {
     CHECK_EQ(adx2.getResultNumber(), 3);
 }
 
-/** @par 检测点：验证具体计算结果 */
+/** @par Test point: verify the concrete calculation result */
 TEST_CASE("test_ADX2_calculation") {
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh000001");
@@ -68,7 +68,7 @@ TEST_CASE("test_ADX2_calculation") {
     }
 }
 
-/** @par 检测点：验证结果集顺序 */
+/** @par Test point: verify the order of the result sets */
 TEST_CASE("test_ADX2_result_order") {
     auto k = getKData("sh000001", KQuery(-100));
 
@@ -84,7 +84,7 @@ TEST_CASE("test_ADX2_result_order") {
     CHECK_FALSE(std::isnan(mdi_val));
 }
 
-/** @par 检测点：ADX与ADX2对比 */
+/** @par Test point: the comparison of ADX and ADX2 */
 TEST_CASE("test_ADX_vs_ADX2") {
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh000001");
@@ -109,6 +109,20 @@ TEST_CASE("test_ADX_vs_ADX2") {
     CHECK_NE(adx_val, adx2_val);
 }
 
+/** @par Test point: total<2 early return must declare m_discard=total, not leave the all-NaN
+ * buffer as valid */
+TEST_CASE("test_ADX2_short_context_discard") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh000001");
+    KData k1 = stock.getKData(KQuery(-1));
+    REQUIRE_EQ(k1.size(), 1);
+    auto adx2 = ADX2(k1, 14);
+    CHECK_EQ(adx2.size(), 1);
+    /** @arg discard must advance past the single NaN slot (previously stayed 0 = valid NaN) */
+    CHECK_EQ(adx2.discard(), 1);
+    CHECK_UNARY(std::isnan(adx2[0]));
+}
+
 //-----------------------------------------------------------------------------
 // benchmark
 //-----------------------------------------------------------------------------
@@ -116,7 +130,7 @@ TEST_CASE("test_ADX_vs_ADX2") {
 TEST_CASE("test_ADX2_benchmark") {
     Stock stock = getStock("sh000001");
     KData kdata = stock.getKData(KQuery(0));
-    int cycle = 1000;  // 测试循环次数
+    int cycle = 1000;  // Test loop count
 
     {
         BENCHMARK_TIME_MSG(test_ADX2_benchmark, cycle, fmt::format("data len: {}", kdata.size()));
@@ -134,7 +148,7 @@ TEST_CASE("test_ADX2_benchmark") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_ADX2_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

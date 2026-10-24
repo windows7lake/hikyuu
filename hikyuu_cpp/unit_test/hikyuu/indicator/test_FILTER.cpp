@@ -21,7 +21,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_FILTER") {
     Indicator result;
 
@@ -134,7 +134,7 @@ TEST_CASE("test_FILTER") {
     CHECK_EQ(result[11], 0);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_FILTER_dyn") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-30));
@@ -152,15 +152,38 @@ TEST_CASE("test_FILTER_dyn") {
         CHECK_EQ(expect[i], doctest::Approx(result[i]));
     }
 
+    /** @arg the static n = 0 masks nothing */
     expect = FILTER(c > o, 0);
+    CHECK_UNARY(std::isfinite(expect[expect.discard()]));
+
+    /** @arg a per-bar step of 0 is no window at all, so every bar is Null */
     result = FILTER(c > o, CVAL(c, 0));
-    CHECK_EQ(expect.discard(), result.discard());
-    CHECK_EQ(expect.size(), result.size());
-    for (size_t i = 0; i < expect.discard(); i++) {
+    CHECK_EQ(result.size(), expect.size());
+    CHECK_EQ(result.discard(), result.size());
+    for (size_t i = 0; i < result.size(); i++) {
         CHECK_UNARY(std::isnan(result[i]));
     }
-    for (size_t i = expect.discard(); i < expect.size(); i++) {
-        CHECK_EQ(expect[i], doctest::Approx(result[i]));
+}
+
+/**
+ * @par Test points
+ * A NaN in the condition series means no data: it neither fires the filter nor opens the
+ * n-bar suppression window (a NaN used to trigger the window and mute the following signals).
+ */
+TEST_CASE("test_FILTER_nan_is_not_a_condition") {
+    PriceList a;
+    a.push_back(0);
+    a.push_back(0);
+    a.push_back(Null<price_t>());
+    a.push_back(0);
+    a.push_back(0);
+
+    Indicator x = PRICELIST(a);
+    Indicator result = FILTER(x, 3);
+    CHECK_EQ(result.size(), 5);
+    CHECK_EQ(result.discard(), 0);
+    for (size_t i = 0; i < result.size(); ++i) {
+        CHECK_EQ(result[i], 0);
     }
 }
 
@@ -169,7 +192,7 @@ TEST_CASE("test_FILTER_dyn") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_FILTER_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

@@ -19,8 +19,8 @@ namespace hku {
 IContext::IContext() : IndicatorImp("CONTEXT") {
     m_need_self_alike_compare = true;
     setParam<bool>("fill_null", false);
-    setParam<bool>("use_self_ktype", false);         // 使用自身独立上下文的K线类型
-    setParam<bool>("use_self_recover_type", false);  // 使用自身独立上下文的复权类型
+    setParam<bool>("use_self_ktype", false);         // Use the K-line type of its own context
+    setParam<bool>("use_self_recover_type", false);  // Use the adjustment type of its own context
 }
 
 IContext::IContext(const Indicator& ref_ind) : IndicatorImp("CONTEXT"), m_ref_ind(ref_ind) {
@@ -84,16 +84,18 @@ void IContext::_calculate(const Indicator& ind) {
 
     if (in_k != null_k && in_k != self_k) {
         if (self_dates.empty() && self_k.getStock().isNull()) {
-            // 上下文无效且无对齐日期，按时间无关序列计算并对齐
+            // The context is invalid and there is no align date, calculate as a time independent
+            // sequence and align
             if (ref.size() > in_k.size()) {
                 ref = SLICE(ref, ref.size() - in_k.size(), ref.size());
             } else if (ref.size() < in_k.size()) {
-                // 右对齐
+                // Align at the right end
                 ref = CVAL(0.)(in_k) + ref;
-            }  // else 长度相等无需再处理
+            }  // else the lengths are equal, no more processing is needed
 
         } else if (self_k != null_k) {
-            // 如果参考指标是时间序列，自按当前上下文日期查询条件查询后按日期对齐
+            // If the reference indicator is a time series, query it with the date query condition
+            // of the current context and then align by date
             bool use_self_ktype = getParam<bool>("use_self_ktype");
             bool use_self_recover_type = getParam<bool>("use_self_recover_type");
             auto self_stk = self_k.getStock();
@@ -111,24 +113,24 @@ void IContext::_calculate(const Indicator& ind) {
                     query = KQueryByIndex(in_query.start(), in_query.end(), ktype, recover_type);
                 }
                 // ref = m_ref_ind(self_stk.getKData(query));
-                // 让其参考指标使用增量计算
+                // Make its reference indicator use the incremental calculation
                 ref.setContext(self_stk.getKData(query));
 
             } else {
                 // ref = m_ref_ind(self_stk.getKData(in_k.getQuery()));
-                // 让其参考指标使用增量计算
+                // Make its reference indicator use the incremental calculation
                 ref.setContext(self_stk.getKData(in_k.getQuery()));
             }
             ref = ALIGN(ref, in_k, getParam<bool>("fill_null"));
         } else if (self_dates.size() > 1) {
-            // 无上下文的时间序列
+            // A time series without a context
             ref = ALIGN(ref, in_k, getParam<bool>("fill_null"));
         }
     }
 
     size_t total = ref.size();
-    size_t rtotal = ref.getResultNumber();
-    _readyBuffer(total, rtotal);
+    m_result_num = ref.getResultNumber();
+    _readyBuffer(total, m_result_num);
 
     m_discard = ref.discard();
     if (m_discard >= total) {
@@ -137,7 +139,7 @@ void IContext::_calculate(const Indicator& ind) {
     }
 
     size_t len = sizeof(value_t) * (total - m_discard);
-    for (size_t r = 0; r < rtotal; ++r) {
+    for (size_t r = 0; r < m_result_num; ++r) {
         const auto* src = ref.data(r) + m_discard;
         auto* dst = this->data(r) + m_discard;
         memcpy(dst, src, len);

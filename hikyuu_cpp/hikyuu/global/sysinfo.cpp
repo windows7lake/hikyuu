@@ -7,6 +7,7 @@
 
 #include <hikyuu/GlobalInitializer.h>
 #include <stdio.h>
+#include <cstdio>
 #include <shared_mutex>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_io.hpp>
@@ -16,6 +17,7 @@
 #include "hikyuu/DataType.h"
 #include "hikyuu/StockManager.h"
 #include "hikyuu/utilities/os.h"
+#include "hikyuu/utilities/FileLock.h"
 #include "hikyuu/utilities/http_client/AsioHttpClient.h"
 #include "sysinfo.h"
 
@@ -27,9 +29,9 @@ namespace hku {
 
 struct InnerSysInfo {
     Datetime expire_time{Datetime::max()};
-    bool runningInPython{false};      // 是否是在 python 中运行
-    bool pythonInInteractive{false};  // python 是否运行在交互模式下
-    bool pythonInJupyter{false};      // python 是否运行在 Jupyter中
+    bool runningInPython{false};      // Whether it is running in python
+    bool pythonInInteractive{false};  // Whether python runs in the interactive mode
+    bool pythonInJupyter{false};      // Whether python runs in Jupyter
 
     LatestVersionInfo latest_version_info;
     std::shared_mutex latest_version_mutex;
@@ -37,16 +39,24 @@ struct InnerSysInfo {
 
 static InnerSysInfo* g_sys_info;
 
+static int getCurrentVersionNumber() {
+    return HKU_VERSION_MAJOR * 1000000 + HKU_VERSION_MINOR * 1000 + HKU_VERSION_ALTER;
+}
+
 void sysinfo_init() {
     g_sys_info = new InnerSysInfo;
-    g_sys_info->latest_version_info.version =
-      HKU_VERSION_MAJOR * 1000000 + HKU_VERSION_MINOR * 1000 + HKU_VERSION_ALTER;
+    g_sys_info->latest_version_info.version = getCurrentVersionNumber();
 }
 void sysinfo_clean() {
-    if (g_sys_info) {
-        delete g_sys_info;
-        g_sys_info = nullptr;
-    }
+    // Intentional: the detached feedback thread in sendFeedback() may still touch g_sys_info
+    // after clean, so never delete it here (use-after-free race), and never null it either --
+    // keeping the static pointer leaves the block "still reachable" at exit, invisible to
+    // LeakSanitizer (same as StockManager::m_sm); nulling it alone would turn the block into
+    // a reported definite loss.
+    // if (g_sys_info) {
+    //     delete g_sys_info;
+    //     g_sys_info = nullptr;
+    // }
 }
 
 bool HKU_API runningInPython() {
@@ -79,8 +89,7 @@ void HKU_API setPythonInJupyter(bool injupyter) {
 }
 
 bool HKU_API CanUpgrade() {
-    int current_version =
-      HKU_VERSION_MAJOR * 1000000 + HKU_VERSION_MINOR * 1000 + HKU_VERSION_ALTER;
+    int current_version = getCurrentVersionNumber();
     std::shared_lock<std::shared_mutex> lock(g_sys_info->latest_version_mutex);
     return g_sys_info->latest_version_info.version > current_version;
 }
@@ -108,20 +117,50 @@ static boost::uuids::uuid readUUID() {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-result"
 #endif
-    boost::uuids::uuid uid;
-    std::string filename = fmt::format("{}/.hikyuu/uid", getUserDir());
-    if (existFile(filename)) {
-        FILE* fp = fopen(filename.c_str(), "rb");
-        if (fp) {
-            fread((void*)uid.data, 1, 16, fp);
-            fclose(fp);
+    boost::uuids::uuid uid = boost::uuids::nil_uuid();
+    std::string dir = fmt::format("{}/.hikyuu", getUserDir());
+    createDir(dir);
+
+    std::string filename = fmt::format("{}/uid", dir);
+
+    // 16 bytes must be read, otherwise the file is regarded as corrupted
+    auto try_read = [&filename](boost::uuids::uuid& out) -> bool {
+        if (!existFile(filename)) {
+            return false;
         }
-    } else {
-        uid = boost::uuids::random_generator()();
-        FILE* fp = fopen(filename.c_str(), "wb");
-        if (fp) {
-            fwrite(uid.data, 16, 1, fp);
-            fclose(fp);
+        FILE* fp = fopen(filename.c_str(), "rb");
+        if (!fp) {
+            return false;
+        }
+        bool ok = (fread((void*)out.data, 1, 16, fp) == 16);
+        fclose(fp);
+        if (!ok) {
+            out = boost::uuids::nil_uuid();
+        }
+        return ok;
+    };
+
+    if (!try_read(uid)) {
+        FileLock lock(fmt::format("{}.lock", filename));
+        if (!lock.waitLock(100, 100)) {
+            return uid;
+        }
+
+        if (!try_read(uid)) {
+            boost::uuids::uuid new_uid = boost::uuids::random_generator()();
+            std::string tmp_filename =
+              fmt::format("{}.tmp.{}", filename, boost::uuids::to_string(new_uid));
+            FILE* fp = fopen(tmp_filename.c_str(), "wb");
+            if (fp) {
+                size_t n = fwrite(new_uid.data, 16, 1, fp);
+                fflush(fp);
+                fclose(fp);
+                if (n == 1 && std::rename(tmp_filename.c_str(), filename.c_str()) == 0) {
+                    uid = new_uid;
+                } else {
+                    std::remove(tmp_filename.c_str());
+                }
+            }
         }
     }
 
@@ -138,15 +177,17 @@ void updateSysInfoExpiredTime(Datetime time) {
 
 void HKU_API reminderLicenseExpiration() {
     auto remain = g_sys_info->expire_time - Datetime::now();
-    // 不可使用 htr, 因为翻译已经被释放
+    // htr must not be used, because the translation has been released
     HKU_WARN_IF(remain > Days(0) && remain < Days(10), "Note! Your license will expire in {} days.",
                 remain.days());
 }
 
 void sendFeedback() {
-    boost::uuids::uuid uid = readUUID();
-    std::thread t([uid] {
+    std::thread t([] {
         try {
+            boost::uuids::uuid uid = readUUID();
+            HKU_IF_RETURN(uid.is_nil(), void());
+
             AsioHttpClient client(FEEDBACK_SERVER_ADDR, 2000);
             json req;
             req["uid"] = boost::uuids::to_string(uid);
@@ -157,24 +198,23 @@ void sendFeedback() {
             req["arch"] = getCpuArch();
             auto res = client.post("/hku/visit", req);
             json r = res.json();
+            HKU_IF_RETURN(!r.contains("data") || !r["data"].contains("last_version"), void());
             const json& data = r["data"];
 
             if (!g_sys_info || StockManager::instance().hasCancelLoad()) {
                 return;
             }
 
-            if (g_sys_info) {
-                std::unique_lock<std::shared_mutex> lock(g_sys_info->latest_version_mutex);
-                g_sys_info->latest_version_info.version = data["last_version"].get<int>();
-                if (data.contains("remark")) {
-                    g_sys_info->latest_version_info.remark = data["remark"].get<std::string>();
-                    g_sys_info->latest_version_info.release_date =
-                      Datetime(data["release_date"].get<std::string>());
-                } else {
-                    g_sys_info->latest_version_info.remark =
-                      "release note: https://hikyuu.readthedocs.io/zh-cn/latest/release.html";
-                    g_sys_info->latest_version_info.release_date = Datetime();
-                }
+            std::unique_lock<std::shared_mutex> lock(g_sys_info->latest_version_mutex);
+            g_sys_info->latest_version_info.version = data["last_version"].get<int>();
+            if (data.contains("remark") && data.contains("release_date")) {
+                g_sys_info->latest_version_info.remark = data["remark"].get<std::string>();
+                g_sys_info->latest_version_info.release_date =
+                  Datetime(data["release_date"].get<std::string>());
+            } else {
+                g_sys_info->latest_version_info.remark =
+                  "release note: https://hikyuu.readthedocs.io/zh-cn/latest/release.html";
+                g_sys_info->latest_version_info.release_date = Datetime();
             }
 
         } catch (...) {

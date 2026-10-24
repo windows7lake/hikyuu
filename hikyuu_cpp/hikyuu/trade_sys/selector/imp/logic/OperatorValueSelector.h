@@ -11,6 +11,16 @@
 
 namespace hku {
 
+/**
+ * Transforms only the weight of each selected system and keeps the order returned by the
+ * wrapped
+ * selector: the sign and the ordering are part of the expression semantics and are left
+ * to the
+ * concrete selector or the downstream filter (e.g. get_n / top-N consumers), so no
+ * re-sort, clamp
+ * or drop is done here.
+ * @ingroup Selector
+ */
 class HKU_API OperatorValueSelector : public SelectorBase {
 public:
     OperatorValueSelector();
@@ -20,11 +30,17 @@ public:
 
     virtual void _reset() override;
     virtual SelectorPtr _clone() override;
-    virtual bool isMatchAF(const AFPtr& af) override;
+
     virtual void _calculate() override;
     virtual SystemWeightList _getSelected(Datetime date) override {
         return SystemWeightList();
     }
+
+    // Forward to the wrapped selector, otherwise a nested logical selector (e.g. (a + b) + 2.0)
+    // would never learn its prototypes and select nothing
+    virtual void _addSystem(const SYSPtr& sys) override;
+    virtual void _removeAll() override;
+    virtual void bindRealToProto(const SYSPtr& real, const SYSPtr& proto) override;
 
 protected:
     SelectorPtr m_se;
@@ -32,7 +48,7 @@ protected:
 
 private:
     //============================================
-    // 序列化支持
+    // Serialization support
     //============================================
 #if HKU_SUPPORT_SERIALIZATION
     friend class boost::serialization::access;
@@ -59,6 +75,7 @@ private:
         }
     }
 
+    BOOST_SERIALIZATION_SPLIT_MEMBER()
 #endif
 };
 
@@ -74,6 +91,7 @@ public:                                                                         
         auto p = std::make_shared<classname>();                                                \
         if (m_se) {                                                                            \
             p->m_se = m_se->clone();                                                           \
+            p->m_pro_sys_list = p->m_se->getProtoSystemList();                                 \
         }                                                                                      \
         p->m_value = m_value;                                                                  \
         return p;                                                                              \

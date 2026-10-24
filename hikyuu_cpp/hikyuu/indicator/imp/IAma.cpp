@@ -5,10 +5,9 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include <cmath>
-#include "../crt/AMA.h"
 #include "../crt/CVAL.h"
-#include "../crt/SLICE.h"
 #include "IAma.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -27,11 +26,11 @@ IAma::~IAma() {}
 
 void IAma::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 1);
+        HKU_ASSERT(getParam<int>("n") >= 1 && getParam<int>("n") < INT_MAX);
     } else if ("fast_n" == name) {
-        HKU_ASSERT(getParam<int>("fast_n") >= 0);
+        HKU_ASSERT(getParam<int>("fast_n") >= 0 && getParam<int>("fast_n") < INT_MAX);
     } else if ("slow_n" == name) {
-        HKU_ASSERT(getParam<int>("slow_n") >= 0);
+        HKU_ASSERT(getParam<int>("slow_n") >= 0 && getParam<int>("slow_n") < INT_MAX);
     }
 }
 
@@ -58,15 +57,35 @@ void IAma::_calculate(const Indicator& data) {
     price_t delta = fastest - slowest;
 
     price_t prevol = 0.0, vol = 0.0, er = 1.0;
-    price_t ama = src[start];
+    bool seeded = std::isfinite(src[start]);
+    size_t bad = seeded ? 0 : 1;
+    price_t ama = seeded ? src[start] : 0.0;
     size_t first_end = start + n + 1 >= total ? total : start + n + 1;
-    _set(ama, start, 0);
-    _set(er, start, 1);
+    if (seeded) {
+        _set(ama, start, 0);
+        _set(er, start, 1);
+    } else {
+        _set(Null<price_t>(), start, 0);
+        _set(Null<price_t>(), start, 1);
+    }
     for (size_t i = start + 1; i < first_end; ++i) {
-        vol += std::fabs(src[i] - src[i - 1]);
+        if (!std::isfinite(src[i]))
+            bad++;
+        if (std::isfinite(src[i]) && std::isfinite(src[i - 1])) {
+            vol += std::fabs(src[i] - src[i - 1]);
+        }
+        if (bad > 0) {
+            if (seeded) {
+                dst0[i] = ama;
+                dst1[i] = er;
+            }
+            continue;
+        }
         er = (vol == 0.0) ? 1.0 : (src[i] - src[start]) / vol;
         if (er > 1.0)
             er = 1.0;
+        if (er < -1.0)
+            er = -1.0;
         price_t c = std::pow((std::fabs(er) * delta + slowest), 2);
         ama += c * (src[i] - ama);
         dst0[i] = ama;
@@ -75,7 +94,29 @@ void IAma::_calculate(const Indicator& data) {
 
     prevol = vol;
     for (size_t i = first_end; i < total; ++i) {
-        vol = prevol + std::fabs(src[i] - src[i - 1]) - std::fabs(src[i + 1 - n] - src[i - n]);
+        if (!std::isfinite(src[i - n - 1]))
+            bad--;
+        if (!std::isfinite(src[i]))
+            bad++;
+        price_t added = (std::isfinite(src[i]) && std::isfinite(src[i - 1]))
+                          ? std::fabs(src[i] - src[i - 1])
+                          : 0.0;
+        price_t removed = (std::isfinite(src[i - n]) && std::isfinite(src[i - n - 1]))
+                            ? std::fabs(src[i - n] - src[i - n - 1])
+                            : 0.0;
+        vol = prevol + added - removed;
+        prevol = vol;
+        if (bad > 0) {
+            if (seeded) {
+                dst0[i] = ama;
+                dst1[i] = er;
+            }
+            continue;
+        }
+        if (!seeded) {
+            seeded = true;
+            ama = src[i - n];
+        }
         er = (vol == 0.0) ? 1.0 : (src[i] - src[i - n]) / vol;
         if (er > 1.0)
             er = 1.0;
@@ -83,7 +124,6 @@ void IAma::_calculate(const Indicator& data) {
             er = -1.0;
         price_t c = std::pow((std::fabs(er) * delta + slowest), 2);
         ama += c * (src[i] - ama);
-        prevol = vol;
         dst0[i] = ama;
         dst1[i] = er;
     }
@@ -110,21 +150,97 @@ void IAma::_increment_calculate(const Indicator& data, size_t start_pos) {
     price_t slowest = 2.0 / (slow_n + 1);
     price_t delta = fastest - slowest;
 
-    price_t prevol = 0.0, vol = 0.0, er = 1.0;
-    for (size_t i = start_pos + 1 - n; i < start_pos; ++i) {
-        vol += std::fabs(src[i] - src[i - 1]);
+    size_t start = data.discard();
+    if (start >= total) {
+        return;
+    }
+    size_t first_end = start + n + 1 >= total ? total : start + n + 1;
+
+    // Rebuild the (vol, ama) state at bar start_pos - 1.
+    size_t begin = start_pos;
+    price_t vol = 0.0;
+    price_t ama = 0.0;
+    bool seeded = false;
+    size_t bad = 0;
+    if (start_pos <= start) {
+        begin = start + 1;
+        seeded = std::isfinite(src[start]);
+        bad = seeded ? 0 : 1;
+        ama = seeded ? src[start] : 0.0;
+        if (seeded) {
+            dst0[start] = ama;
+            dst1[start] = 1.0;
+        } else {
+            dst0[start] = Null<price_t>();
+            dst1[start] = Null<price_t>();
+        }
+    } else {
+        size_t win_begin = start_pos >= start + n + 1 ? start_pos - n : start + 1;
+        for (size_t i = win_begin; i < start_pos; ++i) {
+            if (std::isfinite(src[i]) && std::isfinite(src[i - 1])) {
+                vol += std::fabs(src[i] - src[i - 1]);
+            }
+        }
+        ama = dst0[start_pos - 1];
+        seeded = std::isfinite(ama);
+        size_t wstart = start_pos >= start + n + 1 ? start_pos - n - 1 : start;
+        for (size_t i = wstart; i < start_pos; ++i) {
+            if (!std::isfinite(src[i]))
+                bad++;
+        }
     }
 
-    price_t ama = dst0[start_pos - 1];
-    er = (vol == 0.0) ? 1.0 : (src[start_pos - 1] - src[start_pos - 1 - n]) / vol;
-    if (er > 1.0)
-        er = 1.0;
-    if (er < -1.0)
-        er = -1.0;
+    // resume the warm-up phase while the n-window is not full yet
+    price_t er = (seeded && start_pos > start) ? dst1[start_pos - 1] : 1.0;
+    for (size_t i = begin; i < first_end; ++i) {
+        if (!std::isfinite(src[i]))
+            bad++;
+        if (std::isfinite(src[i]) && std::isfinite(src[i - 1])) {
+            vol += std::fabs(src[i] - src[i - 1]);
+        }
+        if (bad > 0) {
+            if (seeded) {
+                dst0[i] = ama;
+                dst1[i] = er;
+            }
+            continue;
+        }
+        er = (vol == 0.0) ? 1.0 : (src[i] - src[start]) / vol;
+        if (er > 1.0)
+            er = 1.0;
+        if (er < -1.0)
+            er = -1.0;
+        price_t c = std::pow((std::fabs(er) * delta + slowest), 2);
+        ama += c * (src[i] - ama);
+        dst0[i] = ama;
+        dst1[i] = er;
+    }
 
-    prevol = vol;
-    for (size_t i = start_pos; i < total; ++i) {
-        vol = prevol + std::fabs(src[i] - src[i - 1]) - std::fabs(src[i + 1 - n] - src[i - n]);
+    price_t prevol = vol;
+    for (size_t i = std::max(begin, first_end); i < total; ++i) {
+        if (!std::isfinite(src[i - n - 1]))
+            bad--;
+        if (!std::isfinite(src[i]))
+            bad++;
+        price_t added = (std::isfinite(src[i]) && std::isfinite(src[i - 1]))
+                          ? std::fabs(src[i] - src[i - 1])
+                          : 0.0;
+        price_t removed = (std::isfinite(src[i - n]) && std::isfinite(src[i - n - 1]))
+                            ? std::fabs(src[i - n] - src[i - n - 1])
+                            : 0.0;
+        vol = prevol + added - removed;
+        prevol = vol;
+        if (bad > 0) {
+            if (seeded) {
+                dst0[i] = ama;
+                dst1[i] = er;
+            }
+            continue;
+        }
+        if (!seeded) {
+            seeded = true;
+            ama = src[i - n];
+        }
         er = (vol == 0.0) ? 1.0 : (src[i] - src[i - n]) / vol;
         if (er > 1.0)
             er = 1.0;
@@ -132,7 +248,6 @@ void IAma::_increment_calculate(const Indicator& data, size_t start_pos) {
             er = -1.0;
         price_t c = std::pow((std::fabs(er) * delta + slowest), 2);
         ama += c * (src[i] - ama);
-        prevol = vol;
         dst0[i] = ama;
         dst1[i] = er;
     }
@@ -151,13 +266,74 @@ void IAma::_dyn_one_circle(const Indicator& ind, size_t curPos, int n, int fast_
         slow_n = 0;
     }
 
-    Indicator slice = SLICE(ind, 0, curPos + 1);
-    Indicator ama = AMA(slice, n, fast_n, slow_n);
-    if (ama.size() > 0) {
-        size_t index = ama.size() - 1;
-        _set(ama.get(index, 0), curPos, 0);
-        _set(ama.get(index, 1), curPos, 1);
+    // Intentional: replicate the static AMA two-phase recursion on the prefix [0, curPos] with raw
+    // scalars, bitwise identical to AMA(SLICE(ind, 0, curPos + 1)) but without per-bar allocations.
+    auto const* src = ind.data();
+    size_t total = curPos + 1;
+
+    price_t fastest = 2.0 / (fast_n + 1);
+    price_t slowest = 2.0 / (slow_n + 1);
+    price_t delta = fastest - slowest;
+
+    price_t prevol = 0.0, vol = 0.0, er = 1.0;
+    size_t start = ind.discard();
+    bool seeded = std::isfinite(src[start]);
+    size_t bad = seeded ? 0 : 1;
+    price_t ama = seeded ? src[start] : 0.0;
+    size_t first_end = start + n + 1 >= total ? total : start + n + 1;
+    for (size_t i = start + 1; i < first_end; ++i) {
+        if (!std::isfinite(src[i]))
+            bad++;
+        if (std::isfinite(src[i]) && std::isfinite(src[i - 1])) {
+            vol += std::fabs(src[i] - src[i - 1]);
+        }
+        if (bad > 0)
+            continue;
+        er = (vol == 0.0) ? 1.0 : (src[i] - src[start]) / vol;
+        if (er > 1.0)
+            er = 1.0;
+        if (er < -1.0)
+            er = -1.0;
+        price_t c = std::pow((std::fabs(er) * delta + slowest), 2);
+        ama += c * (src[i] - ama);
     }
+
+    prevol = vol;
+    for (size_t i = first_end; i < total; ++i) {
+        if (!std::isfinite(src[i - n - 1]))
+            bad--;
+        if (!std::isfinite(src[i]))
+            bad++;
+        price_t added = (std::isfinite(src[i]) && std::isfinite(src[i - 1]))
+                          ? std::fabs(src[i] - src[i - 1])
+                          : 0.0;
+        price_t removed = (std::isfinite(src[i - n]) && std::isfinite(src[i - n - 1]))
+                            ? std::fabs(src[i - n] - src[i - n - 1])
+                            : 0.0;
+        vol = prevol + added - removed;
+        prevol = vol;
+        if (bad > 0)
+            continue;
+        if (!seeded) {
+            seeded = true;
+            ama = src[i - n];
+        }
+        er = (vol == 0.0) ? 1.0 : (src[i] - src[i - n]) / vol;
+        if (er > 1.0)
+            er = 1.0;
+        if (er < -1.0)
+            er = -1.0;
+        price_t c = std::pow((std::fabs(er) * delta + slowest), 2);
+        ama += c * (src[i] - ama);
+    }
+
+    if (!seeded) {
+        _set(Null<price_t>(), curPos, 0);
+        _set(Null<price_t>(), curPos, 1);
+        return;
+    }
+    _set(ama, curPos, 0);
+    _set(er, curPos, 1);
 }
 
 void IAma::_dyn_calculate(const Indicator& ind) {

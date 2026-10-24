@@ -6,6 +6,7 @@
  */
 
 #include "hikyuu/trade_sys/multifactor/build_in.h"
+#include "hikyuu/trade_sys/multifactor/buildin_scfilter.h"
 #include "MultiFactorSelector.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -15,17 +16,19 @@ BOOST_CLASS_EXPORT(hku::MultiFactorSelector)
 namespace hku {
 
 MultiFactorSelector::MultiFactorSelector() : SelectorBase("SE_MultiFactor") {
-    setParam<bool>("only_should_buy", false);  // 只选择同时发出买入信号的系统
-    setParam<bool>("ignore_null", true);       // 忽略 MF 中 score 值为 nan 的证券
-    setParam<bool>("ignore_le_zero", false);   // 忽略 MF 中 score 值小于等于 0 的证券
+    setParam<bool>("only_should_buy", false);  // Select the systems that also issue a buy signal
+    setParam<bool>("ignore_null", true);       // Ignore the securities whose score is nan in the MF
+    setParam<bool>("ignore_le_zero", false);  // Ignore the securities whose score is <= 0 in the MF
     setParam<int>("topn", 10);
-    setParam<bool>("reverse", false);  // 逆序，此时 topn 代表最末尾的几个，相当于按最低值排序
+    setParam<bool>("reverse", false);  // Reverse order, topn means the last few (lowest values)
     setParam<int>("ic_n", 5);
     setParam<int>("ic_rolling_n", 120);
     setParam<Stock>("ref_stk", Stock());
     setParam<bool>("use_spearman", true);
     setParam<string>("mode", "MF_ICIRWeight");
-    setParam<int>("mf_recover_type", KQuery::INVALID_RECOVER_TYPE);  // 指定MF的计算时的复权方式
+    setParam<int>("mf_recover_type",
+                  KQuery::INVALID_RECOVER_TYPE);    // The MF calculation adjustment type
+    setParam<bool>("keep_mf_recover_type", false);  // Keep the existing recover type of the MF
 }
 
 MultiFactorSelector::MultiFactorSelector(const MFPtr& mf, int topn)
@@ -47,7 +50,9 @@ MultiFactorSelector::MultiFactorSelector(const MFPtr& mf, int topn)
     }
     setParam<bool>("use_spearman", mf->getParam<bool>("use_spearman"));
     setParam<string>("mode", "CUSTOM");
-    setParam<int>("mf_recover_type", KQuery::INVALID_RECOVER_TYPE);  // 指定MF的计算时的复权方式
+    setParam<int>("mf_recover_type",
+                  KQuery::INVALID_RECOVER_TYPE);    // The MF calculation adjustment type
+    setParam<bool>("keep_mf_recover_type", false);  // Keep the existing recover type of the MF
     setFactorSet(mf->getRefFactorSet());
 }
 
@@ -62,6 +67,10 @@ void MultiFactorSelector::_checkParam(const string& name) const {
         auto mode = getParam<string>("mode");
         HKU_ASSERT("MF_ICIRWeight" == mode || "MF_ICWeight" == mode || "MF_EqualWeight" == mode ||
                    "CUSTOM" == mode);
+    } else if ("mf_recover_type" == name) {
+        int recover_type = getParam<int>("mf_recover_type");
+        HKU_ASSERT(recover_type >= KQuery::NO_RECOVER &&
+                   recover_type <= KQuery::INVALID_RECOVER_TYPE);
     }
 }
 
@@ -74,14 +83,12 @@ void MultiFactorSelector::_reset() {
 
 SelectorPtr MultiFactorSelector::_clone() {
     auto p = make_shared<MultiFactorSelector>();
-    p->m_mf = m_mf->clone();
-    p->m_stk_sys_dict = m_stk_sys_dict;
+    if (m_mf) {
+        p->m_mf = m_mf->clone();
+    }
+    // m_stk_sys_dict references the original system instances, do not carry it into the clone
     p->m_factorset = m_factorset;
     return p;
-}
-
-bool MultiFactorSelector::isMatchAF(const AFPtr& af) {
-    return true;
 }
 
 ScoreRecordList MultiFactorSelector::filterOnlyShouldBuy(Datetime date,
@@ -91,8 +98,9 @@ ScoreRecordList MultiFactorSelector::filterOnlyShouldBuy(Datetime date,
     size_t i = 0, cnt = 0, total = scores.size();
     while (i < total && cnt < topn) {
         auto const& sc = scores[i];
-        auto sys = m_stk_sys_dict[sc.stock];
-        if (sys->getSG()->shouldBuy(date)) {
+        auto iter = m_stk_sys_dict.find(sc.stock);
+        if (iter != m_stk_sys_dict.end() && iter->second &&
+            iter->second->getSG()->shouldBuy(date)) {
             ret.emplace_back(sc);
             cnt++;
         }
@@ -105,9 +113,24 @@ ScoreRecordList MultiFactorSelector::filterTopNReverse(Datetime date,
                                                        const ScoreRecordList& raw_scores,
                                                        size_t topn, bool only_should_buy,
                                                        bool ignore_null) {
+    // Filter before the truncation, so that the filtered-out ones do not consume the topn quota
+    ScoreRecordList candidates;
+    if (only_should_buy) {
+        candidates.reserve(raw_scores.size());
+        for (const auto& sc : raw_scores) {
+            auto iter = m_stk_sys_dict.find(sc.stock);
+            if (iter != m_stk_sys_dict.end() && iter->second &&
+                iter->second->getSG()->shouldBuy(date)) {
+                candidates.emplace_back(sc);
+            }
+        }
+    } else {
+        candidates = raw_scores;
+    }
+
     ScoreRecordList scores;
-    auto iter = raw_scores.rbegin();
-    for (size_t count = 0; count < topn && iter != raw_scores.rend(); ++iter) {
+    auto iter = candidates.rbegin();
+    for (size_t count = 0; count < topn && iter != candidates.rend(); ++iter) {
         if (!std::isnan(iter->value)) {
             scores.emplace_back(*iter);
             count++;
@@ -115,8 +138,8 @@ ScoreRecordList MultiFactorSelector::filterTopNReverse(Datetime date,
     }
     if (scores.size() < topn && !ignore_null) {
         size_t lack = topn - scores.size();
-        iter = raw_scores.rbegin();
-        for (size_t count = 0; count < lack && iter != raw_scores.rend(); ++iter) {
+        iter = candidates.rbegin();
+        for (size_t count = 0; count < lack && iter != candidates.rend(); ++iter) {
             if (std::isnan(iter->value)) {
                 scores.emplace_back(*iter);
                 count++;
@@ -125,10 +148,6 @@ ScoreRecordList MultiFactorSelector::filterTopNReverse(Datetime date,
             }
         }
     }
-    if (only_should_buy) {
-        scores = filterOnlyShouldBuy(date, scores, topn);
-    }
-
     return scores;
 }
 
@@ -144,18 +163,34 @@ ScoreRecordList MultiFactorSelector::filterTopN(Datetime date, const ScoreRecord
 }
 
 SystemWeightList MultiFactorSelector::_getSelected(Datetime date) {
+    HKU_CHECK(m_mf, "MF is not set or the selector has not been calculated!");
+
     bool ignore_null = getParam<bool>("ignore_null");
     bool ignore_le_zero = getParam<bool>("ignore_le_zero");
     bool only_should_buy = getParam<bool>("only_should_buy");
     bool reverse = getParam<bool>("reverse");
 
-    ScoreRecordList scores = m_mf->getScores(
-      date, 0, Null<size_t>(), [ignore_null, ignore_le_zero](const ScoreRecord& sc) {
-          return !(ignore_null && std::isnan(sc.value)) && !(ignore_le_zero && sc.value <= 0.0);
-      });
+    // ignore_null / ignore_le_zero are expressed as score filters, so the MF drops the filtered
+    // records while copying instead of copying the whole cross-section first
+    ScoreRecordList scores;
+    if (ignore_null) {
+        ScoresFilterPtr flag_filter = SCFilter_IgnoreNan();
+        if (ignore_le_zero) {
+            flag_filter = flag_filter | SCFilter_LessOrEqualValue(0.0);
+        }
+        scores = m_mf->getScores(date, 0, Null<size_t>(), flag_filter);
+    } else if (ignore_le_zero) {
+        // Keep the predicate: SCFilter_LessOrEqualValue also drops NaN, which must survive when
+        // ignore_null is false (the reverse path re-adds it on purpose)
+        scores = m_mf->getScores(date, 0, Null<size_t>(),
+                                 [](const ScoreRecord& sc) { return !(sc.value <= 0.0); });
+    } else {
+        scores = m_mf->getScores(date, 0, Null<size_t>());
+    }
 
-    // 推荐用 MultiFactorSelector2 全部使用filter，这里仅兼容旧版接口
-    // 应用用户自定义的评分过滤器（支持 set_scores_filter / add_scores_filter）
+    // MultiFactorSelector2 with filters is recommended; this is kept for the old interface
+    // compatibility only Apply the user-defined score filters (set_scores_filter /
+    // add_scores_filter are supported)
     if (m_sc_filter) {
         scores = m_sc_filter->filter(scores, date, m_query);
     }
@@ -167,22 +202,30 @@ SystemWeightList MultiFactorSelector::_getSelected(Datetime date) {
     }
 
     if (!reverse) {
-        // 正序排列
+        // Sort in the ascending order
         scores = filterTopN(date, scores, topn, only_should_buy);
 
     } else {
-        // 倒序排列
+        // Sort in the descending order
         scores = filterTopNReverse(date, scores, topn, only_should_buy, ignore_null);
     }
 
     SystemWeightList ret;
     for (const auto& sc : scores) {
-        ret.emplace_back(m_stk_sys_dict[sc.stock], sc.value);
+        auto iter = m_stk_sys_dict.find(sc.stock);
+        if (iter == m_stk_sys_dict.end() || !iter->second) {
+            continue;
+        }
+        ret.emplace_back(iter->second, sc.value);
     }
     return ret;
 }
 
 void MultiFactorSelector::_calculate() {
+    // Drop the previous mapping first: a second calculate (a new query, a new stock pool, a
+    // portfolio re-run) must not keep the systems of the earlier run
+    m_stk_sys_dict.clear();
+
     Stock ref_stk = getParam<Stock>("ref_stk");
 
     StockList stks;
@@ -232,8 +275,12 @@ void MultiFactorSelector::_calculate() {
     m_mf->calculate();
 
     for (const auto& sys : m_real_sys_list) {
-        m_stk_sys_dict.insert({sys->getStock(), sys});
+        m_stk_sys_dict.insert_or_assign(sys->getStock(), sys);
     }
+}
+
+SelectorPtr HKU_API SE_MultiFactor() {
+    return make_shared<MultiFactorSelector>();
 }
 
 SelectorPtr HKU_API SE_MultiFactor(const MFPtr& mf, int topn) {

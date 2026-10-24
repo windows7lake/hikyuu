@@ -5,6 +5,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "../test_config.h"
 #include <fstream>
 #include <hikyuu/StockManager.h>
@@ -12,6 +13,7 @@
 #include <hikyuu/indicator/crt/CVAL.h>
 #include <hikyuu/indicator/crt/KDATA.h>
 #include <hikyuu/indicator/crt/PRICELIST.h>
+#include <hikyuu/indicator/crt/SLICE.h>
 #include <hikyuu/indicator/crt/MA.h>
 
 using namespace hku;
@@ -22,13 +24,16 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_EMA") {
     PriceList d;
     for (int i = 0; i < 30; ++i) {
         d.push_back(i);
     }
 
+    /** @arg n = INT_MAX is rejected (would overflow the 2.0 / (n + 1) expression) */
+    CHECK_THROWS_AS(EMA(INT_MAX), std::exception);
+    CHECK_THROWS_AS(EMA(0), std::exception);
     /** @arg n = 1 */
     Indicator data = PRICELIST(d);
     Indicator ema = EMA(data, 1);
@@ -68,7 +73,7 @@ TEST_CASE("test_EMA") {
     }
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_EMA_dyn") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-30));
@@ -105,6 +110,58 @@ TEST_CASE("test_EMA_dyn") {
     for (size_t i = expect.discard(); i < expect.size(); i++) {
         CHECK_EQ(expect[i], doctest::Approx(result[i]));
     }
+
+    /** @arg The dynamic n varies per bar: value at bar i must equal EMA of the [0, i] prefix */
+    PriceList raw;
+    for (int i = 0; i < 12; ++i) {
+        raw.push_back(10.0 + i * i * 0.37);
+    }
+    Indicator src = PRICELIST(raw);
+    PriceList n_values;
+    for (int i = 0; i < 12; ++i) {
+        n_values.push_back(i % 3 == 0 ? 2.0 : (i % 3 == 1 ? 5.0 : 9.0));
+    }
+    result = EMA(src, IndParam(PRICELIST(n_values)));
+    CHECK_EQ(result.size(), src.size());
+    for (size_t i = 0; i < src.size(); ++i) {
+        Indicator expect_prefix = EMA(SLICE(src, 0, i + 1), int(n_values[i]));
+        CHECK_EQ(expect_prefix[expect_prefix.size() - 1], doctest::Approx(result[i]));
+    }
+
+    /** @arg The first valid bar is the seed value itself */
+    CHECK_EQ(result[0], doctest::Approx(raw[0]));
+}
+
+/** @par Test points: NaN input at bar i holds the previous EMA (no permanent contamination) */
+TEST_CASE("test_EMA_nan_hold") {
+    price_t nan = Null<price_t>();
+    Indicator data = PRICELIST({1.0, 2.0, nan, 4.0, 5.0});
+    Indicator ret = EMA(data, 2);
+    // alpha = 2/(2+1) = 2/3; ret[0]=1.0, ret[1]=(2-1)*2/3+1=5/3
+    // ret[2]: src NaN -> hold ret[1]
+    // ret[3]: (4-5/3)*2/3+5/3 = 29/9
+    // ret[4]: (5-29/9)*2/3+29/9 = 119/27
+    CHECK_EQ(ret[0], 1.0);
+    CHECK_EQ(ret[1], doctest::Approx(5.0 / 3.0));
+    CHECK_EQ(ret[2], doctest::Approx(5.0 / 3.0));
+    CHECK_EQ(ret[3], doctest::Approx(29.0 / 9.0));
+    CHECK_EQ(ret[4], doctest::Approx(119.0 / 27.0));
+
+    /** @arg Consecutive NaNs also hold, first valid after them re-seeds from that value */
+    Indicator data2 = PRICELIST({1.0, nan, nan, 4.0});
+    Indicator ret2 = EMA(data2, 2);
+    CHECK_EQ(ret2[0], 1.0);
+    CHECK_EQ(ret2[1], 1.0);                                             // hold
+    CHECK_EQ(ret2[2], 1.0);                                             // hold again
+    CHECK_EQ(ret2[3], doctest::Approx((4.0 - 1.0) * 2.0 / 3.0 + 1.0));  // normal update
+
+    /** @arg Inf input is treated as non-finite and also holds (AGENTS.md contract) */
+    price_t inf_v = std::numeric_limits<price_t>::infinity();
+    Indicator data3 = PRICELIST({1.0, inf_v, 4.0});
+    Indicator ret3 = EMA(data3, 2);
+    CHECK_EQ(ret3[0], 1.0);
+    CHECK_EQ(ret3[1], 1.0);                                             // hold on Inf
+    CHECK_EQ(ret3[2], doctest::Approx((4.0 - 1.0) * 2.0 / 3.0 + 1.0));  // normal update resumes
 }
 
 //-----------------------------------------------------------------------------
@@ -115,7 +172,7 @@ TEST_CASE("test_EMA_benchmark") {
     Stock stock = getStock("sh000001");
     KData kdata = stock.getKData(KQuery(0));
     Indicator c = kdata.close();
-    int cycle = 1000;  // 测试循环次数
+    int cycle = 1000;  // Test loop count
 
     {
         BENCHMARK_TIME_MSG(test_EMA_benchmark, cycle, fmt::format("data len: {}", c.size()));
@@ -132,7 +189,7 @@ TEST_CASE("test_EMA_benchmark") {
 // test export
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_EMA_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());
@@ -162,5 +219,33 @@ TEST_CASE("test_EMA_export") {
     }
 }
 #endif /* #if HKU_SUPPORT_SERIALIZATION */
+
+/** @par Test points */
+TEST_CASE("test_EMA_increment_shift_boundary") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh600000");
+    KData k_old = stock.getKData(KQuery(0, 20));
+    KData k_new = stock.getKData(KQuery(16, 26));  // the window moves on, keeping four old bars
+    CHECK_EQ(k_old.size(), 20);
+    CHECK_EQ(k_new.size(), 10);
+
+    // EMA over an input with a discard: the cached valid region of the node ends exactly at the
+    // last bar the shift may keep, so the incremental path has no computed value to seed from
+    auto make = []() { return EMA(MA(CLOSE(), 5), 3); };
+
+    Indicator expect = make();
+    expect.setContext(k_new);
+
+    Indicator got = make();
+    got.setContext(k_old);
+    got.setContext(k_new);
+
+    /** @arg the shifted window keeps the same values as a fresh calculation */
+    CHECK_EQ(got.size(), expect.size());
+    CHECK_EQ(got.discard(), expect.discard());
+    for (size_t i = expect.discard(); i < expect.size(); ++i) {
+        CHECK_EQ(got[i], doctest::Approx(expect[i]).epsilon(0.00001));
+    }
+}
 
 /** @} */

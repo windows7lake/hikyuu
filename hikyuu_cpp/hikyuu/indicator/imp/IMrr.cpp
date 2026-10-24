@@ -5,6 +5,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IMrr.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -12,6 +13,41 @@ BOOST_CLASS_EXPORT(hku::IMrr)
 #endif
 
 namespace hku {
+
+namespace {
+// One-pass accumulator for MRR over a window [window_left..i]: run_min is the accumulated
+// minimum of the valid points, max_rr is the maximum of src[j]/run_min_j - 1 within the window.
+// NaN and non-positive values are skipped uniformly across the static warmup, the full-window
+// branch and the incremental scan (ST-010: the three paths previously diverged on how invalid
+// inputs were treated).
+struct MrrAccum {
+    Indicator::value_t run_min = 0.0;
+    Indicator::value_t max_rr = 0.0;
+    bool has_valid = false;
+
+    void feed(Indicator::value_t v) {
+        if (!std::isfinite(v) || v <= 0.0) {
+            return;
+        }
+        if (!has_valid) {
+            run_min = v;
+            has_valid = true;
+            return;
+        }
+        if (v < run_min) {
+            run_min = v;
+        }
+        Indicator::value_t rr = v / run_min - 1.0;
+        if (rr > max_rr) {
+            max_rr = rr;
+        }
+    }
+
+    Indicator::value_t result() const {
+        return max_rr * 100.0;
+    }
+};
+}  // namespace
 
 IMrr::IMrr() : IndicatorImp("MRR", 1) {
     setParam<int>("n", 0);
@@ -21,7 +57,7 @@ IMrr::~IMrr() {}
 
 void IMrr::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 0);
+        HKU_ASSERT(getParam<int>("n") >= 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -40,42 +76,27 @@ void IMrr::_calculate(const Indicator& ind) {
 
     if (n == 1) {
         for (size_t i = m_discard; i < total; ++i) {
-            dst[i] = 0.0;
+            dst[i] = (!std::isfinite(src[i]) || src[i] <= 0.0) ? Null<value_t>() : 0.0;
         }
         return;
     }
 
-    if (n == total - m_discard) {
-        value_t pre_min = src[m_discard];
-        value_t max_rr = 0.0;
-        for (size_t i = m_discard; i < total; i++) {
-            if (src[i] < pre_min || pre_min == 0.) {
-                pre_min = src[i];
-            }
-            value_t rr = (src[i] <= pre_min) ? 0.0 : (src[i] / pre_min - 1.0);
-            if (rr > max_rr) {
-                max_rr = rr;
-            }
-            dst[i] = max_rr * 100.0;
+    // Warmup (window_left = m_discard, growing prefix), then delegate the sliding tail to
+    // _increment_calculate. When n == total - m_discard the warmup covers everything and the
+    // incremental call is skipped.
+    MrrAccum acc;
+    size_t warmup_end = m_discard + n;
+    for (size_t i = m_discard; i < warmup_end; ++i) {
+        if (!std::isfinite(src[i]) || src[i] <= 0.0) {
+            dst[i] = Null<value_t>();
+            continue;
         }
-        return;
+        acc.feed(src[i]);
+        dst[i] = acc.result();
     }
 
-    value_t pre_min = src[m_discard];
-    value_t max_rr = 0.0;
-    for (size_t i = m_discard; i < m_discard + n; ++i) {
-        if (src[i] < pre_min || pre_min == 0.) {
-            pre_min = src[i];
-        }
-        value_t rr = (src[i] <= pre_min) ? 0.0 : (src[i] / pre_min - 1.0);
-        if (rr > max_rr) {
-            max_rr = rr;
-        }
-        dst[i] = max_rr * 100.0;
-    }
-
-    if (m_discard + n < total) {
-        _increment_calculate(ind, m_discard + n);
+    if (warmup_end < total) {
+        _increment_calculate(ind, warmup_end);
     }
 }
 
@@ -93,46 +114,27 @@ void IMrr::_increment_calculate(const Indicator& ind, size_t start_pos) {
     auto const* src = ind.data();
     auto* dst = this->data();
 
-    // 标准最大盈利比率语义: rr_j = src[j] / run_min_j - 1,
-    // 其中 run_min_j = min(src[window_left..j]) 为到 j 为止的累计最小值。
-    // 原实现错误地用窗口全局 min 作为所有点的盈利基准, 当窗口最低点出现在
-    // 最高点之后时会引入未来数据(look-ahead bias), 高估盈利比率。
-    // 此处放弃原 O(1) 快路径状态机(其 current_rr > window_max_rr 判断在标准
-    // MRR 语义下原理性不成立), 退化为每点 O(n) 暴力扫描, 用 run_min 基准保证
-    // 正确性。与 IMdd 修复对称。
+    // The standard maximum rise rate semantics: rr_j = src[j] / run_min_j - 1, where
+    // run_min_j = min(src[window_left..j]) is the accumulated minimum up to j.
+    // The original implementation wrongly used the global minimum of the window as the rise base
+    // of all the points; when the lowest point of the window appears after the highest point it
+    // introduces the look-ahead bias and overestimates the rise rate.
+    // Here the original O(1) fast path state machine is abandoned (its judgment of
+    // current_rr > window_max_rr does not hold in principle under the standard MRR semantics)
+    // and it degenerates to an O(n) brute force scan per point, using the run_min base to
+    // guarantee the correctness. It is symmetric to the IMdd fix.
     for (size_t i = start_pos; i < total; ++i) {
-        Indicator::value_t current_price = src[i];
-        if (std::isnan(current_price) || current_price <= 0.0) {
-            // 无效点不写 dst[i], 保持原值, 与原语义一致
+        if (!std::isfinite(src[i]) || src[i] <= 0.0) {
+            dst[i] = Null<value_t>();
             continue;
         }
-
         size_t window_left = i + 1 - n;
-        Indicator::value_t run_min = 0.0;  // 首个有效点赋初值, 避免 NaN 污染比较
-        Indicator::value_t window_max_rr = 0.0;
-        bool has_valid = false;
+        MrrAccum acc;
         for (size_t j = window_left; j <= i; ++j) {
-            Indicator::value_t v = src[j];
-            if (std::isnan(v) || v <= 0.0) {
-                continue;
-            }
-            if (!has_valid) {
-                run_min = v;  // 首个有效点初始化 run_min
-                has_valid = true;
-                continue;  // 首点 rr = v/v - 1 = 0, 跳过
-            }
-            if (v < run_min) {
-                run_min = v;
-            }
-            // run_min 必然 > 0(数据约束为正), 除法安全
-            Indicator::value_t rr = v / run_min - 1.0;
-            if (rr > window_max_rr) {
-                window_max_rr = rr;
-            }
+            acc.feed(src[j]);
         }
-
-        if (has_valid) {
-            dst[i] = window_max_rr * 100.0;
+        if (acc.has_valid) {
+            dst[i] = acc.result();
         }
     }
 }

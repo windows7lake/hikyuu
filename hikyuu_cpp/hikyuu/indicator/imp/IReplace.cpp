@@ -1,10 +1,11 @@
 /*
  * IReplace.cpp
  *
- *  Created on: 2019年4月2日
+ *  Created on: 2019-4-2
  *      Author: fasiondog
  */
 
+#include "hikyuu/utilities/arithmetic.h"
 #include "IReplace.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -17,7 +18,7 @@ IReplace::IReplace() : IndicatorImp("REPLACE", 1) {
     setParam<double>("old_value", Null<double>());
     setParam<double>("new_value", 0.0);
     setParam<bool>("ignore_discard",
-                   false);  // 忽略传入指标的 discard, 即对所有数据进行替换处理
+                   false);  // Ignore the discard of the passed indicator, i.e. replace all the data
 }
 
 IReplace::~IReplace() {}
@@ -48,19 +49,17 @@ void IReplace::_calculate(const Indicator &data) {
             dst[i] = std::isnan(src[i]) ? new_value : src[i];
         }
     } else {
-        value_t epsilon = std::numeric_limits<value_t>::epsilon();
         for (size_t i = m_discard; i < total; ++i) {
-            dst[i] = (std::fabs(src[i] - old_value) < epsilon) ? new_value : src[i];
+            dst[i] = nearly_equal(src[i], old_value) ? new_value : src[i];
         }
     }
 
-    // 重新更新 m_discard
+    // Update m_discard again
     updateDiscard();
 }
 
 Indicator HKU_API REPLACE(double old_value, double new_value, bool ignore_discard) {
-    Indicator::value_t epsilon = std::numeric_limits<Indicator::value_t>::epsilon();
-    HKU_WARN_IF(std::fabs(old_value - new_value) < epsilon,
+    HKU_WARN_IF(nearly_equal(old_value, new_value),
                 "The value to be replaced is equal to the replacement value! Are you sure?");
     auto p = make_shared<IReplace>();
     p->setParam<double>("old_value", old_value);

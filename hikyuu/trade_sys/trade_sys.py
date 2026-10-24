@@ -2,8 +2,8 @@
 
 from hikyuu.core import (
     System, SystemPart, ConditionBase, EnvironmentBase, MoneyManagerBase,
-    ProfitGoalBase, SelectorBase, SignalBase, SlippageBase, StoplossBase, AllocateFundsBase,
-    MultiFactorBase, ScoresFilterBase, NormalizeBase
+    AllocateFundsBase, ProfitGoalBase, SelectorBase, SignalBase, SlippageBase, StoplossBase,
+    MultiFactorBase, ScoresFilterBase, NormalizeBase, MultiSystem
 )
 
 
@@ -15,11 +15,11 @@ def part_iter(self):
 ConditionBase.__iter__ = part_iter
 
 
-def part_init(self, name='', params={}):
+def part_init(self, name='', params=None):
     super(self.__class__, self).__init__(name)
     self._name = name
-    self._params = params
-    for k, v in params.items():
+    self._params = params or {}
+    for k, v in self._params.items():
         self.set_param(k, v)
 
 
@@ -44,22 +44,25 @@ System.PROFITGOAL = System.Part.PROFITGOAL
 System.SLIPPAGE = System.Part.SLIPPAGE
 System.INVALID = System.Part.INVALID
 
+# Backward compatibility: the old Portfolio component was merged into MultiSystem
+Portfolio = MultiSystem
+
 
 # ------------------------------------------------------------------
 # condition
 # ------------------------------------------------------------------
-def crtCN(func, params={}, name='crtCN'):
+def crtCN(func, params=None, name='crtCN'):
     """
-    快速创建系统有效条件
+    Quickly create a system validity condition
 
-    :param func: 系统有效条件函数
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :return: 自定义系统有效条件实例
+    :param func: the system validity condition function
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :return: the custom system validity condition instance
     """
     meta_x = type(name, (ConditionBase, ), {'__init__': part_init, '_clone': part_clone})
     meta_x._calculate = func
-    # 强制引入全局空间，避免 hub 使用是自定义继承丢失虚拟函数接口
+    # Force importing the global namespace, to avoid losing the virtual function interfaces of the custom inheritance when used by the hub
     ret = meta_x(name, params)
     globals().update(dict(_=ret))
     return ret
@@ -68,14 +71,14 @@ def crtCN(func, params={}, name='crtCN'):
 # ------------------------------------------------------------------
 # environment
 # ------------------------------------------------------------------
-def crtEV(func, params={}, name='crtEV'):
+def crtEV(func, params=None, name='crtEV'):
     """
-    快速创建市场环境判断策略
+    Quickly create a market environment strategy
 
-    :param func: 市场环境判断策略函数
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :return: 自定义市场环境判断策略实例
+    :param func: the market environment strategy function
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :return: the custom market environment strategy instance
     """
     meta_x = type(name, (EnvironmentBase, ), {'__init__': part_init, '_clone': part_clone})
     meta_x._calculate = func
@@ -87,17 +90,17 @@ def crtEV(func, params={}, name='crtEV'):
 # ------------------------------------------------------------------
 # moneymanager
 # ------------------------------------------------------------------
-def crtMM(get_buy_num, get_sell_num=None, params={}, name='crtMM', buy_notify=None, sell_notify=None):
+def crtMM(get_buy_num, get_sell_num=None, params=None, name='crtMM', buy_notify=None, sell_notify=None):
     """
-    快速创建资金管理策略
+    Quickly create a money management strategy
 
-    :param get_buy_num: 买入数量接口
-    :param get_sell_num: 卖出数量接口, 默认为 None(卖出全部)
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :param buy_notify: 接收买入交易记录通知
-    :param sell_notify: 接收卖出交易记录通知
-    :return: 自定义资金管理策略实例
+    :param get_buy_num: the interface to get the buy number
+    :param get_sell_num: the interface to get the sell number, defaults to None (sell all)
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :param buy_notify: receive the notification of the buy trade records
+    :param sell_notify: receive the notification of the sell trade records
+    :return: the custom money management strategy instance
     """
     meta_x = type(name, (MoneyManagerBase, ), {'__init__': part_init, '_clone': part_clone})
     meta_x._get_buy_num = get_buy_num
@@ -115,26 +118,26 @@ def crtMM(get_buy_num, get_sell_num=None, params={}, name='crtMM', buy_notify=No
 # ------------------------------------------------------------------
 # profitgoal
 # ------------------------------------------------------------------
-def crtPG(get_goal, calculate=None, params={}, name='crtPG', buy_notify=None, sell_notify=None):
+def crtPG(get_goal, calculate=None, params=None, name='crtPG', buy_notify=None, sell_notify=None):
     """
-    快速创建盈利目标策略
+    Quickly create a profit goal strategy
 
-    :param get_goal: 获取目标价格接口
-    :param calculate: 内部计算接口（在指定交易标的时被调用）
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :param buy_notify: 接收买入交易记录通知
-    :param sell_notify: 接收卖出交易记录通知
-    :return: 盈利目标策略实例
+    :param get_goal: the interface to get the goal price
+    :param calculate: the internal calculation interface (called when the trading object is specified)
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :param buy_notify: receive the notification of the buy trade records
+    :param sell_notify: receive the notification of the sell trade records
+    :return: the profit goal strategy instance
     """
     meta_x = type(name, (ProfitGoalBase, ), {'__init__': part_init, '_clone': part_clone})
-    meta_x.get_goal = get_goal
+    meta_x._get_goal = get_goal
     if calculate is not None:
         meta_x._calculate = calculate
     if buy_notify is not None:
-        meta_x._buy_notify = buy_notify
+        meta_x.buy_notify = buy_notify
     if sell_notify is not None:
-        meta_x._sell_notify = sell_notify
+        meta_x.sell_notify = sell_notify
     ret = meta_x(name, params)
     globals().update(dict(_=ret))
     return ret
@@ -143,14 +146,14 @@ def crtPG(get_goal, calculate=None, params={}, name='crtPG', buy_notify=None, se
 # ------------------------------------------------------------------
 # signal
 # ------------------------------------------------------------------
-def crtSG(func, params={}, name='crtSG'):
+def crtSG(func, params=None, name='crtSG'):
     """
-    快速创建信号指示器
+    Quickly create a signal generator
 
-    :param func: 信号策略函数
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :return: 自定义信号指示器实例
+    :param func: the signal strategy function
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :return: the custom signal generator instance
     """
     meta_x = type(name, (SignalBase, ), {'__init__': part_init, '_clone': part_clone})
     meta_x._calculate = func
@@ -162,40 +165,58 @@ def crtSG(func, params={}, name='crtSG'):
 # ------------------------------------------------------------------
 # Selector
 # ------------------------------------------------------------------
-def crtSE(calculate, get_selected, is_match_af=None, params={}, name='crtSE'):
+def crtSE(calculate, get_selected, params=None, name='crtSE'):
     """
-    快速创建交易对象选择算法
+    Quickly create a trading object selection algorithm
 
-    :param calculate function: 计算函数
-    :param get_selected_on_close function: 收盘时刻选择算法
-    :param get_selected_on_open function: 开盘时刻选择算法
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :return: 自定义交易对象选择算法实例
+    :param calculate function: the calculation function
+    :param get_selected_on_close function: the selection algorithm at the close time
+    :param get_selected_on_open function: the selection algorithm at the open time
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :return: the custom trading object selection algorithm instance
     """
     meta_x = type(name, (SelectorBase, ), {'__init__': part_init, '_clone': part_clone})
     meta_x._calculate = calculate
     meta_x.get_selected = get_selected
-    meta_x.is_match_af = (lambda self, af: True) if is_match_af is None else is_match_af
     ret = meta_x(name, params)
     globals().update(dict(_=ret))
     return ret
 
 
 # ------------------------------------------------------------------
-# allocatefunds
+# allocate_funds
 # ------------------------------------------------------------------
-def crtAF(allocate_weight_func, params={}, name='crtAF'):
+def crtAF(allocate_func, params=None, name='crtAF', to_targets_func=None, check_risk_func=None):
     """
-    快速创建资产分配算法
+    Quickly create an asset allocation algorithm (AF), used by the aggregate system
+    (MultiSystem) only. The three callbacks correspond to the L1/L2/L3 layers and are executed
+    by the AF in the L1 -> L2 -> L3 order on every rebalancing day.
 
-    :param allocate_weight_func: 资产分配算法
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :return: 自定义资产分配算法实例
+    :param allocate_func: [Required] the L1 system-level allocation interface, the prototype is
+        ``func(self, date, tm, contexts, query, mode)``, it decides "how much each sub-system may
+        manage"; in mode A ("Signal Aggregation") it returns the weight table ``{System: weight}``;
+        in mode B ("Fund Allocation") it writes the real quota into ``contexts[i].quota`` in place
+        and returns an empty table. ``mode`` is the running mode ("A"/"B"/"C") passed down by the
+        aggregate system (MultiSystem), which owns it
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :param to_targets_func: [Optional] the L2 behavior-level conversion interface, the prototype
+        is ``func(self, date, tm, suggestions, sys_weight, query, mode)``; in mode A it converts the
+        sub-system suggestions into the target positions of the parent account (target market value
+        = weight x position ratio x the parent net assets), in mode B the sub-system instruction
+        passes through
+    :param check_risk_func: [Optional] the L3 portfolio risk control interface, the prototype is
+        ``func(self, date, tm, suggestions, query, mode)``, e.g. the single instrument concentration
+        cap (skipped in mode B)
+    :return: the custom asset allocation algorithm instance
     """
     meta_x = type(name, (AllocateFundsBase, ), {'__init__': part_init, '_clone': part_clone})
-    meta_x._allocate_weight = allocate_weight_func
+    meta_x._allocate = allocate_func
+    if to_targets_func is not None:
+        meta_x._to_targets = to_targets_func
+    if check_risk_func is not None:
+        meta_x._check_risk = check_risk_func
     ret = meta_x(name, params)
     globals().update(dict(_=ret))
     return ret
@@ -204,14 +225,14 @@ def crtAF(allocate_weight_func, params={}, name='crtAF'):
 # ------------------------------------------------------------------
 # multi_factor
 # ------------------------------------------------------------------
-def crtMF(calculate_func, params={}, name='crtMF'):
+def crtMF(calculate_func, params=None, name='crtMF'):
     """
-    快速多因子合成算法
+    Quickly create a multi-factor composition algorithm
 
-    :param calculate_func: 合成算法
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :return: 自定义多因子合成算法实例
+    :param calculate_func: the composition algorithm
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :return: the custom multi-factor composition algorithm instance
     """
     meta_x = type(name, (MultiFactorBase, ), {'__init__': part_init, '_clone': part_clone})
     meta_x._calculate = calculate_func
@@ -223,22 +244,33 @@ def crtMF(calculate_func, params={}, name='crtMF'):
 # ------------------------------------------------------------------
 # slippage
 # ------------------------------------------------------------------
-def crtSP(get_real_buy_price, get_real_sell_price, params={}, name='crtSP', calculate=None):
+def crtSP(get_real_buy_price, get_real_sell_price, params=None, name='crtSP', calculate=None,
+          get_real_buy_short_price=None, get_real_sell_short_price=None):
     """
-    快速创建移滑价差算法
+    Quickly create a slippage algorithm
 
-    :param get_real_buy_price: 移滑价差算法接口计算实际买入价格
-    :param get_real_sell_price: 移滑价差算法接口计算实际买入价格
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :param calculate: 预处理函数
-    :return: 移滑价差算法实例
+    :param get_real_buy_price: the slippage algorithm interface to calculate the raw buy price
+        (the System part validates it and clamps it into the bar's [low, high] range)
+    :param get_real_sell_price: the slippage algorithm interface to calculate the raw sell price
+        (the System part validates it and clamps it into the bar's [low, high] range)
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :param calculate: the pre-processing function
+    :param get_real_buy_short_price: the interface to calculate the raw price of covering a short,
+        None means falling back to get_real_buy_price
+    :param get_real_sell_short_price: the interface to calculate the raw price of opening a short,
+        None means falling back to get_real_sell_price
+    :return: the slippage algorithm instance
     """
     meta_x = type(name, (SlippageBase, ), {'__init__': part_init, '_clone': part_clone})
-    meta_x.get_real_buy_price = get_real_buy_price
-    meta_x.get_real_sell_price = get_real_sell_price
+    meta_x._get_real_buy_price = get_real_buy_price
+    meta_x._get_real_sell_price = get_real_sell_price
     if calculate is not None:
         meta_x._calculate = calculate
+    if get_real_buy_short_price is not None:
+        meta_x._get_real_buy_short_price = get_real_buy_short_price
+    if get_real_sell_short_price is not None:
+        meta_x._get_real_sell_short_price = get_real_sell_short_price
     ret = meta_x(name, params)
     globals().update(dict(_=ret))
     return ret
@@ -247,23 +279,23 @@ def crtSP(get_real_buy_price, get_real_sell_price, params={}, name='crtSP', calc
 # ------------------------------------------------------------------
 # stoploss
 # ------------------------------------------------------------------
-def crtST(get_price, params={}, name='crtST', calculate=None, get_short_price=None):
+def crtST(get_price, params=None, name='crtST', calculate=None, get_short_price=None):
     """
-    快速创建止损/止盈策略
+    Quickly create a stop-loss/take-profit strategy
 
-    :param get_price: 止损/止盈策略获取止损价接口函数
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :param calculate: 止损/止盈策略初始化计算函数
-    :param get_short_price: 获取空头止损价接口函数
-    :return: 止损/止盈策略实例
+    :param get_price: the interface function of the stop-loss/take-profit strategy to get the stop price
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :param calculate: the initialization calculation function of the stop-loss/take-profit strategy
+    :param get_short_price: the interface function to get the short stop price
+    :return: the stop-loss/take-profit strategy instance
     """
     meta_x = type(name, (StoplossBase, ), {'__init__': part_init, '_clone': part_clone})
-    meta_x.get_price = get_price
+    meta_x._get_price = get_price
     if calculate is not None:
         meta_x._calculate = calculate
     if get_short_price is not None:
-        meta_x.get_short_price = get_short_price
+        meta_x._get_short_price = get_short_price
     ret = meta_x(name, params)
     globals().update(dict(_=ret))
     return ret
@@ -272,14 +304,14 @@ def crtST(get_price, params={}, name='crtST', calculate=None, get_short_price=No
 # ------------------------------------------------------------------
 # SCFilter
 # ------------------------------------------------------------------
-def crtSCFilter(filter_func, params={}, name='crtSCFilter'):
+def crtSCFilter(filter_func, params=None, name='crtSCFilter'):
     """
-    快速创建评分过滤器
+    Quickly create a score filter
 
-    :param filter_func: 评分过滤器函数
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :return: 评分过滤器实例
+    :param filter_func: the score filter function
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :return: the score filter instance
     """
     meta_x = type(name, (ScoresFilterBase, ), {'__init__': part_init, '_clone': part_clone})
     meta_x._filter = filter_func
@@ -291,14 +323,14 @@ def crtSCFilter(filter_func, params={}, name='crtSCFilter'):
 # ------------------------------------------------------------------
 # Normalize
 # ------------------------------------------------------------------
-def crtNorm(normalize_func, params={}, name='crtNorm'):
+def crtNorm(normalize_func, params=None, name='crtNorm'):
     """
-    快速创建标准化/归一化等算法函数
+    Quickly create algorithm functions such as standardization/normalization
 
-    :param normalize_func: 算法函数
-    :param {} params: 参数字典
-    :param str name: 自定义名称
-    :return: 函数实例
+    :param normalize_func: the algorithm function
+    :param {} params: the parameter dictionary
+    :param str name: the custom name
+    :return: the function instance
     """
     meta_x = type(name, (NormalizeBase, ), {'__init__': part_init, '_clone': part_clone})
     meta_x._normalize = normalize_func

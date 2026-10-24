@@ -8,6 +8,7 @@
 #include "hikyuu/utilities/node/NodeClient.h"
 #include "interface/plugins.h"
 #include "dataserver.h"
+#include "hikyuu/data_driver/ipc/ShmClientHook.h"
 
 namespace hku {
 
@@ -28,6 +29,29 @@ void HKU_API stopDataServer() {
 
 void HKU_API getDataFromBufferServer(const std::string& addr, const StockList& stklist,
                                      const KQuery::KType& ktype) {
+    // The client mode: there is no local preload buffer (the preload check of
+    // pullFromBufferServerLocal returns directly) The main process pulls, applies to the buffer and
+    // mirrors to the shared memory, and all the clients then read the update through shm. When the
+    // main process is unreachable the forwarding warns internally and returns false; here it
+    // returns silently without interrupting the caller flow.
+    if (StockManager::instance().isIpcClientMode()) {
+        std::vector<std::string> codes;
+        codes.reserve(stklist.size());
+        for (const auto& stk : stklist) {
+            if (!stk.isNull()) {
+                codes.emplace_back(stk.market_code());
+            }
+        }
+        bool ret = ipc::forwardPullFromBufferServer(addr, codes, ktype);
+        HKU_INFO("Forwarded pull request of {} codes to the main process ({})", codes.size(),
+                 ret ? "success" : "failed");
+        return;
+    }
+    pullFromBufferServerLocal(addr, stklist, ktype);
+}
+
+void HKU_API pullFromBufferServerLocal(const std::string& addr, const StockList& stklist,
+                                       const KQuery::KType& ktype) {
     // SPEND_TIME(getDataFromBufferServer);
     const auto& preload = StockManager::instance().getPreloadParameter();
     string low_ktype = ktype;
@@ -65,6 +89,8 @@ void HKU_API getDataFromBufferServer(const std::string& addr, const StockList& s
 
         const auto& jdata = res["data"];
         // HKU_INFO("{}", to_string(jdata));
+        size_t received_num = 0;
+        size_t updated_num = 0;
         for (auto iter = jdata.cbegin(); iter != jdata.cend(); ++iter) {
             const auto& r = *iter;
             try {
@@ -75,16 +101,20 @@ void HKU_API getDataFromBufferServer(const std::string& addr, const StockList& s
                 }
 
                 const auto& jklist = r["data"];
+                received_num += jklist.size();
                 for (auto kiter = jklist.cbegin(); kiter != jklist.cend(); ++kiter) {
                     const auto& k = *kiter;
                     KRecord kr(Datetime(k[0].get<string>()), k[1], k[2], k[3], k[4], k[5], k[6]);
                     stk.realtimeUpdate(kr, ktype);
+                    updated_num++;
                 }
 
             } catch (const std::exception& e) {
                 HKU_ERROR("Failed decode json: {}! {}", to_string(r), e.what());
             }
         }
+        HKU_INFO("Pulled {} records from the buffer server ({} updated)", received_num,
+                 updated_num);
 
     } catch (const std::exception& e) {
         HKU_ERROR("Failed get data from buffer server! {}", e.what());

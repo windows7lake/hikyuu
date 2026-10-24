@@ -10,6 +10,47 @@
 
 namespace hku {
 
+DatetimeList getAnalysisCalendar(const StockList& stk_list, const KQuery& query) {
+    auto& sm = StockManager::instance();
+
+    // A positive absolute index is ambiguous here: sys->run() interprets it in each security's own
+    // K-line space, while the market calendar (backed by the market index stock) would interpret it
+    // in the index stock's space, sending the statistics stop date years into the past.
+    if (query.queryType() != KQuery::INDEX || query.start() < 0) {
+        return sm.getTradingCalendar(query);
+    }
+
+    Datetime start_date;
+    Datetime end_date;
+    bool has = false;
+    for (const auto& stk : stk_list) {
+        if (stk.isNull()) {
+            continue;
+        }
+        DatetimeList dates = stk.getDatetimeList(query);
+        if (dates.empty()) {
+            continue;
+        }
+        if (!has || dates.front() < start_date) {
+            start_date = dates.front();
+        }
+        if (!has || dates.back() > end_date) {
+            end_date = dates.back();
+        }
+        has = true;
+    }
+
+    if (!has) {
+        return sm.getTradingCalendar(query);
+    }
+
+    // The date query is right-open; push the end one minute forward so end_date stays included for
+    // both day and intraday ktypes.
+    KQuery date_query =
+      KQueryByDate(start_date, end_date + Minutes(1), query.kType(), query.recoverType());
+    return sm.getTradingCalendar(date_query);
+}
+
 vector<AnalysisSystemOutput> HKU_API analysisSystemList(const SystemList& sys_list,
                                                         const StockList& stk_list,
                                                         const KQuery& query) {
@@ -19,7 +60,7 @@ vector<AnalysisSystemOutput> HKU_API analysisSystemList(const SystemList& sys_li
     size_t total = sys_list.size();
     HKU_IF_RETURN(0 == total, result);
 
-    auto date_list = StockManager::instance().getTradingCalendar(query);
+    auto date_list = getAnalysisCalendar(stk_list, query);
     HKU_IF_RETURN(date_list.empty(), result);
     Datetime last_datetime = date_list.back();
 
@@ -56,7 +97,7 @@ vector<AnalysisSystemOutput> HKU_API analysisSystemList(const SystemList& sys_li
     size_t total = sys_list.size();
     HKU_IF_RETURN(0 == total, result);
 
-    auto date_list = StockManager::instance().getTradingCalendar(query);
+    auto date_list = getAnalysisCalendar(StockList{stk}, query);
     HKU_IF_RETURN(date_list.empty(), result);
     Datetime last_datetime = date_list.back();
 
@@ -89,6 +130,7 @@ std::pair<double, SYSPtr> HKU_API findOptimalSystem(const SystemList& sys_list, 
                                                     const KQuery& query, const string& sort_key,
                                                     int sort_mode) {
     SPEND_TIME(findOptimalSystem);
+    HKU_CHECK(Performance().exist(sort_key), "Invalid sort_key: {}!", sort_key);
     double init_val =
       sort_mode == 0 ? std::numeric_limits<double>::lowest() : std::numeric_limits<double>::max();
     std::pair<double, SYSPtr> result{init_val, SYSPtr()};
@@ -97,8 +139,9 @@ std::pair<double, SYSPtr> HKU_API findOptimalSystem(const SystemList& sys_list, 
 
     HKU_ERROR_IF_RETURN(stk.isNull(), result, "stock is null!");
 
-    // 保证只统计到 query 指定的最后日期，而不是默认到现在，否则仍有持仓的系统收益不合适
-    auto date_list = StockManager::instance().getTradingCalendar(query);
+    // Guarantee that the statistics only go to the last date given by query rather than to now by
+    // default, otherwise the return of a system still holding a position would be inappropriate
+    auto date_list = getAnalysisCalendar(StockList{stk}, query);
     HKU_IF_RETURN(date_list.empty(), result);
     Datetime last_datetime = date_list.back();
 
@@ -135,6 +178,7 @@ std::pair<double, SYSPtr> HKU_API findOptimalSystemMulti(const SystemList& sys_l
                                                          const Stock& stk, const KQuery& query,
                                                          const string& sort_key, int sort_mode) {
     SPEND_TIME(findOptimalSystemMulti);
+    HKU_CHECK(Performance().exist(sort_key), "Invalid sort_key: {}!", sort_key);
     double init_val =
       sort_mode == 0 ? std::numeric_limits<double>::lowest() : std::numeric_limits<double>::max();
     std::pair<double, SYSPtr> result{init_val, SYSPtr()};
@@ -143,8 +187,9 @@ std::pair<double, SYSPtr> HKU_API findOptimalSystemMulti(const SystemList& sys_l
 
     HKU_ERROR_IF_RETURN(stk.isNull(), result, "stock is null!");
 
-    // 保证只统计到 query 指定的最后日期，而不是默认到现在，否则仍有持仓的系统收益不合适
-    auto date_list = StockManager::instance().getTradingCalendar(query);
+    // Guarantee that the statistics only go to the last date given by query rather than to now by
+    // default, otherwise the return of a system still holding a position would be inappropriate
+    auto date_list = getAnalysisCalendar(StockList{stk}, query);
     HKU_IF_RETURN(date_list.empty(), result);
     Datetime last_datetime = date_list.back();
 

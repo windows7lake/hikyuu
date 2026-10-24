@@ -1,7 +1,7 @@
 /*
  * IAtr.h
  *
- *  Created on: 2016年5月4日
+ *  Created on: 2016-5-4
  *      Author: Administrator
  */
 
@@ -22,6 +22,7 @@ public:
     IAtr();
     virtual ~IAtr() override;
     virtual void _checkParam(const string& name) const override;
+    virtual size_t min_increment_start() const override;
 };
 
 } /* namespace hku */

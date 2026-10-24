@@ -1,54 +1,41 @@
 /*
- * AShareTradeCost.h
+ * FixedA2017TradeCost.h
  *
- *  Created on: 2018年4月11日
- *      Author: Administrator
+ *  Created on: 2018-4-11
+ *      Author: fasiondog
  */
 
 #pragma once
 #ifndef TRADE_MANAGE_IMP_FIXEDA2017TRADECOST_H_
 #define TRADE_MANAGE_IMP_FIXEDA2017TRADECOST_H_
 
-#include "../TradeCostBase.h"
+#include "FixedATradeCostBase.h"
 
 namespace hku {
 
-/*
- * 2017年1月1日起将对深市过户费项目单独列示，标准为成交金额0.02‰双向收取。
+/**
+ * Trade cost algorithm for the Shanghai and Shenzhen A-share after January 1, 2017
+ * @details
+ * <pre>
+ * From January 1, 2017 the transfer fee item of the Shenzhen market is listed separately, with the
+ * standard of 0.02 per mille of the turnover amount charged in both directions (Shanghai and
+ * Shenzhen).
+ * </pre>
+ * @ingroup TradeCost
  */
-class FixedA2017TradeCost : public TradeCostBase {
-    TRADE_COST_NO_PRIVATE_MEMBER_SERIALIZATION
+class FixedA2017TradeCost : public FixedATradeCostBase {
+    TRADE_COST_FIXEDA_SERIALIZATION
 
 public:
     FixedA2017TradeCost();
     virtual ~FixedA2017TradeCost();
 
-    virtual void _checkParam(const string& name) const override;
-
-    /**
-     * 计算买入成本
-     * @param datetime 交易日期
-     * @param stock 交易的证券对象
-     * @param price 买入价格
-     * @param num 买入数量
-     * @return CostRecord 交易成本记录
-     */
-    virtual CostRecord getBuyCost(const Datetime& datetime, const Stock& stock, price_t price,
-                                  double num) const override;
-
-    /**
-     * 计算卖出成本
-     * @param datetime 交易日期
-     * @param stock 交易的证券对象
-     * @param price 卖出价格
-     * @param num 卖出数量
-     * @return CostRecord 交易成本记录
-     */
-    virtual CostRecord getSellCost(const Datetime& datetime, const Stock& stock, price_t price,
-                                   double num) const override;
-
-    /** 子类私有变量克隆接口 */
+    /** Clone interface of the private variables of the subclass */
     virtual TradeCostPtr _clone() override;
+
+protected:
+    /** Transfer fee by turnover value, charged on all markets */
+    virtual price_t _calcTransferFee(const Stock& stock, price_t value, double num) const override;
 };
 
 } /* namespace hku */

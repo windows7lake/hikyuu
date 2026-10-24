@@ -155,7 +155,7 @@ std::string Datetime::str() const {
 
     double microseconds = millisecond() * 1000 + microsecond();
 
-    // 和 python datetime 打印方式保持一致
+    // Stay consistent with the printing way of the python datetime
 #if FMT_VERSION >= 90000
     return microseconds == 0
              ? fmt::format("{:>4d}-{:0>2d}-{:0>2d} {:0>2d}:{:0>2d}:{:0>2d}", year(), month(), day(),
@@ -192,7 +192,7 @@ uint64_t Datetime::number() const noexcept {
     }
 }
 
-/** 返回如YYYYMM格式的数字*/
+/** Return a number in the YYYYMM format */
 uint64_t Datetime::ym() const noexcept {
     try {
         HKU_IF_RETURN(isNull(), Null<unsigned long long>());
@@ -206,7 +206,7 @@ uint64_t Datetime::ym() const noexcept {
     }
 }
 
-/** 返回如YYYYMMDD格式的数字*/
+/** Return a number in the YYYYMMDD format */
 uint64_t Datetime::ymd() const noexcept {
     try {
         HKU_IF_RETURN(isNull(), Null<unsigned long long>());
@@ -221,7 +221,7 @@ uint64_t Datetime::ymd() const noexcept {
     }
 }
 
-/** 返回如YYYYMMDDHH格式的数字*/
+/** Return a number in the YYYYMMDDHH format */
 uint64_t Datetime::ymdh() const noexcept {
     try {
         HKU_IF_RETURN(isNull(), Null<unsigned long long>());
@@ -236,7 +236,7 @@ uint64_t Datetime::ymdh() const noexcept {
     }
 }
 
-/** 返回如YYYYMMDDhhmm格式的数字*/
+/** Return a number in the YYYYMMDDhhmm format */
 uint64_t Datetime::ymdhm() const noexcept {
     try {
         HKU_IF_RETURN(isNull(), Null<unsigned long long>());
@@ -252,7 +252,7 @@ uint64_t Datetime::ymdhm() const noexcept {
     }
 }
 
-/** 返回如YYYYMMDDhhmmss格式的数字*/
+/** Return a number in the YYYYMMDDhhmmss format */
 uint64_t Datetime::ymdhms() const noexcept {
     try {
         HKU_IF_RETURN(isNull(), Null<unsigned long long>());
@@ -306,31 +306,33 @@ uint64_t Datetime::ticks() const noexcept {
     }
 }
 
-uint64_t Datetime::timestamp() const noexcept {
+int64_t Datetime::timestamp() const noexcept {
     try {
-        HKU_IF_RETURN(isNull(), Null<uint64_t>());
+        // INT64_MIN is the numpy/pandas datetime64 NaT sentinel, so a null Datetime converts to a
+        // proper NaT instead of a fake valid date
+        HKU_IF_RETURN(isNull(), (std::numeric_limits<int64_t>::min)());
         TimeDelta d = (*this) - Datetime(1970, 1, 1);
         return d.ticks();
     } catch (const std::exception &e) {
         HKU_ERROR(e.what());
-        return Null<uint64_t>();
+        return (std::numeric_limits<int64_t>::min)();
     } catch (...) {
         HKU_ERROR("Unknown error!");
-        return Null<uint64_t>();
+        return (std::numeric_limits<int64_t>::min)();
     }
 }
 
-uint64_t Datetime::timestampUTC() const noexcept {
+int64_t Datetime::timestampUTC() const noexcept {
     try {
-        HKU_IF_RETURN(isNull(), Null<uint64_t>());
+        HKU_IF_RETURN(isNull(), (std::numeric_limits<int64_t>::min)());
         TimeDelta d = (*this) - Datetime(1970, 1, 1) - UTCOffset();
         return d.ticks();
     } catch (const std::exception &e) {
         HKU_ERROR(e.what());
-        return Null<uint64_t>();
+        return (std::numeric_limits<int64_t>::min)();
     } catch (...) {
         HKU_ERROR("Unknown error!");
-        return Null<uint64_t>();
+        return (std::numeric_limits<int64_t>::min)();
     }
 }
 

@@ -1,10 +1,12 @@
 /*
  * SingleSignal.cpp
  *
- *  Created on: 2015年2月22日
+ *  Created on: 2015-2-22
  *      Author: fasiondog
  */
 
+#include <cmath>
+#include "../../../indicator/crt/ALIGN.h"
 #include "../../../indicator/crt/KDATA.h"
 #include "../../../indicator/crt/DIFF.h"
 #include "../../../indicator/crt/STDEV.h"
@@ -17,12 +19,12 @@ BOOST_CLASS_EXPORT(hku::SingleSignal)
 namespace hku {
 
 SingleSignal::SingleSignal() : SignalBase("SG_Single") {
-    setParam<int>("filter_n", 10);
+    setParam<int>("filter_n", 20);
     setParam<double>("filter_p", 0.1);
 }
 
 SingleSignal::SingleSignal(const Indicator& ind) : SignalBase("SG_Single"), m_ind(ind) {
-    setParam<int>("filter_n", 10);
+    setParam<int>("filter_n", 20);
     setParam<double>("filter_p", 0.1);
 }
 
@@ -48,6 +50,12 @@ void SingleSignal::_calculate(const KData& kdata) {
     double filter_p = getParam<double>("filter_p");
 
     Indicator ind = m_ind(kdata);
+    if (ind.size() != kdata.size()) {
+        ind = ALIGN(ind, kdata);
+        HKU_WARN_IF_RETURN(ind.size() != kdata.size(), void(),
+                           "Failed to align ind.size()({}) to kdata.size()({})!", ind.size(),
+                           kdata.size());
+    }
     Indicator dev = STDEV(DIFF(ind), filter_n);
 
     size_t start = dev.discard();
@@ -62,9 +70,13 @@ void SingleSignal::_calculate(const KData& kdata) {
         double dama2 = inddata[i] - inddata[i - 2];
         double dama3 = inddata[i] - inddata[i - 3];
         double sdama = devdata[i] * filter_p;
+        if (!std::isfinite(dama) || !std::isfinite(dama2) || !std::isfinite(dama3) ||
+            !std::isfinite(sdama)) {
+            continue;
+        }
         if (dama > 0 && (dama > sdama || dama2 > sdama || dama3 > sdama)) {
             _addBuySignal(ks[i].datetime);
-        } else if (dama < 0 && (dama < sdama || dama2 < sdama || dama3 < sdama)) {
+        } else if (dama < 0 && (dama < -sdama || dama2 < -sdama || dama3 < -sdama)) {
             _addSellSignal(ks[i].datetime);
         }
     }

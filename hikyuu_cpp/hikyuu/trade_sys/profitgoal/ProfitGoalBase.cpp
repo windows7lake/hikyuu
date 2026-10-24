@@ -7,7 +7,28 @@
 
 #include "ProfitGoalBase.h"
 
+#include <cmath>
+
 namespace hku {
+
+price_t ProfitGoalBase::_normalizeGoal(price_t goal) {
+    // Keep the valid semantics: Null(NaN) = no goal, 0 = sell now (long side), a finite positive
+    // value = the target price. A negative or non-finite return is never a valid profit target and
+    // would drive the exit comparison wrong (long: exit every bar on a negative value; short:
+    // close every bar on +inf), so it is clamped to Null (no goal).
+    if (std::isnan(goal) || goal == 0.0 || (std::isfinite(goal) && goal > 0.0)) {
+        return goal;
+    }
+    return Null<price_t>();
+}
+
+price_t ProfitGoalBase::getGoal(const Datetime& datetime, price_t price) {
+    return _normalizeGoal(_getGoal(datetime, price));
+}
+
+price_t ProfitGoalBase::getShortGoal(const Datetime& datetime, price_t price) {
+    return _normalizeGoal(_getShortGoal(datetime, price));
+}
 
 HKU_API std::ostream& operator<<(std::ostream& os, const ProfitGoalBase& pg) {
     os << "ProfitGoal(" << pg.name() << ", " << pg.getParameter() << ")";
@@ -39,30 +60,24 @@ void ProfitGoalBase::reset() {
 }
 
 ProfitGoalPtr ProfitGoalBase::clone() {
-    ProfitGoalPtr p;
-    try {
-        p = _clone();
-    } catch (...) {
-        HKU_ERROR("Subclass _clone failed!");
-        p = ProfitGoalPtr();
-    }
-
-    if (!p || p.get() == this) {
-        HKU_ERROR("Failed clone! Will use self-ptr!");
-        return shared_from_this();
-    }
+    ProfitGoalPtr p = _clone();
+    HKU_CHECK(p && p.get() != this,
+              "Failed clone! The subclass _clone of {} must return a new object!", m_name);
 
     p->m_params = m_params;
     p->m_name = m_name;
     p->m_is_python_object = m_is_python_object;
     p->m_tm = m_tm;
-    p->m_kdata = m_kdata;
+    // TO is intentionally dropped so the caller must setTO, which re-runs _reset/_calculate and
+    // keeps a precompute subclass (e.g. FixedHoldDays) from reusing state built for the original TO
+    p->m_kdata = Null<KData>();
     return p;
 }
 
 void ProfitGoalBase::setTO(const KData& kdata) {
-    HKU_IF_RETURN(m_kdata == kdata, void());
+    HKU_IF_RETURN(kdata == m_kdata, void());
     m_kdata = kdata;
+    _reset();
     if (!kdata.empty()) {
         _calculate();
     }

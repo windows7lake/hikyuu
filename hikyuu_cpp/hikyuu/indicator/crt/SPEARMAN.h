@@ -11,11 +11,14 @@
 namespace hku {
 
 /**
- * Spearman 相关系数
- * @param ind 指标1
- * @param ref_ind 指标2
- * @param n 滚动窗口(大于2 或 等于0)，等于0时，代表 n 实际使用 ind 的长度
- * @param fill_null 填充缺失值
+ * Spearman correlation coefficient
+ * @note Non-finite inputs (NaN or ±Inf) are excluded from the cross-section, aligned with the
+ *       library's "ignore missing points" mean-class convention (AGENTS.md L247/L249).
+ * @param ind indicator 1
+ * @param ref_ind indicator 2
+ * @param n the rolling window (>= 2); when it is 0 an expanding window is used, i.e. dst[i] is the
+ *          rank corr over [max(ind.discard(), ref.discard()), i] (discard becomes 1, bar 0 is nan)
+ * @param fill_null fill the missing values
  * @ingroup Indicator
  */
 Indicator HKU_API SPEARMAN(const Indicator& ind, const Indicator& ref_ind, int n = 0,

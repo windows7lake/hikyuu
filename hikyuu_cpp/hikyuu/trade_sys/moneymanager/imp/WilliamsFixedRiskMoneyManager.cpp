@@ -1,7 +1,7 @@
 /*
  * WilliamsFixedRiskMoneyManager.cpp
  *
- *  Created on: 2016年5月3日
+ *  Created on: 2016-5-3
  *      Author: Administrator
  */
 
@@ -24,7 +24,7 @@ WilliamsFixedRiskMoneyManager::~WilliamsFixedRiskMoneyManager() {}
 void WilliamsFixedRiskMoneyManager::_checkParam(const string& name) const {
     if ("p" == name) {
         double p = getParam<double>("p");
-        HKU_ASSERT(p > 0.0);
+        HKU_ASSERT(p > 0.0 && p <= 1.0);
     } else if ("max_loss" == name) {
         price_t max_loss = getParam<price_t>("max_loss");
         HKU_ASSERT(max_loss > 0.0);
@@ -36,6 +36,16 @@ double WilliamsFixedRiskMoneyManager::_getBuyNumber(const Datetime& datetime, co
     price_t max_loss = getParam<price_t>("max_loss");
     HKU_WARN_IF_RETURN(max_loss <= 0.0, 0.0, "max_loss is zero!");
     return m_tm->cash(datetime, m_query.kType()) * getParam<double>("p") / max_loss;
+}
+
+double WilliamsFixedRiskMoneyManager::_getSellShortNumber(const Datetime& datetime,
+                                                          const Stock& stock, price_t price,
+                                                          price_t risk, SystemPart from) {
+    // Base the size on the net assets: the borrowed proceeds in cash must not inflate it
+    price_t max_loss = getParam<price_t>("max_loss");
+    HKU_WARN_IF_RETURN(max_loss <= 0.0, 0.0, "max_loss is zero!");
+    return m_tm->getFunds(datetime, m_query.kType()).net_assets() * getParam<double>("p") /
+           max_loss;
 }
 
 MoneyManagerPtr HKU_API MM_WilliamsFixedRisk(double p, price_t max_loss) {

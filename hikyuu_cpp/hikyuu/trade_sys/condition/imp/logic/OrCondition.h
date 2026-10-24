@@ -21,12 +21,17 @@ public:
     virtual void _reset() override;
     virtual ConditionPtr _clone() override;
 
+    virtual bool hasPythonPart() const noexcept override {
+        return m_is_python_object || (m_cond1 && m_cond1->hasPythonPart()) ||
+               (m_cond2 && m_cond2->hasPythonPart());
+    }
+
 private:
     ConditionPtr m_cond1;
     ConditionPtr m_cond2;
 
 //============================================
-// 序列化支持
+// Serialization support
 //============================================
 #if HKU_SUPPORT_SERIALIZATION
     friend class boost::serialization::access;

@@ -24,9 +24,9 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_VARP") {
-    /** @arg n > 1 的正常情况 */
+    /** @arg The normal case with n > 1 */
     PriceList d;
     for (size_t i = 0; i < 15; ++i) {
         d.push_back(i + 1);
@@ -51,7 +51,7 @@ TEST_CASE("test_VARP") {
         CHECK_EQ(expected[i], doctest::Approx(dev[i]).epsilon(0.0001));
     }
 
-    /** @arg n = 1时 */
+    /** @arg When n = 1 */
     CHECK_THROWS_AS(VARP(ind, 1), std::exception);
 
     /** @arg operator() */
@@ -63,14 +63,19 @@ TEST_CASE("test_VARP") {
         CHECK_EQ(result[i], expect[i]);
     }
 
-    /** @arg n =0 时 */
+    /** @arg When n = 0: expanding window, population var of [0, i], single point -> 0 */
     dev = VARP(ind, 0);
     CHECK_EQ(dev.size(), 15);
-    CHECK_EQ(dev.discard(), 14);
+    CHECK_EQ(dev.discard(), 0);
+    CHECK_EQ(dev[0], 0.0);
+    for (size_t i = 1; i < dev.size(); ++i) {
+        CHECK_UNARY(!std::isnan(dev[i]));
+    }
+    // Full-sample pop var at the last bar matches the previous whole-series value
     CHECK_EQ(dev[14], doctest::Approx(19.0933).epsilon(0.0001));
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_VARP_dyn") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-30));
@@ -98,12 +103,55 @@ TEST_CASE("test_VARP_dyn") {
     }
 }
 
+/** @par Test points: static-n full vs incremental equivalence (ring-buffer rewrite) */
+TEST_CASE("test_VARP_increment_equivalence") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh600000");
+    KData k_full = stock.getKData(KQuery(0, 30));
+    CHECK_EQ(k_full.size(), 30);
+
+    Indicator expect = VARP(CLOSE(), 10);
+    expect.setContext(k_full);
+
+    auto check = [&](size_t history) {
+        Indicator got = VARP(CLOSE(), 10);
+        got.setContext(stock.getKData(KQuery(0, history)));
+        got.setContext(k_full);
+        CHECK_EQ(got.size(), expect.size());
+        CHECK_EQ(got.discard(), expect.discard());
+        for (size_t i = 0; i < expect.size(); ++i) {
+            double a = expect[i];
+            double b = got[i];
+            if (std::isnan(a) && std::isnan(b)) {
+                continue;
+            }
+            CHECK_EQ(b, doctest::Approx(a).epsilon(0.0001));
+        }
+    };
+
+    check(10);
+    check(15);
+    check(13);
+}
+
+/** @par Test points: ST-N03 — after a mid-series NaN slides out of the window, subsequent bars
+ * recover to finite */
+TEST_CASE("test_VARP_nan_recovery") {
+    price_t nan = Null<price_t>();
+    Indicator data = PRICELIST({1.0, 2.0, 3.0, nan, 5.0, 6.0});
+    Indicator r = VARP(data, 3);
+    for (size_t i = 3; i < 6; i++) {
+        CHECK_UNARY(std::isfinite(r[i]));
+    }
+}
+
 //-----------------------------------------------------------------------------
 // test export
 //-----------------------------------------------------------------------------
+
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_VARP_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

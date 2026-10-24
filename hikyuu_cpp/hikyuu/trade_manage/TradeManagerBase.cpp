@@ -21,7 +21,8 @@ FundsList TradeManagerBase::getFundsList(const DatetimeList& dates, const KQuery
     FundsList result;
     HKU_IF_RETURN(total == 0, result);
 
-    // 先计算最后日期，防止后续并行计算时更新权息涉及线程安全
+    // Calculate the last date first, to prevent the thread safety issue of updating the
+    // ex-rights/ex-dividend data in the subsequent parallel calculation
     auto last_funds = getFunds(dates.back(), ktype);
 
     result = global_parallel_for_index(
@@ -54,7 +55,7 @@ price_t TradeManagerBase::getMaxPullBack(const Datetime& date, const KQuery::KTy
     return plugin->getMaxPullBack(shared_from_this(), date, ktype);
 }
 
-std::vector<PositionExtInfo> TradeManagerBase::TradeManagerBase::getHistoryPositionExtInfoList(
+std::vector<PositionExtInfo> TradeManagerBase::getHistoryPositionExtInfoList(
   const KQuery::KType& ktype, int trade_mode) {
     std::vector<PositionExtInfo> ret;
     auto& sm = StockManager::instance();

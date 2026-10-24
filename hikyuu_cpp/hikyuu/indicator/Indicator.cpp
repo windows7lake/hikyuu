@@ -72,6 +72,7 @@ KData Indicator::getContext() const {
 }
 
 bool Indicator::alike(const Indicator& other) const {
+    HKU_IF_RETURN(!m_imp || !other.m_imp, false);
     HKU_IF_RETURN(m_imp == other.m_imp, true);
     return m_imp->alike(*other.m_imp);
 }
@@ -86,12 +87,7 @@ bool Indicator::equal(const Indicator& other) const noexcept {
         auto const* d1 = this->data(r);
         auto const* d2 = other.data(r);
         for (size_t i = 0, total = size(); i < total; i++) {
-            HKU_IF_RETURN((std::isnan(d1[i]) && !std::isnan(d2[i])) ||
-                            (!std::isnan(d1[i]) && std::isnan(d2[i])),
-                          false);
-            HKU_IF_RETURN(
-              (!std::isnan(d1[i]) && !std::isnan(d2[i])) && (std::abs(d1[i] - d2[i]) >= 0.0001),
-              false);
+            HKU_IF_RETURN(!IndicatorImp::equalValue(d1[i], d2[i]), false);
         }
     }
     return true;
@@ -129,10 +125,12 @@ Indicator Indicator::operator()(const Indicator& ind) {
         return p->calculate();
     }
 
-    // AST 节点裁剪: 算子(m_imp)与被操作数(ind)语义等价时, 复用已计算的 ind
-    // (持有合法 buffer), 而非返回 m_imp 的克隆空壳(m_imp 若未 calculate 则 size==0).
-    // 注: 复用 ind 使返回值与 ind 共享底层节点, 依赖 hikyuu 不可变参数语义
-    // (alike 已校验 m_params 相同, setParam 触发原地重算, 共享安全).
+    // AST node pruning: when the operator (m_imp) is semantically equivalent to the operand (ind),
+    // reuse the already calculated ind (which holds a valid buffer), instead of returning an empty
+    // clone shell of m_imp (the size of m_imp is 0 when it has not been calculated). Note: reusing
+    // ind makes the return value share the underlying node with ind, which relies on the immutable
+    // parameter semantics of hikyuu (alike has verified that m_params are the same, setParam
+    // triggers an in-place recalculation and the sharing is safe).
     if (m_imp->alike(*ind.getImp())) {
         return ind;
     }
@@ -367,40 +365,6 @@ Indicator HKU_API IF(const Indicator& x, const Indicator& a, Indicator::value_t 
 
 Indicator HKU_API IF(const Indicator& x, Indicator::value_t a, Indicator::value_t b) {
     return IF(x, CVAL(x, a), CVAL(x, b));
-}
-
-IndicatorList HKU_API combineCalculateIndicators(const IndicatorList& indicators,
-                                                 const KData& kdata, bool tovalue) {
-    IndicatorList ret;
-    ret.reserve(indicators.size());
-    for (const auto& ind : indicators) {
-        ret.push_back(ind.clone());
-    }
-
-    vector<IndicatorImpPtr> sub_nodes;
-    for (const auto& ind : ret) {
-        vector<IndicatorImpPtr> nodes;
-        ind.getImp()->getAllSubNodes(nodes);
-        sub_nodes.insert(sub_nodes.end(), nodes.begin(), nodes.end());
-    }
-
-    IndicatorImp::inner_repeatALikeNodes(sub_nodes);
-    for (const auto& ind : ret) {
-        ind.getImp()->repeatSeparateKTypeLeafALikeNodes();
-    }
-
-    if (tovalue) {
-        for (auto& ind : ret) {
-            ind.setContext(kdata);
-            ind = ind.getResult(0);
-        }
-    } else {
-        for (auto& ind : ret) {
-            ind.setContext(kdata);
-        }
-    }
-
-    return ret;
 }
 
 } /* namespace hku */

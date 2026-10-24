@@ -27,10 +27,22 @@ void initInnerTask() {
                   reload_time);
         reload_enable = true;
     } catch (const std::exception& e) {
-        HKU_ERROR("Can't auto reload!", e.what());
+        HKU_ERROR("Can't auto reload: {}", e.what());
     }
 
     if (reload_enable) {
+        // The shm client restarts 5 minutes later, so that the shm server finishes restarting first
+        if (StockManager::instance().isIpcClientMode()) {
+            constexpr int64_t shm_client_reload_delay_minutes = 5;
+            mm += shm_client_reload_delay_minutes;
+            hh += mm / 60;
+            mm %= 60;
+            hh %= 24;  // Wrap around 24 hours (23:59 delayed becomes 00:04 of the next day)
+            HKU_INFO(
+              "Running in shm client mode, daily auto reload delayed {} minutes to {:02d}:{:02d}",
+              shm_client_reload_delay_minutes, hh, mm);
+        }
+
         auto* tm = getScheduler();
         tm->addFuncAtTimeEveryDay(Datetime::min(), Datetime::max(), TimeDelta(0, hh, mm),
                                   reloadHikyuuTask);
@@ -38,17 +50,36 @@ void initInnerTask() {
 }
 
 void reloadHikyuuTask() {
-    // 先停止行情接收
+    // Concurrency contract (intentional, no barrier needed before reload):
+    // 1. All timer tasks (this one and the strategy run_daily tasks) are serialized on the
+    //    single worker thread of the global scheduler, so no timer task runs concurrently
+    //    with the reload;
+    // 2. The spot agent is stopped first, so no new spot events arrive during the reload;
+    // 3. Concurrent reads from other threads (e.g. a strategy event loop) are safe by
+    //    design for the heavy data (K-line buffer mutexes per stock per ktype, the stock dict
+    //    shared_mutex, weight / finance mutexes): the K-line preload always runs in the
+    //    background with queries served from the driver in real time. The only exception is the
+    //    scalar identity fields (market / code / name / type / valid / ...), which loadAllStocks
+    //    rewrites in place WITHOUT a lock; those must not be read concurrently with this reload:
+    //    in practice the daily reload is the sole writer and these fields are rarely reassigned,
+    //    so the window is negligible, but it is not lock-protected.
+    // Stop the market data receiving first
     auto* agent = getGlobalSpotAgent();
     bool agent_running = agent->isRunning();
     if (agent_running) {
         agent->stop();
     }
 
-    // 重新加载数据
-    StockManager::instance().reload();
+    // Reload the data; a failed reload keeps the loaded data, restart the agent regardless
+    try {
+        StockManager::instance().reload();
+    } catch (const std::exception& e) {
+        HKU_ERROR("Failed reload hikyuu: {}", e.what());
+    } catch (...) {
+        HKU_ERROR("Failed reload hikyuu with unknown exception!");
+    }
 
-    // 重新启动行情接收
+    // Restart the market data receiving
     if (agent_running) {
         bool print = agent->getPrintFlag();
         size_t work_num = agent->getWorkerNum();

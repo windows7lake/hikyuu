@@ -32,7 +32,8 @@ SQLiteStatement::SQLiteStatement(DBConnectBase *driver, const std::string &sql_s
 
 SQLiteStatement::~SQLiteStatement() {
     sqlite3_finalize(m_stmt);
-    // m_db 来自 Connect，其生命周期有 Connect 管理，不能在这里释放
+    // m_db comes from Connect and its lifetime is managed by Connect, so it must not be released
+    // here
 }
 
 void SQLiteStatement::_reset() {
@@ -137,10 +138,18 @@ void SQLiteStatement::sub_bindBlob(int idx, const std::vector<char> &item) {
 }
 
 void SQLiteStatement::sub_getColumnAsInt64(int idx, int64_t &item) {
+    if (sqlite3_column_type(m_stmt, idx) == SQLITE_NULL) {
+        item = Null<int64_t>();
+        return;
+    }
     item = sqlite3_column_int64(m_stmt, idx);
 }
 
 void SQLiteStatement::sub_getColumnAsDouble(int idx, double &item) {
+    if (sqlite3_column_type(m_stmt, idx) == SQLITE_NULL) {
+        item = Null<double>();
+        return;
+    }
     item = sqlite3_column_double(m_stmt, idx);
 }
 
@@ -156,22 +165,26 @@ void SQLiteStatement::sub_getColumnAsText(int idx, std::string &item) {
 }
 
 void SQLiteStatement::sub_getColumnAsBlob(int idx, std::string &item) {
-    const char *data = static_cast<const char *>(sqlite3_column_blob(m_stmt, idx));
-    if (data == NULL) {
+    // sqlite3_column_blob returns a NULL pointer both for SQL NULL and for a zero-length blob,
+    // so the column type is the only way to tell them apart
+    if (sqlite3_column_type(m_stmt, idx) == SQLITE_NULL) {
         throw null_blob_exception();
     }
+    const char *data = static_cast<const char *>(sqlite3_column_blob(m_stmt, idx));
     const int size = sqlite3_column_bytes(m_stmt, idx);
-    item = std::string(data, size);
+    item = (data != nullptr && size > 0) ? std::string(data, size) : std::string();
 }
 
 void SQLiteStatement::sub_getColumnAsBlob(int idx, std::vector<char> &item) {
-    const char *data = static_cast<const char *>(sqlite3_column_blob(m_stmt, idx));
-    if (data == NULL) {
+    if (sqlite3_column_type(m_stmt, idx) == SQLITE_NULL) {
         throw null_blob_exception();
     }
+    const char *data = static_cast<const char *>(sqlite3_column_blob(m_stmt, idx));
     const int size = sqlite3_column_bytes(m_stmt, idx);
     item.resize(size);
-    memcpy(item.data(), data, size);
+    if (data != nullptr && size > 0) {
+        memcpy(item.data(), data, size);
+    }
 }
 
 uint64_t SQLiteStatement::sub_getLastRowid() {

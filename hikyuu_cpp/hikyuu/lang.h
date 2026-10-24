@@ -16,25 +16,35 @@
 
 namespace hku {
 
-// 注意仅在 hikyuu 相关项目内部使用，避免对项目造成污染
+// Note: use it inside hikyuu related projects only, to avoid polluting other projects
 
-void loadLocalLanguage(const std::string &path = "i8n");
+void loadLocalLanguage(const std::string &path = "i18n");
 
 std::string HKU_API lang_htr(const char *id);
 
-// 按上下文获取翻译
+// Get the translation by context
 std::string HKU_API lang_hctr(const char *ctx, const char *id);
+
+// On a formatting error (placeholder mismatch) both htr and chtr fall back to the untranslated key
 
 template <typename... Args>
 std::string htr(const char *key, Args &&...args) {
     std::string fmt_str = lang_htr(key);
-    return fmt::vformat(fmt_str, fmt::make_format_args(std::forward<Args>(args)...));
+    try {
+        return fmt::vformat(fmt_str, fmt::make_format_args(std::forward<Args>(args)...));
+    } catch (const fmt::format_error &) {
+        return key;
+    }
 }
 
 template <typename... Args>
 std::string chtr(const char *ctx, const char *key, Args &&...args) {
     std::string fmt_str = lang_hctr(ctx, key);
-    return fmt::vformat(fmt_str, fmt::make_format_args(std::forward<Args>(args)...));
+    try {
+        return fmt::vformat(fmt_str, fmt::make_format_args(std::forward<Args>(args)...));
+    } catch (const fmt::format_error &) {
+        return key;
+    }
 }
 
 }  // namespace hku

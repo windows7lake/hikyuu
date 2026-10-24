@@ -1,7 +1,7 @@
 /*
  * CrossGoldSignal.h
  *
- *  Created on: 2017年6月13日
+ *  Created on: 2017-6-13
  *      Author: fasiondog
  */
 
@@ -23,12 +23,16 @@ public:
     virtual SignalPtr _clone() override;
     virtual void _calculate(const KData& kdata) override;
 
+    virtual bool hasPythonPart() const noexcept override {
+        return m_is_python_object || m_fast.hasPythonPart() || m_slow.hasPythonPart();
+    }
+
 private:
     Indicator m_fast;
     Indicator m_slow;
 
 //============================================
-// 序列化支持
+// Serialization support
 //============================================
 #if HKU_SUPPORT_SERIALIZATION
     friend class boost::serialization::access;

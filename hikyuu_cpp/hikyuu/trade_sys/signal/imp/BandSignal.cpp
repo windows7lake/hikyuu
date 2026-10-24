@@ -1,9 +1,11 @@
 /*
  * BandSignal.cpp
  *
- *   Created on: 2023年09月23日
+ *   Created on: 2023-09-23
  *       Author: yangrq1018
  */
+#include <cmath>
+#include "../../../indicator/crt/ALIGN.h"
 #include "../../../indicator/crt/KDATA.h"
 #include "BandSignal.h"
 
@@ -31,16 +33,24 @@ SignalPtr BandSignal::_clone() {
 }
 
 void BandSignal::_calculate(const KData& kdata) {
+    // deserialization bypasses the ctor check
+    HKU_IF_RETURN(m_lower >= m_upper, void());
     Indicator ind = m_ind(kdata);
+    if (ind.size() != kdata.size()) {
+        ind = ALIGN(ind, kdata);
+        HKU_WARN_IF_RETURN(ind.size() != kdata.size(), void(),
+                           "Failed to align ind.size()({}) to kdata.size()({})!", ind.size(),
+                           kdata.size());
+    }
     size_t discard = ind.discard();
     size_t total = ind.size();
 
     auto const* inddata = ind.data();
     auto const* ks = kdata.data();
     for (size_t i = discard; i < total; ++i) {
-        if (inddata[i] > m_upper) {
+        if (std::isfinite(inddata[i]) && inddata[i] > m_upper) {
             _addBuySignal(ks[i].datetime);
-        } else if (inddata[i] < m_lower) {
+        } else if (std::isfinite(inddata[i]) && inddata[i] < m_lower) {
             _addSellSignal(ks[i].datetime);
         }
     }

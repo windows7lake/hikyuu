@@ -18,11 +18,15 @@
 namespace hku {
 
 /**
- * 环境判定策略基类
- * @note 外部环境应该和具体的交易对象没有关系
+ * Base class of the market environment strategy
+ * @note The external environment should have nothing to do with the concrete trading object
+ * @note The environment is designed to be shared across systems (System shared_ev defaults to
+ *       true): isValid takes a shared lock on every call while setQuery/reset take the exclusive
+ *       lock, so all systems sharing one environment must use the same query, otherwise every
+ *       differing setQuery reruns the full calculation under the exclusive lock
  * @ingroup Environment
  */
-class HKU_API EnvironmentBase : public enable_shared_from_this<EnvironmentBase> {
+class HKU_API EnvironmentBase {
     PARAMETER_SUPPORT_WITH_CHECK
 
 public:
@@ -30,70 +34,162 @@ public:
     explicit EnvironmentBase(const string& name);
     virtual ~EnvironmentBase();
 
-    // 用于 python clone, 但由于 mutex, 是非线程安全的
+    // Used for the python clone, but it is not thread safe because of the mutex
     EnvironmentBase(const EnvironmentBase&);
 
-    /** 获取名称 */
+    /** Get the name */
     const string& name() const {
         return m_name;
     }
 
-    /** 设置名称 */
+    /** Set the name */
     void name(const string& name) {
         m_name = name;
     }
 
-    /** 复位 */
+    /**
+     * Reset
+     * @note For a Python subclass the _reset callback acquires the GIL while the mutex is held, so
+     *       reset must not be invoked concurrently with the other calls on the same object
+     */
     void reset();
 
-    /** 设置查询条件 */
+    /**
+     * Set the query condition; the calculation is re-run only when the query differs from the
+     * current one
+     * @note For a Python subclass the _calculate callback acquires the GIL while the mutex is
+     *       held, so setQuery must not be invoked concurrently with the other calls on the same
+     *       object
+     */
     void setQuery(const KQuery& query);
 
-    /** 获取查询条件 */
+    /** Get the query condition */
     const KQuery& getQuery() const {
         return m_query;
     }
 
     typedef shared_ptr<EnvironmentBase> EnvironmentPtr;
     /**
-     * 克隆操作
-     * @note Environment不同于其他的系统策略组件，它是不和特定的交易对象绑定的，可以共享，本质是
-     *       上是不需要clone操作的，这里仅仅是为了整齐以及可能存在的特殊场景使用。
+     * Clone operation
+     * @note Unlike the other trading-system parts, the Environment is not bound to a specific
+     *       instrument and can be shared, so essentially the clone operation is not needed
+     * here; it exists only for the consistency and the possibly existing special scenarios.
+     * @note The subclass _clone callback is invoked without holding the mutex, so that it may
+     *       reach the GIL (or re-enter this object) without risking a lock-order deadlock.
      */
     EnvironmentPtr clone();
 
     /**
-     * 加入有效时间，在_calculate中调用
-     * @param datetime 系统有效日期
-     * @param value 默认为1.0，大于0表示有效，小于等于0表示无效
+     * Add a valid time, it is called in _calculate
+     * @param datetime the valid date of the system
+     * @param value 1.0 by default; greater than 0 means valid and less than or equal to 0 means
+     *              invalid
+     * @note A non-finite value (NaN/inf) is discarded, and adding the same date twice accumulates
+     *       the value instead of replacing it
+     * @note It takes no lock itself, so it must only be called from _calculate (or another hook
+     *       invoked by setQuery / reset while the mutex is held); a call from anywhere else would
+     *       race with the readers
      */
     void _addValid(const Datetime& datetime, price_t value = 1.0);
 
     /**
-     * 判断指定日期的外部环境是否有效
-     * @param datetime 指定日期
-     * @return true 有效 | false 无效
+     * Judge whether the external environment of the given date is valid
+     * @param datetime the given date
+     * @return true valid | false invalid
+     * @note A date that was never added is invalid; for a registered date the rule is delegated
+     *       to the _isValid hook, whose default is "the stored value is finite and > 0"
+     * @note For a Python subclass that overrides _is_valid, the callback acquires the GIL while
+     *       the shared lock is held, so isValid must not run concurrently with setQuery/reset
+     *       on the same object
      */
     bool isValid(const Datetime& datetime) const;
 
+    /**
+     * Get the stored value of the given date
+     * @param datetime the given date
+     * @return the stored value, or 0.0 for a date that was never added
+     * @note 0.0 is returned both for an invalid date and for an absent one; use isValid to tell
+     *       the validity
+     */
     price_t getValue(const Datetime& datetime) const;
 
     /**
-     * 以指标的形式获取实际值，与交易对象等长，<=0表示无效，>0表示系统有效
-     * @note 带日期的时间序列指标
+     * Get the values as a time-series indicator: one record per date registered through _addValid,
+     * ordered by date; only a finite value > 0 means valid, anything else is invalid
+     * @note The date set and the meaning of the value depend on the operator that produced this
+     *       object, see the operator notes above
      */
     Indicator getValues() const;
 
-    /** 子类计算接口 */
+    /**
+     * Get the raw value storage; for each date d in dateIndexRef(), the element
+     * valuesRef()[dateIndexRef()[d]] is the value of d. The vector itself is NOT guaranteed
+     * to be stored in date-ascending order (only dateIndexRef() iterates ascending).
+     * @note Read-only reference. Use this inside combination operators to avoid the
+     *       Indicator/PRICELIST copy produced by getValues(). Valid only while the query is
+     *       stable (no concurrent setQuery on this object).
+     */
+    const vector<price_t>& valuesRef() const {
+        return m_values;
+    }
+
+    /**
+     * Get the date->index ordered map; iterating it yields dates in ascending order.
+     * @note Read-only reference, for internal combination without copying.
+     */
+    const map<Datetime, size_t>& dateIndexRef() const {
+        return m_date_index;
+    }
+
+    /**
+     * Combination operators intentionally use different strategies over these refs, driven by
+     * their result semantics:
+     *  - And / Multi / Div (intersection): two-pointer merge over the two ordered date_index
+     *    maps, so there is no base side to pre-fill. And keeps only the dates valid (> 0) on both
+     *    sides, with the value fixed to 1.0. Multi / Div keep only the dates where both sides
+     *    agree: both valid (> 0) gives the product / ratio, both invalid (< 0) gives its negation
+     *    (kept negative so that the day stays invalid) - a disagreement (mixed sign) or a zero
+     *    side carries no combined strength and is left out.
+     *  - Add / Sub (ev1 base + ev2 align): every date (valid or not) of ev1 and ev2 belongs to
+     *    the result, so ev1 is laid down as the base and ev2 is aligned against it; ev1-only
+     *    dates need no work and ev2-only dates go through _addValid. The value is the sum (Add) /
+     *    the difference (Sub), an ev2-only date contributing -ev2 to Sub.
+     *  - Or (union of valid): a date is kept iff it is valid on at least one side, with the value
+     *    fixed to 1.0, so both maps are walked and the date is pushed only when a side is valid.
+     * Do NOT "unify" these: a laydown for Or would add ev1's invalid dates as 0.0 to the output
+     * date set; an intersection for Add/Sub would drop ev1-only/ev2-only dates; a laydown for
+     * And/Multi/Div would wrongly keep ev1-only dates. Each file's _calculate spells out its own
+     * branch.
+     */
+
+    /**
+     * The subclass validity-rule hook, called by isValid for every date registered through
+     * _addValid
+     * @param datetime the queried date
+     * @param value the stored value of the date
+     * @return true valid | false invalid; the default rule is "the value is finite and > 0"
+     * @note The System judges the market validity solely through isValid (one call per bar), so
+     *       overriding this hook directly changes the trading behavior
+     * @note Override it to apply a custom rule based on the concrete ev value; the combination
+     *       operators keep using the built-in "> 0" rule on their sides
+     */
+    virtual bool _isValid(const Datetime& datetime, price_t value) const;
+
+    /** Subclass calculation interface */
     virtual void _calculate() = 0;
 
-    /** 子类复位接口 */
+    /** Subclass reset interface */
     virtual void _reset() {}
 
-    /** 子类克隆接口 */
+    /** Subclass clone interface */
     virtual EnvironmentPtr _clone() = 0;
 
     bool isPythonObject() const noexcept {
+        return m_is_python_object;
+    }
+
+    /** Whether this component itself is defined in Python; subclasses with Python parts recurse */
+    virtual bool hasPythonPart() const noexcept {
         return m_is_python_object;
     }
 
@@ -107,7 +203,7 @@ protected:
     bool m_is_python_object{false};
 
 //============================================
-// 序列化支持
+// Serialization support
 //============================================
 #if HKU_SUPPORT_SERIALIZATION
 private:
@@ -116,7 +212,8 @@ private:
     void save(Archive& ar, const unsigned int version) const {
         ar& BOOST_SERIALIZATION_NVP(m_name);
         ar& BOOST_SERIALIZATION_NVP(m_params);
-        // ev可能多个系统共享，保留m_query可能用于查错
+        // ev may be shared by multiple systems; m_query is kept and may be used for the
+        // troubleshooting
         ar& BOOST_SERIALIZATION_NVP(m_query);
         ar& BOOST_SERIALIZATION_NVP(m_date_index);
         ar& BOOST_SERIALIZATION_NVP(m_values);
@@ -143,7 +240,8 @@ BOOST_SERIALIZATION_ASSUME_ABSTRACT(EnvironmentBase)
 
 #if HKU_SUPPORT_SERIALIZATION
 /**
- * 对于没有私有变量的继承子类，可直接使用该宏定义序列化
+ * For an inheriting subclass without private variables, this macro can be used directly for the
+ * serialization
  * @code
  * class Drived: public EnvironmentBase {
  *     ENVIRONMENT_NO_PRIVATE_MEMBER_SERIALIZATION
@@ -167,7 +265,7 @@ private:                                                          \
 #endif
 
 /**
- * 客户程序都应使用该指针类型
+ * Client programs should all use this pointer type
  * @ingroup Environment
  */
 typedef shared_ptr<EnvironmentBase> EnvironmentPtr;
@@ -181,7 +279,7 @@ public:                                        \
     virtual void _calculate() override;
 
 /**
- * 输出Environment信息，如：Environment(name, params[...])
+ * Output the Environment information, e.g. Environment(name, params[...])
  * @ingroup Environment
  */
 HKU_API std::ostream& operator<<(std::ostream& os, const EnvironmentPtr&);

@@ -5,6 +5,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "ISlope.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -21,13 +22,15 @@ ISlope::~ISlope() {}
 
 void ISlope::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 0);
+        HKU_ASSERT(getParam<int>("n") >= 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
 void ISlope::_calculate(const Indicator& ind) {
     size_t total = ind.size();
-    m_discard = ind.discard() + 1;
+
+    int n = getParam<int>("n");
+    m_discard = ind.discard() + (n > 1 ? (size_t)n - 1 : 1);
     if (m_discard >= total) {
         m_discard = total;
         return;
@@ -38,7 +41,6 @@ void ISlope::_calculate(const Indicator& ind) {
     auto* dst_r2 = this->data(1);
     auto* dst_relmaxres = this->data(2);
 
-    int n = getParam<int>("n");
     if (n <= 1) {
         for (size_t i = m_discard; i < total; i++) {
             dst_slope[i] = 0.0;
@@ -48,66 +50,98 @@ void ISlope::_calculate(const Indicator& ind) {
         return;
     }
 
-    size_t startPos = m_discard - 1;
-    price_t xsum = 0.0, ysum = 0.0, xysum = 0.0, x2sum = 0.0, y2sum = 0.0;
-    size_t first_end = startPos + n >= total ? total : startPos + n;
-    for (size_t i = startPos; i < first_end; i++) {
-        price_t x = i;
-        price_t y = src[i];
-        xsum += x;
-        ysum += y;
-        xysum += x * y;
-        x2sum += x * x;
-        y2sum += y * y;
-        size_t cnt = i + 1;
-        price_t denominator = cnt * x2sum - xsum * xsum;
-        price_t slope = (cnt * xysum - xsum * ysum) / denominator;
-        dst_slope[i] = slope;
-        price_t numerator = std::pow(cnt * xysum - xsum * ysum, 2);
-        price_t denominator_r2 = denominator * (cnt * y2sum - ysum * ysum);
-        dst_r2[i] = numerator / denominator_r2;
+    // the rolling sums start at the first valid input value, whatever the declared discard is
+    size_t startPos = ind.discard();
+    price_t fn = (price_t)n;
+    bool seed_ok = std::isfinite(src[startPos]);
+    price_t y0 = seed_ok ? src[startPos] : 0.0;
+    price_t S_y = y0;
+    price_t S_xy = 0.0;
+    price_t S_y2 = y0 * y0;
+    size_t bad = seed_ok ? 0 : 1;
 
-        // 计算相对最大残差
-        price_t y_mean = ysum / cnt;
-        price_t x_mean = xsum / cnt;
-        price_t intercept = y_mean - slope * x_mean;
-        price_t max_residual = 0.0;
-        for (size_t j = startPos; j <= i; j++) {
-            price_t y_hat = intercept + slope * j;
-            price_t residual = std::abs(src[j] - y_hat);
-            if (residual > max_residual) {
-                max_residual = residual;
-            }
+    // Warmup: partial windows of increasing size [startPos, i]
+    size_t warmup_end = startPos + (size_t)n;
+    if (warmup_end > total)
+        warmup_end = total;
+
+    for (size_t i = startPos + 1; i < warmup_end; i++) {
+        size_t cnt = i - startPos + 1;
+        price_t x_rel = (price_t)(cnt - 1);
+        bool yi_ok = std::isfinite(src[i]);
+        price_t yi = yi_ok ? src[i] : 0.0;
+        if (!yi_ok)
+            bad++;
+        S_y += yi;
+        S_xy += x_rel * yi;
+        S_y2 += yi * yi;
+
+        if (i < m_discard || bad > 0) {
+            continue;
         }
-        dst_relmaxres[i] = max_residual / y_mean;
+
+        price_t fcnt = (price_t)cnt;
+        price_t sum_x = fcnt * (fcnt - 1.0) / 2.0;
+        price_t denom = fcnt * fcnt * (fcnt * fcnt - 1.0) / 12.0;
+        price_t ss_xy = fcnt * S_xy - sum_x * S_y;
+        price_t ss_yy = fcnt * S_y2 - S_y * S_y;
+
+        price_t slope = ss_xy / denom;
+        dst_slope[i] = slope;
+        dst_r2[i] = (ss_yy != 0.0) ? (ss_xy * ss_xy / (denom * ss_yy)) : 0.0;
+
+        price_t x_mean = sum_x / fcnt;
+        price_t y_mean = S_y / fcnt;
+        price_t intercept = y_mean - slope * x_mean;
+        price_t max_res = 0.0;
+        for (size_t k = 0; k < cnt; k++) {
+            price_t res = std::abs(src[startPos + k] - (intercept + slope * (price_t)k));
+            if (res > max_res)
+                max_res = res;
+        }
+        dst_relmaxres[i] = (y_mean != 0.0) ? (max_res / y_mean) : Null<price_t>();
     }
 
-    for (size_t i = first_end; i < total; i++) {
-        xsum += n;
-        ysum += src[i] - src[i - n];
-        xysum += src[i] * i - src[i - n] * (i - n);
-        x2sum += (2 * i - n) * n;
-        y2sum += src[i] * src[i] - src[i - n] * src[i - n];
-        price_t denominator = n * x2sum - xsum * xsum;
-        price_t slope = (n * xysum - xsum * ysum) / denominator;
-        dst_slope[i] = slope;
-        price_t numerator = std::pow(n * xysum - xsum * ysum, 2);
-        price_t denominator_r2 = denominator * (n * y2sum - ysum * ysum);
-        dst_r2[i] = numerator / denominator_r2;
+    // Steady-state: full window of size n, O(1) rolling for slope/r²
+    price_t full_sum_x = fn * (fn - 1.0) / 2.0;
+    price_t full_denom = fn * fn * (fn * fn - 1.0) / 12.0;
+    price_t full_x_mean = (fn - 1.0) / 2.0;
 
-        // 计算相对最大残差
-        price_t y_mean = ysum / n;
-        price_t x_mean = xsum / n;
-        price_t intercept = y_mean - slope * x_mean;
-        price_t max_residual = 0.0;
-        for (size_t j = i - n + 1; j <= i; j++) {
-            price_t y_hat = intercept + slope * j;
-            price_t residual = std::abs(src[j] - y_hat);
-            if (residual > max_residual) {
-                max_residual = residual;
-            }
+    for (size_t i = warmup_end; i < total; i++) {
+        if (!std::isfinite(src[i - n]))
+            bad--;
+        if (!std::isfinite(src[i]))
+            bad++;
+        price_t removed = std::isfinite(src[i - n]) ? src[i - n] : 0.0;
+        price_t added = std::isfinite(src[i]) ? src[i] : 0.0;
+
+        // O(1) rolling update for relative-x sums
+        S_xy = S_xy - S_y + removed + (fn - 1.0) * added;
+        S_y += added - removed;
+        S_y2 += added * added - removed * removed;
+
+        if (bad > 0) {
+            continue;
         }
-        dst_relmaxres[i] = max_residual / y_mean;
+
+        price_t ss_xy = fn * S_xy - full_sum_x * S_y;
+        price_t ss_yy = fn * S_y2 - S_y * S_y;
+
+        price_t slope = ss_xy / full_denom;
+        dst_slope[i] = slope;
+        dst_r2[i] = (ss_yy != 0.0) ? (ss_xy * ss_xy / (full_denom * ss_yy)) : 0.0;
+
+        // O(n) max_residual: regression line changes each bar, exact max is inherently linear
+        price_t y_mean = S_y / fn;
+        price_t intercept = y_mean - slope * full_x_mean;
+        size_t wstart = i - (size_t)n + 1;
+        price_t max_res = 0.0;
+        for (size_t k = 0; k < (size_t)n; k++) {
+            price_t res = std::abs(src[wstart + k] - (intercept + slope * (price_t)k));
+            if (res > max_res)
+                max_res = res;
+        }
+        dst_relmaxres[i] = (y_mean != 0.0) ? (max_res / y_mean) : Null<price_t>();
     }
 }
 
@@ -127,44 +161,61 @@ void ISlope::_increment_calculate(const Indicator& ind, size_t start_pos) {
     auto* dst_relmaxres = this->data(2);
 
     int n = getParam<int>("n");
+    price_t fn = (price_t)n;
 
-    price_t xsum = 0.0, ysum = 0.0, xysum = 0.0, x2sum = 0.0, y2sum = 0.0;
-    for (size_t i = start_pos - n; i < start_pos; i++) {
-        price_t x = i;
-        price_t y = src[i];
-        xsum += x;
-        ysum += y;
-        xysum += x * y;
-        x2sum += x * x;
-        y2sum += y * y;
+    // Initialize rolling sums from seed window [start_pos - n, start_pos - 1]
+    // using relative x = 0, 1, ..., n-1 (zero-fill non-finite)
+    price_t S_y = 0.0, S_xy = 0.0, S_y2 = 0.0;
+    size_t seed_start = start_pos - (size_t)n;
+    size_t bad = 0;
+    for (size_t k = 0; k < (size_t)n; k++) {
+        price_t y_raw = src[seed_start + k];
+        bool ok = std::isfinite(y_raw);
+        if (!ok)
+            bad++;
+        price_t y = ok ? y_raw : 0.0;
+        S_y += y;
+        S_xy += (price_t)k * y;
+        S_y2 += y * y;
     }
 
-    for (size_t i = start_pos; i < total; i++) {
-        xsum += n;
-        ysum += src[i] - src[i - n];
-        xysum += src[i] * i - src[i - n] * (i - n);
-        x2sum += (2 * i - n) * n;
-        y2sum += src[i] * src[i] - src[i - n] * src[i - n];
-        price_t denominator = n * x2sum - xsum * xsum;
-        price_t slope = (n * xysum - xsum * ysum) / denominator;
-        dst_slope[i] = slope;
-        price_t numerator = std::pow(n * xysum - xsum * ysum, 2);
-        price_t denominator_r2 = denominator * (n * y2sum - ysum * ysum);
-        dst_r2[i] = numerator / denominator_r2;
+    price_t full_sum_x = fn * (fn - 1.0) / 2.0;
+    price_t full_denom = fn * fn * (fn * fn - 1.0) / 12.0;
+    price_t full_x_mean = (fn - 1.0) / 2.0;
 
-        // 计算相对最大残差
-        price_t y_mean = ysum / n;
-        price_t x_mean = xsum / n;
-        price_t intercept = y_mean - slope * x_mean;
-        price_t max_residual = 0.0;
-        for (size_t j = i - n + 1; j <= i; j++) {
-            price_t y_hat = intercept + slope * j;
-            price_t residual = std::abs(src[j] - y_hat);
-            if (residual > max_residual) {
-                max_residual = residual;
-            }
+    for (size_t i = start_pos; i < total; i++) {
+        if (!std::isfinite(src[i - n]))
+            bad--;
+        if (!std::isfinite(src[i]))
+            bad++;
+        price_t removed = std::isfinite(src[i - n]) ? src[i - n] : 0.0;
+        price_t added = std::isfinite(src[i]) ? src[i] : 0.0;
+
+        S_xy = S_xy - S_y + removed + (fn - 1.0) * added;
+        S_y += added - removed;
+        S_y2 += added * added - removed * removed;
+
+        if (bad > 0) {
+            continue;
         }
-        dst_relmaxres[i] = max_residual / y_mean;
+
+        price_t ss_xy = fn * S_xy - full_sum_x * S_y;
+        price_t ss_yy = fn * S_y2 - S_y * S_y;
+
+        price_t slope = ss_xy / full_denom;
+        dst_slope[i] = slope;
+        dst_r2[i] = (ss_yy != 0.0) ? (ss_xy * ss_xy / (full_denom * ss_yy)) : 0.0;
+
+        price_t y_mean = S_y / fn;
+        price_t intercept = y_mean - slope * full_x_mean;
+        size_t wstart = i - (size_t)n + 1;
+        price_t max_res = 0.0;
+        for (size_t k = 0; k < (size_t)n; k++) {
+            price_t res = std::abs(src[wstart + k] - (intercept + slope * (price_t)k));
+            if (res > max_res)
+                max_res = res;
+        }
+        dst_relmaxres[i] = (y_mean != 0.0) ? (max_res / y_mean) : Null<price_t>();
     }
 }
 
@@ -184,37 +235,49 @@ void ISlope::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step)
         return;
     }
 
-    double n = curPos - start + 1;
-    price_t xsum = 0.0, ysum = 0.0, xysum = 0.0, x2sum = 0.0, y2sum = 0.0;
-    for (size_t i = start; i <= curPos; i++) {
-        price_t x = i;
-        price_t y = ind[i];
-        xsum += x;
-        ysum += y;
-        xysum += x * y;
-        x2sum += x * x;
-        y2sum += y * y;
+    if (curPos - start + 1 < step) {
+        _set(Null<price_t>(), curPos);
+        _set(Null<price_t>(), curPos, 1);
+        _set(Null<price_t>(), curPos, 2);
+        return;
     }
 
-    price_t denominator = n * x2sum - xsum * xsum;
-    price_t slope = (n * xysum - xsum * ysum) / denominator;
-    price_t numerator = std::pow(n * xysum - xsum * ysum, 2);
-    price_t denominator_r2 = denominator * (n * y2sum - ysum * ysum);
-    price_t r2 = numerator / denominator_r2;
+    size_t cnt = curPos - start + 1;
+    price_t fcnt = (price_t)cnt;
+    price_t sum_x = fcnt * (fcnt - 1.0) / 2.0;
+    price_t denom = fcnt * fcnt * (fcnt * fcnt - 1.0) / 12.0;
 
-    // 计算相对最大残差
-    price_t y_mean = ysum / n;
-    price_t x_mean = xsum / n;
-    price_t intercept = y_mean - slope * x_mean;
-    price_t max_residual = 0.0;
-    for (size_t i = start; i <= curPos; i++) {
-        price_t y_hat = intercept + slope * i;
-        price_t residual = std::abs(ind[i] - y_hat);
-        if (residual > max_residual) {
-            max_residual = residual;
+    price_t S_y = 0.0, S_xy = 0.0, S_y2 = 0.0;
+    for (size_t k = 0; k < cnt; k++) {
+        if (!std::isfinite(ind[start + k])) {
+            // any non-finite src in the regression window invalidates all three outputs
+            _set(Null<price_t>(), curPos);
+            _set(Null<price_t>(), curPos, 1);
+            _set(Null<price_t>(), curPos, 2);
+            return;
         }
+        price_t y = ind[start + k];
+        S_y += y;
+        S_xy += (price_t)k * y;
+        S_y2 += y * y;
     }
-    price_t relmaxres = max_residual / y_mean;
+
+    price_t ss_xy = fcnt * S_xy - sum_x * S_y;
+    price_t ss_yy = fcnt * S_y2 - S_y * S_y;
+
+    price_t slope = ss_xy / denom;
+    price_t r2 = (ss_yy != 0.0) ? (ss_xy * ss_xy / (denom * ss_yy)) : 0.0;
+
+    price_t x_mean = sum_x / fcnt;
+    price_t y_mean = S_y / fcnt;
+    price_t intercept = y_mean - slope * x_mean;
+    price_t max_res = 0.0;
+    for (size_t k = 0; k < cnt; k++) {
+        price_t res = std::abs(ind[start + k] - (intercept + slope * (price_t)k));
+        if (res > max_res)
+            max_res = res;
+    }
+    price_t relmaxres = (y_mean != 0.0) ? (max_res / y_mean) : Null<price_t>();
 
     _set(slope, curPos);
     _set(r2, curPos, 1);

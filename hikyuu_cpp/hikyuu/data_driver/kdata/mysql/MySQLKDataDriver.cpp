@@ -1,7 +1,7 @@
 /*
  * MySQLKDataDriverImp.cpp
  *
- *  Created on: 2014年9月3日
+ *  Created on: 2014-9-3
  *      Author: fasiondog
  */
 
@@ -23,7 +23,7 @@ MySQLKDataDriver::~MySQLKDataDriver() {
 bool MySQLKDataDriver::_init() {
     HKU_CHECK(m_connect == nullptr, "Maybe repeat initialization!");
     Parameter connect_param;
-    connect_param.set<string>("db", "");  // 数据库名称须在SQL语句中明确指定
+    connect_param.set<string>("db", "");  // The database must be given in the SQL statement
     connect_param.set<string>("host", getParamFromOther<string>(m_params, "host", "127.0.0.1"));
     connect_param.set<string>("usr", getParamFromOther<string>(m_params, "usr", "root"));
     connect_param.set<string>("pwd", getParamFromOther<string>(m_params, "pwd", ""));
@@ -36,6 +36,9 @@ bool MySQLKDataDriver::_init() {
 
 string MySQLKDataDriver ::_getTableName(const string& market, const string& code,
                                         const KQuery::KType& ktype) {
+    HKU_CHECK(market.find('`') == string::npos && market.find('\0') == string::npos &&
+                code.find('`') == string::npos && code.find('\0') == string::npos,
+              "Invalid market or code! market: '{}', code: '{}'", market, code);
     string table;
     if (ktype == KQuery::TIMELINE) {
         table = fmt::format("`{}_time`.`{}`", market, code);
@@ -123,7 +126,7 @@ KRecordList MySQLKDataDriver::_getKRecordList(const string& market, const string
         }
 
     } catch (...) {
-        // 表可能不存在
+        // The table may not exist
     }
     return result;
 }
@@ -158,7 +161,7 @@ KRecordList MySQLKDataDriver::_getKRecordList(const string& market, const string
             }
         }
     } catch (...) {
-        // 表可能不存在
+        // The table may not exist
     }
     return result;
 }
@@ -171,7 +174,7 @@ size_t MySQLKDataDriver::getCount(const string& market, const string& code,
         result = m_connect->queryNumber(
           fmt::format("select count(1) from {}", _getTableName(market, code, kType)), 0);
     } catch (...) {
-        // 表可能不存在, 不打印异常信息
+        // The table may not exist, the exception information is not printed
         result = 0;
     }
 
@@ -209,7 +212,7 @@ bool MySQLKDataDriver::getIndexRangeByDate(const string& market, const string& c
         }
 
     } catch (...) {
-        // 表可能不存在, 不打印异常信息
+        // The table may not exist, the exception information is not printed
         out_start = 0;
         out_end = 0;
         return false;
@@ -233,11 +236,9 @@ TimeLineList MySQLKDataDriver::getTimeLineList(const string& market, const strin
 
 TimeLineList MySQLKDataDriver::_getTimeLineListByDate(const string& market, const string& code,
                                                       const KQuery& query) {
-    string table = fmt::format("`{}_time`.`{}`", market, code);
-    to_lower(table);
-
     TimeLineList result;
     try {
+        string table = _getTableName(market, code, KQuery::TIMELINE);
         SQLStatementPtr st = m_connect->getStatement(fmt::format(
           "select `date`, `price`, `vol` from {} where date >= {} and date < {} order by date",
           table, query.startDatetime().number(), query.endDatetime().number()));
@@ -270,11 +271,9 @@ TimeLineList MySQLKDataDriver::_getTimeLineListByDate(const string& market, cons
 
 TimeLineList MySQLKDataDriver::_getTimeLineListByIndex(const string& market, const string& code,
                                                        const KQuery& query) {
-    string table = fmt::format("`{}_time`.`{}`", market, code);
-    to_lower(table);
-
     TimeLineList result;
     try {
+        string table = _getTableName(market, code, KQuery::TIMELINE);
         m_connect->transaction();
 
         int64_t startix = query.start(), endix = query.end();
@@ -352,11 +351,9 @@ TransList MySQLKDataDriver::getTransList(const string& market, const string& cod
 
 TransList MySQLKDataDriver::_getTransListByDate(const string& market, const string& code,
                                                 const KQuery& query) {
-    string table = fmt::format("`{}_trans`.`{}`", market, code);
-    to_lower(table);
-
     TransList result;
     try {
+        string table = _getTableName(market, code, KQuery::TRANS);
         SQLStatementPtr st = m_connect->getStatement(
           fmt::format("select `date`, `price`, `vol`, `buyorsell` from {} where date >= {} and "
                       "date < {} order by date",
@@ -391,11 +388,9 @@ TransList MySQLKDataDriver::_getTransListByDate(const string& market, const stri
 
 TransList MySQLKDataDriver::_getTransListByIndex(const string& market, const string& code,
                                                  const KQuery& query) {
-    string table = fmt::format("`{}_trans`.`{}`", market, code);
-    to_lower(table);
-
     TransList result;
     try {
+        string table = _getTableName(market, code, KQuery::TRANS);
         m_connect->transaction();
 
         int64_t startix = query.start(), endix = query.end();

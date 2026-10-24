@@ -23,265 +23,303 @@ template <class TableT, size_t page_size>
 class AsyncSQLResultSet;
 
 /**
- * 异步数据库连接基类
+ * Base class of the asynchronous database connection
  * @ingroup DBConnect
  *
- * 提供基于 boost::asio 协程的异步数据库操作接口。
- * 所有 I/O 密集型操作（如查询、执行）都返回 awaitable，可在协程中使用 co_await。
+ * It provides an asynchronous database operation interface based on the boost::asio coroutine.
+ * All the I/O intensive operations (such as the query and the execution) return an awaitable, and
+ * co_await can be used in a coroutine.
  *
- * @note 不是所有接口都需要改为 await 协程，仅 I/O 密集型操作需要异步化
- * @note 事务控制、配置访问等同步操作保持原有同步接口
+ * @note Not all the interfaces need to be changed into await coroutines, only the I/O intensive
+ *       operations need to be made asynchronous
+ * @note The synchronous operations such as the transaction control and the configuration access
+ * keep the original synchronous interfaces
  */
 class HKU_UTILS_API AsyncDBConnectBase : public std::enable_shared_from_this<AsyncDBConnectBase> {
 PARAMETER_SUPPORT  // NOSONAR
 
   public :
   /**
-   * 构造函数
-   * @param param 数据库连接参数
+   * Constructor
+   * @param param database connection parameters
    */
   explicit AsyncDBConnectBase(const Parameter &param);
     virtual ~AsyncDBConnectBase() = default;
 
     //-------------------------------------------------------------------------
-    // 子类接口 - 异步方法（返回 awaitable）
+    // Subclass interface - the asynchronous methods (returning an awaitable)
     //-------------------------------------------------------------------------
 
-    /** ping 操作，用于判断是否连接 */
+    /** The ping operation, used to judge whether it is connected */
     virtual net::awaitable<bool> ping() = 0;
 
-    /** 开始事务，失败时抛出异常 */
+    /** Start a transaction; an exception is thrown on failure */
     virtual net::awaitable<void> transaction() = 0;
 
-    /** 提交事务，失败时抛出异常 */
+    /** Commit the transaction; an exception is thrown on failure */
     virtual net::awaitable<void> commit() = 0;
 
-    /** 回滚事务 */
+    /** Roll back the transaction */
     virtual net::awaitable<void> rollback() noexcept = 0;
 
-    /** 执行无返回结果的 SQL */
+    /** Execute the SQL without a result */
     virtual net::awaitable<int64_t> exec(const std::string &sql_string) = 0;
 
-    /** 获取 AsyncSQLStatement */
+    /** Get the AsyncSQLStatement */
     virtual net::awaitable<AsyncSQLStatementPtr> getStatement(const std::string &sql_statement) = 0;
 
-    /** 判断表是否存在 */
+    /**
+     * Get a prepared statement with the values of a condition already bound
+     * @see DBConnectBase::getStatementWithParams
+     * @param sql_statement the statement text, possibly with numbered placeholders
+     * @param params the values of the placeholders, in placeholder order
+     */
+    net::awaitable<AsyncSQLStatementPtr> getStatementWithParams(const std::string &sql_statement,
+                                                                const BoundValues &params);
+
+    /** Judge whether the table exists */
     virtual net::awaitable<bool> tableExist(const std::string &tablename) = 0;
 
     /**
-     * 重置含自增 id 的表中的 id 从 1开始
-     * @param tablename 待重置id的表名
-     * @exception 表中仍旧含有数据时，抛出异常
+     * Reset the id in the table with an auto-increment id to start from 1
+     * @param tablename the table name whose id is to be reset
+     * @exception An exception is thrown when the table still contains data
      */
     virtual net::awaitable<void> resetAutoIncrement(const std::string &tablename) = 0;
 
     //-------------------------------------------------------------------------
-    // 模板方法 - 异步版本
+    // Template methods - the asynchronous version
     //-------------------------------------------------------------------------
 
     /**
-     * 保存或更新 通过 TABLE_BIND 绑定的表结构
-     * @param item 待保持的记录
-     * @param autotrans 启动事务
+     * Save or update the table structure bound through TABLE_BIND
+     * @param item the record to be saved
+     * @param autotrans start a transaction
      */
     template <typename T>
     net::awaitable<void> save(T &item, bool autotrans = true);
 
     /**
-     * 批量保存
-     * @param container 拥有迭代器的容器
-     * @param autotrans 启动事务
+     * Batch saving
+     * @param container a container with an iterator
+     * @param autotrans start a transaction
      */
     template <class Container>
     net::awaitable<void> batchSave(Container &container, bool autotrans = true);
 
     /**
-     * 批量保存，迭代器中的数据必须是通过 TABLE_BIND 绑定的表模型
-     * @param first 迭代器起始点
-     * @param last 迭代器终止点
-     * @param autotrans 启动事务
+     * Batch saving; the data in the iterators must be the table model bound through TABLE_BIND
+     * @param first the iterator start point
+     * @param last the iterator end point
+     * @param autotrans start a transaction
      */
     template <class InputIterator>
     net::awaitable<void> batchSave(InputIterator first, InputIterator last, bool autotrans = true);
 
     /**
-     * 加载模型数据至指定的模型实例
-     * @note 查询条件应只返回一条记录，如果有多条查询结果，将只取一条
-     * @param item 指定的模型实例
-     * @param where 查询条件，如："id=1"
+     * Load the model data into the given model instance
+     * @note The query condition should return one record only; if there are multiple query results,
+     *       only one is taken
+     * @param item the given model instance
+     * @param where the query condition, e.g. "id=1"
      */
     template <typename T>
     net::awaitable<void> load(T &item, const std::string &where = "");
 
     /**
-     * 加载模型数据至指定的模型实例
-     * @note 查询条件应只返回一条记录，如果有多条查询结果，将只取一条
-     * @param item 指定的模型实例
-     * @param cond 查询条件
+     * Load the model data into the given model instance
+     * @note The query condition should return one record only; if there are multiple query results,
+     *       only one is taken
+     * @param item the given model instance
+     * @param cond query condition
      */
     template <typename T>
     net::awaitable<void> load(T &item, const DBCondition &cond);
 
     /**
-     * 加载模型数据至指定的模型实例, 仅供查询
-     * @param item 指定的模型实例
-     * @param sql 查询条件 select 的 sql 语句
+     * Load the model data into the given model instance, for the query only
+     * @param item the given model instance
+     * @param sql the select sql statement of the query condition
      */
     template <typename T>
     net::awaitable<void> loadView(T &item, const std::string &sql);
 
     /**
-     * 批量加载模型数据至容器
-     * @param container 指定容器
-     * @param where 查询条件
+     * Batch load the model data into a container
+     * @param container the given container
+     * @param where query condition
      */
     template <typename Container>
     net::awaitable<void> batchLoad(Container &container, const std::string &where = "");
 
     /**
-     * 批量加载模型数据至容器
-     * @param container 指定容器
-     * @param cond 查询条件
+     * Batch load the model data into a container
+     * @param container the given container
+     * @param cond query condition
      */
     template <typename Container>
     net::awaitable<void> batchLoad(Container &container, const DBCondition &cond);
 
     /**
-     * 批量加载模型数据至容器
-     * @param container 指定容器
-     * @param sql select 的查询语句
+     * Batch load the model data into a container
+     * @param container the given container
+     * @param sql the select query statement
      */
     template <typename Container>
     net::awaitable<void> batchLoadView(Container &container, const std::string &sql);
 
     /**
-     * 批量更新
-     * @param container 拥有迭代器的容器
-     * @param autotrans 启动事务
+     * Batch updating
+     * @param container a container with an iterator
+     * @param autotrans start a transaction
      */
     template <class Container>
     net::awaitable<void> batchUpdate(Container &container, bool autotrans = true);
 
     /**
-     * 批量更新
-     * @param first 迭代器起始点
-     * @param last 迭代器终止点
-     * @param autotrans 启动事务
+     * Batch updating
+     * @param first the iterator start point
+     * @param last the iterator end point
+     * @param autotrans start a transaction
      */
     template <class InputIterator>
     net::awaitable<void> batchUpdate(InputIterator first, InputIterator last,
                                      bool autotrans = true);
 
     /**
-     * 批量保存或更新
-     * @param container 拥有迭代器的容器
-     * @param autotrans 启动事务
+     * Batch saving or updating
+     * @param container a container with an iterator
+     * @param autotrans start a transaction
      */
     template <class Container>
     net::awaitable<void> batchSaveOrUpdate(Container &container, bool autotrans = true);
 
     /**
-     * 批量保存或更新
-     * @param first 迭代器起始点
-     * @param last 迭代器终止点
-     * @param autotrans 启动事务
+     * Batch saving or updating
+     * @param first the iterator start point
+     * @param last the iterator end point
+     * @param autotrans start a transaction
      */
     template <class InputIterator>
     net::awaitable<void> batchSaveOrUpdate(InputIterator first, InputIterator last,
                                            bool autotrans = true);
 
     /**
-     * 从指定表中删除符合条件的数据
-     * @param tablename 待删除数据的表名
-     * @param where 删除条件
-     * @param autotrans 启动事务
+     * Delete the data satisfying the condition from the given table
+     * @param tablename the table name of the data to be deleted
+     * @param where the deletion condition
+     * @param autotrans start a transaction
      */
     net::awaitable<void> remove(const std::string &tablename, const std::string &where,
                                 bool autotrans = true);
 
     /**
-     * 从指定表中删除符合条件的数据
-     * @param tablename 待删除数据的表名
-     * @param cond 删除条件
-     * @param autotrans 启动事务
+     * Delete the data satisfying the condition from the given table
+     * @param tablename the table name of the data to be deleted
+     * @param cond the deletion condition
+     * @param autotrans start a transaction
      */
     net::awaitable<void> remove(const std::string &tablename, const DBCondition &cond,
                                 bool autotrans = true);
 
     /**
-     * 删除
-     * @param item 待删除的数据, 通过 item.rowid() 删除，删除后，rowid 将被置为无效
-     * @param autotrans 启动事务
+     * Delete
+     * @param item the data to be deleted; it is deleted through item.rowid(), and afterwards the
+     * rowid is set to invalid
+     * @param autotrans start a transaction
      */
     template <typename T>
     net::awaitable<void> remove(T &item, bool autotrans = true);
 
     /**
-     * 批量删除
-     * @param container 拥有迭代器的容器
-     * @param autotrans 启动事务
+     * Batch deleting
+     * @param container a container with an iterator
+     * @param autotrans start a transaction
      */
     template <class Container>
     net::awaitable<void> batchRemove(Container &container, bool autotrans = true);
 
     /**
-     * 批量删除，迭代器中的数据必须是通过 TABLE_BIND 绑定的表模型
-     * @param first 迭代器起始点
-     * @param last 迭代器终止点
-     * @param autotrans 启动事务
+     * Batch deleting; the data in the iterators must be the table model bound through TABLE_BIND
+     * @param first the iterator start point
+     * @param last the iterator end point
+     * @param autotrans start a transaction
      */
     template <class InputIterator>
     net::awaitable<void> batchRemove(InputIterator first, InputIterator last,
                                      bool autotrans = true);
 
     /**
-     * 查询单个整数，如：select count(*) from table
-     * @note sql 语句应只返回单个元素，否则将抛出异常，如多条记录、多个列
-     * @param query 查询语句
-     * @param default_val 当查询失败时，返回该默认值。如果该值为 Null<int>(), 则抛出异常。
+     * Query a single integer, e.g. select count(*) from table
+     * @note The sql statement should return a single element only, otherwise an exception is
+     * thrown, such as for multiple records or multiple columns
+     * @param query query statement
+     * @param default_val the default value returned when the query fails. An exception is thrown if
+     * it is Null<int>().
      */
     net::awaitable<int> queryInt(const std::string &query, int default_val);
 
     /**
-     * 查询统计数据，如：select count(*) from table
-     * @note sql 语句应只返回单个元素，否则将抛出异常，如多条记录、多个列
-     * @param query 查询语句
-     * @param default_val 当查询失败时，返回该默认值。如果该值为 Null<NumberType>(), 则抛出异常。
+     * Query the statistical data, e.g. select count(*) from table
+     * @note The sql statement should return a single element only, otherwise an exception is
+     * thrown, such as for multiple records or multiple columns
+     * @param query query statement
+     * @param default_val the default value returned when the query fails. An exception is thrown if
+     * it is Null<NumberType>().
      */
     template <typename NumberType>
     net::awaitable<NumberType> queryNumber(const std::string &query,
                                            NumberType default_val = Null<NumberType>());
 
     /**
-     * 分页查询
-     * @tparam TableT 查询数据结构
-     * @tparam page_size 每页数据记录数
+     * Query the statistical data with the values of numbered placeholders bound to the statement
+     * @param query query statement, possibly with numbered placeholders
+     * @param default_val the default value returned when the query fails
+     * @param params the values of the placeholders, in placeholder order
+     */
+    template <typename NumberType>
+    net::awaitable<NumberType> queryNumber(const std::string &query, NumberType default_val,
+                                           const BoundValues &params);
+
+    /**
+     * Paged query
+     * @tparam TableT the query data structure
+     * @tparam page_size the number of the data records per page
      * @return AsyncSQLResultSet<TableT, page_size>
      */
     template <typename TableT, size_t page_size = 50>
     AsyncSQLResultSet<TableT, page_size> query();
 
     /**
-     * 分页查询
-     * @tparam TableT 查询数据结构
-     * @tparam page_size 每页数据记录数
-     * @param query 查询条件
+     * Paged query
+     * @tparam TableT the query data structure
+     * @tparam page_size the number of the data records per page
+     * @param query query condition
      * @return AsyncSQLResultSet<TableT, page_size>
      */
     template <typename TableT, size_t page_size = 50>
     AsyncSQLResultSet<TableT, page_size> query(const std::string &query);
 
     /**
-     * 分页查询
-     * @tparam TableT 查询数据结构
-     * @tparam page_size 每页数据记录数
-     * @param cond 查询条件
+     * Paged query
+     * @tparam TableT the query data structure
+     * @tparam page_size the number of the data records per page
+     * @param cond query condition
      * @return AsyncSQLResultSet<TableT, page_size>
      */
     template <typename TableT, size_t page_size = 50>
     AsyncSQLResultSet<TableT, page_size> query(const DBCondition &cond);
 
 private:
+    /**
+     * The internal implementation of batchSave/batchUpdate with an element filter: only the
+     * elements for which match returns true are saved (with the rowid written back) or updated
+     * @param save_mode true to save the invalid-rowid elements, false to update the valid ones
+     */
+    template <class InputIterator, class Filter>
+    net::awaitable<void> _batchProcessRange(InputIterator first, InputIterator last, Filter match,
+                                            bool save_mode, bool autotrans);
+
     AsyncDBConnectBase() = delete;
 };
 
@@ -289,7 +327,7 @@ private:
 typedef std::shared_ptr<AsyncDBConnectBase> AsyncDBConnectPtr;
 
 //-------------------------------------------------------------------------
-// inline方法实现
+// Implementation of the inline methods
 //-------------------------------------------------------------------------
 
 inline AsyncDBConnectBase::AsyncDBConnectBase(const Parameter &param) : m_params(param) {}
@@ -298,10 +336,29 @@ inline net::awaitable<int> AsyncDBConnectBase::queryInt(const std::string &query
     co_return co_await queryNumber<int>(query, default_val);
 }
 
+inline net::awaitable<AsyncSQLStatementPtr> AsyncDBConnectBase::getStatementWithParams(
+  const std::string &sql_statement, const BoundValues &params) {
+    if (params.empty()) {
+        co_return co_await getStatement(sql_statement);
+    }
+
+    auto [exec_sql, ordered] = renumberPlaceholders(sql_statement, params);
+    auto st = co_await getStatement(exec_sql);
+    st->bind_params(ordered);
+    co_return st;
+}
+
 template <typename NumberType>
 net::awaitable<NumberType> AsyncDBConnectBase::queryNumber(const std::string &query,
                                                            NumberType default_val) {
-    auto st = co_await getStatement(query);
+    co_return co_await queryNumber(query, default_val, BoundValues{});
+}
+
+template <typename NumberType>
+net::awaitable<NumberType> AsyncDBConnectBase::queryNumber(const std::string &query,
+                                                           NumberType default_val,
+                                                           const BoundValues &params) {
+    auto st = co_await getStatementWithParams(query, params);
     co_await st->exec();
 
     if (!(co_await st->moveNext() && st->getNumColumns() == 1)) {
@@ -310,7 +367,7 @@ net::awaitable<NumberType> AsyncDBConnectBase::queryNumber(const std::string &qu
     }
 
     NumberType result = 0;
-    st->getColumn(0, result);  // getColumn 是同步方法
+    st->getColumn(0, result);  // getColumn is a synchronous method
 
     if (co_await st->moveNext()) {
         HKU_CHECK(default_val != Null<NumberType>(), "query doesn't result in exactly 1 element");
@@ -321,7 +378,7 @@ net::awaitable<NumberType> AsyncDBConnectBase::queryNumber(const std::string &qu
 }
 
 //-------------------------------------------------------------------------
-// 模板方法实现
+// Implementation of the template methods
 //-------------------------------------------------------------------------
 
 template <typename T>
@@ -341,7 +398,7 @@ net::awaitable<void> AsyncDBConnectBase::save(T &item, bool autotrans) {
         } else {
             item.save(st);
             co_await st->exec();
-            item.rowid(st->getLastRowid());  // getLastRowid 是同步方法
+            item.rowid(st->getLastRowid());  // getLastRowid is a synchronous method
         }
 
         if (autotrans) {
@@ -351,13 +408,13 @@ net::awaitable<void> AsyncDBConnectBase::save(T &item, bool autotrans) {
         saved_exception = std::current_exception();
     }
 
-    // 在 try-catch 外部处理回滚
+    // Handle the rollback outside the try-catch
     if (saved_exception) {
         if (autotrans) {
             try {
                 co_await rollback();
             } catch (...) {
-                // 忽略回滚异常，保留原始异常
+                // Ignore the rollback exception and keep the original exception
             }
         }
         std::rethrow_exception(saved_exception);
@@ -389,7 +446,7 @@ net::awaitable<void> AsyncDBConnectBase::batchSave(InputIterator first, InputIte
         for (InputIterator iter = first; iter != last; ++iter) {
             iter->save(st);
             co_await st->exec();
-            iter->rowid(st->getLastRowid());  // getLastRowid 是同步方法
+            iter->rowid(st->getLastRowid());  // getLastRowid is a synchronous method
         }
 
         if (autotrans) {
@@ -399,13 +456,13 @@ net::awaitable<void> AsyncDBConnectBase::batchSave(InputIterator first, InputIte
         saved_exception = std::current_exception();
     }
 
-    // 在 try-catch 外部处理回滚
+    // Handle the rollback outside the try-catch
     if (saved_exception) {
         if (autotrans) {
             try {
                 co_await rollback();
             } catch (...) {
-                // 忽略回滚异常，保留原始异常
+                // Ignore the rollback exception and keep the original exception
             }
         }
         std::rethrow_exception(saved_exception);
@@ -433,7 +490,21 @@ net::awaitable<void> AsyncDBConnectBase::load(T &item, const std::string &where)
 
 template <typename T>
 net::awaitable<void> AsyncDBConnectBase::load(T &item, const DBCondition &cond) {
-    co_await load(item, cond.str());
+    auto [where, params] = conditionParts(cond);
+
+    std::ostringstream sql;
+    if (!where.empty()) {
+        sql << T::getSelectSQL() << " where " << where << " limit 1";
+    } else {
+        sql << T::getSelectSQL() << " limit 1";
+    }
+
+    auto st = co_await getStatementWithParams(sql.str(), params);
+    co_await st->exec();
+
+    if (co_await st->moveNext()) {
+        item.load(st);
+    }
     co_return;
 }
 
@@ -458,7 +529,23 @@ net::awaitable<void> AsyncDBConnectBase::batchLoad(Container &container, const s
 
 template <typename Container>
 net::awaitable<void> AsyncDBConnectBase::batchLoad(Container &container, const DBCondition &cond) {
-    co_await batchLoad(container, cond.str());
+    auto [where, params] = conditionParts(cond);
+
+    std::ostringstream sql;
+    if (!where.empty()) {
+        sql << Container::value_type::getSelectSQL() << " where " << where;
+    } else {
+        sql << Container::value_type::getSelectSQL();
+    }
+
+    auto st = co_await getStatementWithParams(sql.str(), params);
+    co_await st->exec();
+
+    while (co_await st->moveNext()) {
+        typename Container::value_type tmp;
+        tmp.load(st);
+        container.push_back(tmp);
+    }
 }
 
 template <typename T>
@@ -518,13 +605,64 @@ net::awaitable<void> AsyncDBConnectBase::batchUpdate(InputIterator first, InputI
         saved_exception = std::current_exception();
     }
 
-    // 在 try-catch 外部处理回滚
+    // Handle the rollback outside the try-catch
     if (saved_exception) {
         if (autotrans) {
             try {
                 co_await rollback();
             } catch (...) {
-                // 忽略回滚异常，保留原始异常
+                // Ignore the rollback exception and keep the original exception
+            }
+        }
+        std::rethrow_exception(saved_exception);
+    }
+    co_return;
+}
+
+template <class InputIterator, class Filter>
+net::awaitable<void> AsyncDBConnectBase::_batchProcessRange(InputIterator first, InputIterator last,
+                                                            Filter match, bool save_mode,
+                                                            bool autotrans) {
+    auto st = co_await getStatement(save_mode ? InputIterator::value_type::getInsertSQL()
+                                              : InputIterator::value_type::getUpdateSQL());
+
+    if (autotrans) {
+        co_await transaction();
+    }
+
+    std::exception_ptr saved_exception;
+    try {
+        for (InputIterator iter = first; iter != last; ++iter) {
+            if (!match(*iter)) {
+                continue;
+            }
+
+            if (save_mode) {
+                iter->save(st);
+            } else {
+                iter->update(st);
+            }
+            co_await st->exec();
+
+            if (save_mode) {
+                iter->rowid(st->getLastRowid());  // getLastRowid is a synchronous method
+            }
+        }
+
+        if (autotrans) {
+            co_await commit();
+        }
+    } catch (...) {
+        saved_exception = std::current_exception();
+    }
+
+    // Handle the rollback outside the try-catch
+    if (saved_exception) {
+        if (autotrans) {
+            try {
+                co_await rollback();
+            } catch (...) {
+                // Ignore the rollback exception and keep the original exception
             }
         }
         std::rethrow_exception(saved_exception);
@@ -535,19 +673,28 @@ net::awaitable<void> AsyncDBConnectBase::batchUpdate(InputIterator first, InputI
 template <class InputIterator>
 net::awaitable<void> AsyncDBConnectBase::batchSaveOrUpdate(InputIterator first, InputIterator last,
                                                            bool autotrans) {
-    std::vector<typename InputIterator::value_type> save_list;
-    std::vector<typename InputIterator::value_type> update_list;
+    if (first == last) {
+        co_return;
+    }
 
+    bool has_save = false;
+    bool has_update = false;
     for (auto iter = first; iter != last; ++iter) {
         if (iter->valid()) {
-            update_list.push_back(*iter);
+            has_update = true;
         } else {
-            save_list.push_back(*iter);
+            has_save = true;
         }
     }
 
-    co_await batchSave(save_list.begin(), save_list.end(), autotrans);
-    co_await batchUpdate(update_list.begin(), update_list.end(), autotrans);
+    if (has_save) {
+        co_await _batchProcessRange(
+          first, last, [](const auto &item) { return !item.valid(); }, true, autotrans);
+    }
+    if (has_update) {
+        co_await _batchProcessRange(
+          first, last, [](const auto &item) { return item.valid(); }, false, autotrans);
+    }
 }
 
 template <class Container>
@@ -579,13 +726,13 @@ net::awaitable<void> AsyncDBConnectBase::remove(T &item, bool autotrans) {
         saved_exception = std::current_exception();
     }
 
-    // 在 try-catch 外部处理回滚
+    // Handle the rollback outside the try-catch
     if (saved_exception) {
         if (autotrans) {
             try {
                 co_await rollback();
             } catch (...) {
-                // 忽略回滚异常，保留原始异常
+                // Ignore the rollback exception and keep the original exception
             }
         }
         std::rethrow_exception(saved_exception);
@@ -613,7 +760,7 @@ net::awaitable<void> AsyncDBConnectBase::batchRemove(InputIterator first, InputI
     std::exception_ptr saved_exception;
     try {
         for (InputIterator iter = first; iter != last; ++iter) {
-            co_await remove(*iter, false);  // 外层已处理事务
+            co_await remove(*iter, false);  // The outer layer has handled the transaction
         }
 
         if (autotrans) {
@@ -623,13 +770,13 @@ net::awaitable<void> AsyncDBConnectBase::batchRemove(InputIterator first, InputI
         saved_exception = std::current_exception();
     }
 
-    // 在 try-catch 外部处理回滚
+    // Handle the rollback outside the try-catch
     if (saved_exception) {
         if (autotrans) {
             try {
                 co_await rollback();
             } catch (...) {
-                // 忽略回滚异常，保留原始异常
+                // Ignore the rollback exception and keep the original exception
             }
         }
         std::rethrow_exception(saved_exception);
@@ -644,8 +791,8 @@ inline net::awaitable<void> AsyncDBConnectBase::remove(const std::string &tablen
     }
 
     std::string sql = (where == "" || where == "1=1")
-                        ? fmt::format("delete from {}", tablename, where)
-                        : (fmt::format("delete from {} where {}", tablename, where));
+                        ? fmt::format("delete from {}", sqlIdentifier(tablename), where)
+                        : (fmt::format("delete from {} where {}", sqlIdentifier(tablename), where));
 
     std::exception_ptr saved_exception;
     try {
@@ -658,13 +805,13 @@ inline net::awaitable<void> AsyncDBConnectBase::remove(const std::string &tablen
         saved_exception = std::current_exception();
     }
 
-    // 在 try-catch 外部处理回滚
+    // Handle the rollback outside the try-catch
     if (saved_exception) {
         if (autotrans) {
             try {
                 co_await rollback();
             } catch (...) {
-                // 忽略回滚异常，保留原始异常
+                // Ignore the rollback exception and keep the original exception
             }
         }
         std::rethrow_exception(saved_exception);
@@ -674,7 +821,41 @@ inline net::awaitable<void> AsyncDBConnectBase::remove(const std::string &tablen
 
 inline net::awaitable<void> AsyncDBConnectBase::remove(const std::string &tablename,
                                                        const DBCondition &cond, bool autotrans) {
-    co_await remove(tablename, cond.str(), autotrans);
+    auto [where, params] = conditionParts(cond);
+
+    if (autotrans) {
+        co_await transaction();
+    }
+
+    // the table name is an identifier and can never be bound, so it goes through the quoting point
+    std::string sql = (where.empty() || where == "1=1")
+                        ? fmt::format("delete from {}", sqlIdentifier(tablename))
+                        : (fmt::format("delete from {} where {}", sqlIdentifier(tablename), where));
+
+    std::exception_ptr saved_exception;
+    try {
+        auto st = co_await getStatementWithParams(sql, params);
+        co_await st->exec();
+
+        if (autotrans) {
+            co_await commit();
+        }
+    } catch (...) {
+        saved_exception = std::current_exception();
+    }
+
+    // Handle the rollback outside the try-catch
+    if (saved_exception) {
+        if (autotrans) {
+            try {
+                co_await rollback();
+            } catch (...) {
+                // Ignore the rollback exception and keep the original exception
+            }
+        }
+        std::rethrow_exception(saved_exception);
+    }
+    co_return;
 }
 
 template <typename TableT, size_t page_size>
@@ -689,7 +870,7 @@ AsyncSQLResultSet<TableT, page_size> AsyncDBConnectBase::query(const std::string
 
 template <typename TableT, size_t page_size>
 AsyncSQLResultSet<TableT, page_size> AsyncDBConnectBase::query(const DBCondition &cond) {
-    return AsyncSQLResultSet<TableT, page_size>(shared_from_this(), cond.str());
+    return AsyncSQLResultSet<TableT, page_size>(shared_from_this(), cond);
 }
 
 }  // namespace hku

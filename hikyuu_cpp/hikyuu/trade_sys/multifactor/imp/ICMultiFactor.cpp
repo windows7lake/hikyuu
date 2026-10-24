@@ -18,7 +18,7 @@ BOOST_CLASS_EXPORT(hku::ICMultiFactor)
 namespace hku {
 
 ICMultiFactor::ICMultiFactor() : MultiFactorBase("MF_ICWeight") {
-    setParam<int>("ic_rolling_n", 120);  // 计算滚动ic的滚动周期, 通常取 120 或 250
+    setParam<int>("ic_rolling_n", 120);  // The rolling period of the rolling IC, usually 120 or 250
 }
 
 ICMultiFactor::ICMultiFactor(const StockList& stks, const KQuery& query, const Stock& ref_stk,
@@ -44,7 +44,7 @@ IndicatorList ICMultiFactor::_calculate(const vector<IndicatorList>& all_stk_ind
     int ic_rolling_n = getParam<int>("ic_rolling_n");
     bool spearman = getParam<bool>("use_spearman");
 
-    // 计算每个经过标准化/风格化的原始因子的滚动IC值
+    // Calculate the rolling IC value of every standardized / styled original factor
     IndicatorList all_returns = _getAllReturns(ic_n);
     IndicatorList ic =
       global_parallel_for_index(0, ind_count, [&, ic_n, spearman, ic_rolling_n](size_t ii) {
@@ -66,34 +66,38 @@ IndicatorList ICMultiFactor::_calculate(const vector<IndicatorList>& all_stk_ind
     return global_parallel_for_index(0, stk_count, [&, ind_count, days_total, discard](size_t si) {
         PriceList new_values(days_total, 0.0);
         PriceList sum_weight(days_total, 0.0);
+        vector<size_t> countByDate(days_total, 0);
         for (size_t di = 0; di < discard; di++) {
             new_values[di] = Null<price_t>();
         }
 
+        // A missing factor is skipped instead of dropping the whole score of the stock, matching
+        // the other models' missing-value handling
         for (size_t ii = 0; ii < ind_count; ii++) {
             const auto* ind_data = all_stk_inds[si][ii].data();
             const auto* ic_data = ic[ii].data();
             for (size_t di = discard; di < days_total; di++) {
-                new_values[di] += ind_data[di] * ic_data[di];
-                sum_weight[di] += std::abs(ic_data[di]);
+                if (!std::isnan(ind_data[di]) && !std::isnan(ic_data[di])) {
+                    new_values[di] += ind_data[di] * ic_data[di];
+                    sum_weight[di] += std::abs(ic_data[di]);
+                    countByDate[di] += 1;
+                }
             }
         }
 
         for (size_t di = discard; di < days_total; di++) {
-            if (!std::isnan(new_values[di]) && sum_weight[di] != 0.0) {
+            // Zero weight sum means no valid information that day; an identical 0.0 score would
+            // degrade the ranking to the stock code order
+            if (countByDate[di] == 0 || sum_weight[di] == 0.0) {
+                new_values[di] = Null<price_t>();
+            } else {
                 new_values[di] = new_values[di] / sum_weight[di];
             }
         }
 
         Indicator ret = PRICELIST(new_values);
+        ret.updateDiscard(true);
         ret.name("IC");
-
-        const auto* data = ret.data();
-        for (size_t di = discard; di < days_total; di++) {
-            if (!std::isnan(data[di])) {
-                ret.setDiscard(discard);
-            }
-        }
 
         return ret;
     });

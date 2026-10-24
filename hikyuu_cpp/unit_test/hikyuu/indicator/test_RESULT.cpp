@@ -19,23 +19,23 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_RESULT") {
-    /** @arg 无效参数 */
+    /** @arg An invalid parameter */
     CHECK_THROWS_AS(RESULT(-1), std::exception);
     CHECK_THROWS_AS(RESULT(6), std::exception);
 
-    /** @arg 输入空指标 */
+    /** @arg An empty indicator is passed */
     auto ret = RESULT(Indicator(), 0);
     CHECK_EQ(ret.empty(), true);
 
-    /** @arg 正常获取 */
+    /** @arg The normal getting */
     auto k = getStock("SH000001").getKData(KQuery(-100));
-    auto macd = MACD(CLOSE(), 0);
+    auto macd = MACD(CLOSE());
     auto bar = RESULT(macd, 0);
     auto diff = RESULT(macd, 1);
     auto dea = RESULT(macd, 2);
-    auto expect = MACD(k.close(), 0);
+    auto expect = MACD(k.close());
     CHECK_UNARY(bar(k).equal(expect.getResult(0)));
     CHECK_UNARY(diff(k).equal(expect.getResult(1)));
     CHECK_UNARY(dea(k).equal(expect.getResult(2)));
@@ -46,7 +46,7 @@ TEST_CASE("test_RESULT") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_RESULT_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

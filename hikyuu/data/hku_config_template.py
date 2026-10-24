@@ -29,6 +29,14 @@ datadir = {dir}
 reload_time = {reload_time}
 quotation_server = {quotation_server}
 lazy_preload = {lazy_preload}
+; Shared memory (SHM) data service: the server must be started explicitly by calling start_shm_server() in some process (a standalone VIP plugin, valid authorization required)
+; The following switch is disabled by default; when no server is running, the process automatically loads all data in standalone mode; uncomment and set it to True to connect as a client to an existing service
+;use_shm_server = True
+; Total client handshake budget in seconds, including connection probing and the readiness wait; 0 = wait forever; on timeout it falls back to standalone mode
+;shm_server_wait_timeout = 600
+; IPC runtime directory of the shm data service (socket / lock / segment record files)
+; Change it to an absolute path shared between the host and docker containers mounted at the same location if needed
+shm_ipc_dir = {home}/.hikyuu/ipc
 
 [block]
 type = sqlite3
@@ -103,6 +111,14 @@ datadir = {dir}
 reload_time = {reload_time}
 quotation_server = {quotation_server}
 lazy_preload = {lazy_preload}
+; Shared memory (SHM) data service: the server must be started explicitly by calling start_shm_server() in some process (a standalone VIP plugin, valid authorization required)
+; The following switch is disabled by default; when no server is running, the process automatically loads all data in standalone mode; uncomment and set it to True to connect as a client to an existing service
+;use_shm_server = True
+; Total client handshake budget in seconds, including connection probing and the readiness wait; 0 = wait forever; on timeout it falls back to standalone mode
+;shm_server_wait_timeout = 600
+; IPC runtime directory of the shm data service (socket / lock / segment record files)
+; Change it to an absolute path shared between the host and docker containers mounted at the same location if needed
+shm_ipc_dir = {home}/.hikyuu/ipc
 
 [block]
 type = mysql
@@ -164,6 +180,14 @@ datadir = {dir}
 reload_time = {reload_time}
 quotation_server = {quotation_server}
 lazy_preload = {lazy_preload}
+; Shared memory (SHM) data service: the server must be started explicitly by calling start_shm_server() in some process (a standalone VIP plugin, valid authorization required)
+; The following switch is disabled by default; when no server is running, the process automatically loads all data in standalone mode; uncomment and set it to True to connect as a client to an existing service
+;use_shm_server = True
+; Total client handshake budget in seconds, including connection probing and the readiness wait; 0 = wait forever; on timeout it falls back to standalone mode
+;shm_server_wait_timeout = 600
+; IPC runtime directory of the shm data service (socket / lock / segment record files)
+; Change it to an absolute path shared between the host and docker containers mounted at the same location if needed
+shm_ipc_dir = {home}/.hikyuu/ipc
 
 [block]
 type = clickhouse
@@ -216,7 +240,6 @@ port = {port}
 usr = {usr}
 pwd = {pwd}
 """
-
 
 import_config_template = """
 [quotation]
@@ -331,16 +354,41 @@ def generate_default_config():
     from hikyuu.data.hku_config_template import hdf5_template
     user_dir = os.path.expanduser('~')
     data_dir = "c:\\stock" if sys.platform == 'win32' else f"{user_dir}/stock"
-    hdf5_config = hdf5_template.format(dir=data_dir, reload_time="00:00", quotation_server='ipc:///tmp/hikyuu_real.ipc',
-                                       lazy_preload=False, day=True, week=False,
-                                       month=False, quarter=False, halfyear=False, year=False,
-                                       min1=False, min5=False, min15=False, min30=False,
-                                       min60=False, hour2=False, timeline=False, trans=False,
-                                       day_max=100000, week_max=100000,
-                                       month_max=100000, quarter_max=100000, halfyear_max=100000,
-                                       year_max=100000, min1_max=5120, min5_max=5120, min15_max=5120,
-                                       min30_max=5120, min60_max=5120, hour2_max=5120,
-                                       timeline_max=5120, trans_max=5120)
+    hdf5_config = hdf5_template.format(
+        dir=data_dir,
+        home=user_dir,
+        reload_time="00:00",
+        quotation_server='ipc:///tmp/hikyuu_real.ipc',
+        lazy_preload=False,
+        day=True,
+        week=False,
+        month=False,
+        quarter=False,
+        halfyear=False,
+        year=False,
+        min1=False,
+        min5=False,
+        min15=False,
+        min30=False,
+        min60=False,
+        hour2=False,
+        timeline=False,
+        trans=False,
+        day_max=100000,
+        week_max=100000,
+        month_max=100000,
+        quarter_max=100000,
+        halfyear_max=100000,
+        year_max=100000,
+        min1_max=5120,
+        min5_max=5120,
+        min15_max=5120,
+        min30_max=5120,
+        min60_max=5120,
+        hour2_max=5120,
+        timeline_max=5120,
+        trans_max=5120
+    )
     config_dir = f"{user_dir}/.hikyuu"
     if not os.path.lexists(config_dir):
         os.makedirs(config_dir)

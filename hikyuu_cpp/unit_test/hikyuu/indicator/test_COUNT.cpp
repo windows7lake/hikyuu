@@ -7,8 +7,10 @@
 
 #include "doctest/doctest.h"
 #include <fstream>
+#include <limits>
 #include <hikyuu/StockManager.h>
 #include <hikyuu/indicator/crt/KDATA.h>
+#include <hikyuu/indicator/crt/PRICELIST.h>
 #include <hikyuu/indicator/crt/COUNT.h>
 #include <hikyuu/indicator/crt/CVAL.h>
 #include <hikyuu/indicator/crt/REF.h>
@@ -21,7 +23,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_COUNT") {
     /** @arg n > 0 */
     Indicator C = CLOSE();
@@ -52,7 +54,7 @@ TEST_CASE("test_COUNT") {
     CHECK_EQ(x[7], 4);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_COUNT_dyn") {
     Stock stock = StockManager::instance().getStock("sh000001");
     KData kdata = stock.getKData(KQuery(-30));
@@ -79,15 +81,54 @@ TEST_CASE("test_COUNT_dyn") {
         CHECK_EQ(expect[i], doctest::Approx(result[i]));
     }
 
+    /** @arg the static n = 0 keeps the expanding window */
     expect = COUNT(c, 0);
+    CHECK_UNARY(std::isfinite(expect[expect.discard()]));
+
+    /** @arg a per-bar window of 0 is no window at all, so every bar is Null */
     result = COUNT(c, IndParam(CVAL(c, 0)));
-    // CHECK_EQ(expect.discard(), result.discard());
-    CHECK_EQ(expect.size(), result.size());
-    for (size_t i = 0; i < result.discard(); i++) {
+    CHECK_EQ(result.size(), expect.size());
+    CHECK_EQ(result.discard(), result.size());
+    for (size_t i = 0; i < result.size(); i++) {
         CHECK_UNARY(std::isnan(result[i]));
     }
-    for (size_t i = expect.discard(); i < expect.size(); i++) {
-        CHECK_EQ(expect[i], doctest::Approx(result[i]));
+}
+
+/**
+ * @par Test points
+ * A NaN in the condition series means no data: it neither satisfies nor breaks the condition,
+ * consistent with IBarsSince and with every consumer (SG_Bool, IF, conditions all treat NaN as
+ * not holding).
+ */
+TEST_CASE("test_COUNT_nan_is_not_a_condition") {
+    PriceList a;
+    a.push_back(0);
+    a.push_back(0);
+    a.push_back(Null<price_t>());
+    a.push_back(0);
+    a.push_back(0);
+
+    Indicator x = PRICELIST(a);
+    Indicator result = COUNT(x, 3);
+    CHECK_EQ(result.size(), 5);
+    // the first two bars have no full window
+    CHECK_EQ(result.discard(), 2);
+    CHECK_UNARY(std::isnan(result[0]));
+    CHECK_UNARY(std::isnan(result[1]));
+    for (size_t i = result.discard(); i < result.size(); ++i) {
+        CHECK_EQ(result[i], 0);
+    }
+}
+
+/** @par Test points */
+TEST_CASE("test_COUNT_inf_is_not_a_condition") {
+    double inf = std::numeric_limits<double>::infinity();
+    PriceList a{0, 0, inf, 0, 0};
+    Indicator x = PRICELIST(a);
+    Indicator result = COUNT(x, 3);
+    CHECK_EQ(result.discard(), 2);
+    for (size_t i = result.discard(); i < result.size(); ++i) {
+        CHECK_EQ(result[i], 0);
     }
 }
 
@@ -96,7 +137,7 @@ TEST_CASE("test_COUNT_dyn") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_COUNT_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

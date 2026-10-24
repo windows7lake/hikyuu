@@ -54,16 +54,18 @@ inline Datetime pydatetime_to_Datetime(const pybind11::object& source) {
         second = PyDateTime_TIME_GET_SECOND(src);
         minute = PyDateTime_TIME_GET_MINUTE(src);
         hour = PyDateTime_TIME_GET_HOUR(src);
-        day = 1;      // This date (day, month, year) = (1, 0, 70)
-        month = 1;    // represents 1-Jan-1940, which is the first
-        year = 1400;  // earliest available date for Datetime, not Python datetime
+        // Time-only values map to (1400-01-01 hour:minute:second), the earliest supported hikyuu
+        // Datetime date (Datetime::min), not the Python datetime epoch
+        day = 1;
+        month = 1;
+        year = 1400;
         microsecond = PyDateTime_TIME_GET_MICROSECOND(src);
 
     } else {
         throw std::invalid_argument("Can't convert this python object to Datetime!");
     }
 
-    // Datetime 最小只到 1400年 1 月 1日，最大只到 9999 年 12月 31 日 0点
+    // Datetime only goes down to January 1, 1400 and up to 0:00 on December 31, 9999
     if (year < 1400) {
         value = Datetime::min();
     } else if (Datetime(year, month, day) == Datetime::max()) {
@@ -105,6 +107,10 @@ public:
 
         if (PyLong_Check(src)) {
             long long ll_val = PyLong_AsLongLong(src);
+            if (ll_val == -1 && PyErr_Occurred()) {
+                // Overflow (or other conversion error): propagate instead of silently storing -1
+                throw pybind11::error_already_set();
+            }
             value = static_cast<int64_t>(ll_val);
             return true;
         }
@@ -146,6 +152,13 @@ public:
             value = obj.cast<KData>();
             return true;
 
+        } else if (isinstance<bytes>(obj) || isinstance<bytearray>(obj)) {
+            // Reject bytes/bytearray explicitly; as py::sequence they would otherwise iterate as
+            // integer codepoints and be silently coerced into a PriceList
+            HKU_THROW_EXCEPTION(std::logic_error,
+                                "bytes/bytearray are not supported for boost::any conversion!");
+            return false;
+
         } else if (isinstance<sequence>(obj)) {
             sequence pyseq = obj.cast<sequence>();
             size_t total = pyseq.size();
@@ -153,6 +166,8 @@ public:
             if (isinstance<Datetime>(pyseq[0])) {
                 std::vector<Datetime> vect(total);
                 for (size_t i = 0; i < total; i++) {
+                    HKU_CHECK(isinstance<Datetime>(pyseq[i]),
+                              "sequence element %zu is not Datetime", i);
                     vect[i] = pyseq[i].cast<Datetime>();
                 }
                 value = vect;
@@ -160,12 +175,14 @@ public:
             } else if (PyFloat_Check(pyseq[0].ptr()) || PyLong_Check(pyseq[0].ptr())) {
                 std::vector<price_t> vect(total);
                 for (size_t i = 0; i < total; i++) {
+                    HKU_CHECK(PyFloat_Check(pyseq[i].ptr()) || PyLong_Check(pyseq[i].ptr()),
+                              "sequence element %zu is not numeric", i);
                     vect[i] = pyseq[i].cast<price_t>();
                 }
                 value = vect;
 
             } else {
-                // 尝试 python 原生 datetime 的转换
+                // Try the conversion of the native python datetime
                 std::vector<Datetime> vect(total);
                 for (size_t i = 0; i < total; i++) {
                     vect[i] = pydatetime_to_Datetime(pyseq[i]);
@@ -203,92 +220,37 @@ public:
             return Py_BuildValue("s", s.c_str());
 
         } else if (x.type() == typeid(Datetime)) {
-            Datetime d = boost::any_cast<Datetime>(x);
-            std::stringstream cmd;
-            if (d.isNull()) {
-                cmd << "Datetime()";
-            } else {
-                cmd << "Datetime(" << d.year() << "," << d.month() << "," << d.day() << ","
-                    << d.hour() << "," << d.minute() << "," << d.second() << "," << d.millisecond()
-                    << "," << d.microsecond() << ")";
-            }
-            object o = eval(cmd.str());
+            const Datetime& d = boost::any_cast<const Datetime&>(x);
+            object o = pybind11::cast(d);
             o.inc_ref();
             return o;
 
         } else if (x.type() == typeid(KData)) {
-            const KData& k = boost::any_cast<KData>(x);
-            std::stringstream cmd;
-            if (k == Null<KData>()) {
-                cmd << "KData()";
-            } else {
-                auto stk = k.getStock();
-                auto query = k.getQuery();
-                std::stringstream q_cmd;
-                if (query.queryType() == KQuery::INDEX) {
-                    q_cmd << "Query(" << query.start() << "," << query.end() << ", Query."
-                          << KQuery::getKTypeName(query.kType()) << ", Query."
-                          << KQuery::getRecoverTypeName(query.recoverType()) << ")";
-                } else {
-                    q_cmd << "Query(Datetime('" << query.startDatetime() << "'), Datetime('"
-                          << query.endDatetime() << "'), " << "Query."
-                          << KQuery::getKTypeName(query.kType()) << ", Query."
-                          << KQuery::getRecoverTypeName(query.recoverType()) << ")";
-                }
-                cmd << "KData(get_stock('" << stk.market_code() << "'), " << q_cmd.str() << ")";
-            }
-            object o = eval(cmd.str());
+            const KData& k = boost::any_cast<const KData&>(x);
+            object o = pybind11::cast(k);
             o.inc_ref();
             return o;
 
         } else if (x.type() == typeid(Stock)) {
             const Stock& stk = boost::any_cast<const Stock&>(x);
-            std::stringstream cmd;
-            if (stk.isNull()) {
-                cmd << "Stock()";
-            } else {
-                cmd << "get_stock('" << stk.market_code() << "')";
-            }
-            object o = eval(cmd.str());
+            object o = pybind11::cast(stk);
             o.inc_ref();
             return o;
 
         } else if (x.type() == typeid(Block)) {
             const Block& blk = boost::any_cast<const Block&>(x);
-            std::stringstream cmd;
-            object o;
-            if (blk == Null<Block>()) {
-                cmd << "Block()";
-                o = eval(cmd.str());
-                o.inc_ref();
-            } else {
-                cmd << "Block('" << blk.category() << "','" << blk.name() << "')";
-                o = eval(cmd.str());
-                o.inc_ref();
-                Block out = o.cast<Block>();
-                out.add(blk.getStockList());
-            }
+            object o = pybind11::cast(blk);
+            o.inc_ref();
             return o;
 
         } else if (x.type() == typeid(KQuery)) {
-            const KQuery& query = boost::any_cast<KQuery>(x);
-            std::stringstream cmd;
-            if (query.queryType() == KQuery::INDEX) {
-                cmd << "Query(" << query.start() << "," << query.end() << ", Query."
-                    << KQuery::getKTypeName(query.kType()) << ", Query."
-                    << KQuery::getRecoverTypeName(query.recoverType()) << ")";
-            } else {
-                cmd << "Query(Datetime('" << query.startDatetime() << "'), Datetime('"
-                    << query.endDatetime() << "'), " << "Query."
-                    << KQuery::getKTypeName(query.kType()) << ", Query."
-                    << KQuery::getRecoverTypeName(query.recoverType()) << ")";
-            }
-            object o = eval(cmd.str());
+            const KQuery& query = boost::any_cast<const KQuery&>(x);
+            object o = pybind11::cast(query);
             o.inc_ref();
             return o;
 
         } else if (x.type() == typeid(PriceList)) {
-            PriceList price_list = boost::any_cast<PriceList>(x);
+            const PriceList& price_list = boost::any_cast<const PriceList&>(x);
             list o;
             for (auto iter = price_list.begin(); iter != price_list.end(); ++iter) {
                 o.append(*iter);
@@ -297,7 +259,7 @@ public:
             return o;
 
         } else if (x.type() == typeid(DatetimeList)) {
-            const DatetimeList& date_list = boost::any_cast<DatetimeList>(x);
+            const DatetimeList& date_list = boost::any_cast<const DatetimeList&>(x);
             list o;
             for (auto iter = date_list.begin(); iter != date_list.end(); ++iter) {
                 o.append(*iter);

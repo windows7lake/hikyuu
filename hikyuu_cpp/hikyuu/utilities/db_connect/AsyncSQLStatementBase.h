@@ -29,156 +29,200 @@ class AsyncDBConnectBase;
 typedef std::shared_ptr<AsyncDBConnectBase> AsyncDBConnectPtr;
 
 /**
- * 异步 SQL Statement 基类
+ * Base class of the asynchronous SQL statement
  * @ingroup DBConnect
  *
- * 提供基于 boost::asio 协程的异步 SQL 语句执行接口。
- * 所有 I/O 操作（如 exec、moveNext、getColumn）都返回 awaitable。
+ * It provides an asynchronous SQL statement execution interface based on the boost::asio coroutine.
+ * All the I/O operations (such as exec, moveNext and getColumn) return an awaitable.
  *
- * @note 保持与 SQLStatementBase 相同的 bind 和 getColumn 接口设计
- * @note 仅 I/O 密集型操作改为异步，数据绑定等本地操作保持同步
+ * @note It keeps the same bind and getColumn interface design as SQLStatementBase
+ * @note Only the I/O intensive operations are made asynchronous; the local operations such as the
+ *       data binding stay synchronous
  */
 class HKU_UTILS_API AsyncSQLStatementBase {
 public:
     /**
-     * 构造函数
-     * @param driver 数据库连接
-     * @param sql_statement SQL语句
+     * Constructor
+     * @param driver database connection
+     * @param sql_statement SQL statement
      */
     AsyncSQLStatementBase(AsyncDBConnectBase *driver, const std::string &sql_statement);
 
     virtual ~AsyncSQLStatementBase() = default;
 
-    /** 获取构建时传入的表达式SQL语句 */
+    /** Get the expression SQL statement passed at construction */
     const std::string &getSqlString() const;
 
-    /** 获取数据驱动 */
+    /** Get the data driver */
     AsyncDBConnectBase *getConnect() const;
 
     //-------------------------------------------------------------------------
-    // 异步方法 - 返回 awaitable
+    // Asynchronous methods - they return an awaitable
     //-------------------------------------------------------------------------
 
-    /** 执行 SQL */
+    /** Execute the SQL */
     net::awaitable<void> exec();
 
-    /** 移动至下一结果 */
+    /** Move to the next result */
     net::awaitable<bool> moveNext();
 
     //-------------------------------------------------------------------------
-    // 同步方法 - bind、getColumn 和 getLastRowid 操作是本地内存操作，保持同步
+    // Synchronous methods - the bind, getColumn and getLastRowid operations are local memory
+    // operations, they stay synchronous
     //-------------------------------------------------------------------------
 
-    /** 获取执行INSERT时最后插入记录的 rowid，非线程安全 */
+    /** Get the rowid of the last record inserted by the INSERT execution, it is not thread safe */
     uint64_t getLastRowid();
 
-    /** 获取 idx 指定的数据至 item */
+    /** Get the data given by idx into item.
+     * A SQL NULL column is mapped to the type's Null sentinel, @see SQLStatementBase::getColumn */
     void getColumn(int idx, double &item);
 
-    /** 获取 idx 指定的数据至 item */
+    /** Get the data given by idx into item */
     void getColumn(int idx, float &item);
 
-    /** 获取 idx 指定的数据至 item */
+    /** Get the data given by idx into item */
     void getColumn(int idx, std::string &item);
 
-    /** 获取 idx 指定的数据至 item */
+    /** Get the data given by idx into item */
     void getColumn(int idx, Datetime &item);
 
     void getColumn(int idx, std::vector<char> &item);
 
-    /** 获取 idx 指定的数据至 item */
+    /** Get the data given by idx into item */
     template <typename T>
     typename std::enable_if<std::numeric_limits<T>::is_integer>::type getColumn(int idx, T &item);
 
-    /** 获取 idx 指定的数据至 item */
+    /** Get the data given by idx into item */
     template <typename T>
     typename std::enable_if<!std::numeric_limits<T>::is_integer>::type getColumn(int idx, T &item);
 
-    /** 以指定 idx 开始顺序获取指定的数据至 item1, item2, item3 */
+    /** Get the given data into item1, item2 and item3 sequentially starting from the given idx */
     template <typename T, typename... Args>
     void getColumn(int idx, T &item, Args &...rest);
 
     //-------------------------------------------------------------------------
-    // 同步方法 - 保持不变
+    // Synchronous methods - they stay unchanged
     //-------------------------------------------------------------------------
 
-    /** 将 null 绑定至 idx 指定的 SQL 参数中 */
+    /** Bind null to the SQL parameter given by idx */
     void bind(int idx);  // bind_null
 
-    /** 将 item 的值绑定至 idx 指定的 SQL 参数中 */
+    /** Bind the value of item to the SQL parameter given by idx */
     void bind(int idx, float item);
 
-    /** 将 item 的值绑定至 idx 指定的 SQL 参数中 */
+    /** Bind the value of item to the SQL parameter given by idx */
     void bind(int idx, double item);
 
-    /** 将 item 的值绑定至 idx 指定的 SQL 参数中 */
+    /** Bind the value of item to the SQL parameter given by idx */
     void bind(int idx, const std::string &item);
 
-    /** 将字符串类型 item 绑定至 idx 指定的 SQL 参数中 */
+    /** Bind the string type item to the SQL parameter given by idx */
     void bind(int idx, const char *item, size_t len);
 
-    /** 将 Datetime 类型 item 绑定至指定的 SQL 参数中 */
+    /** Bind the Datetime type item to the given SQL parameter */
     void bind(int idx, const Datetime &item);
 
-    /** 将 item 的值绑定至 idx 指定的 SQL 参数中 */
+    /** Bind the value of item to the SQL parameter given by idx */
     void bindBlob(int idx, const std::string &item);
 
     /**
-     * 将 item 的值绑定至 idx 指定的 SQL 参数中
+     * Bind the value of item to the SQL parameter given by idx
      */
     void bindBlob(int idx, const std::vector<char> &time);
 
-    /** 将 item 的值绑定至 idx 指定的 SQL 参数中 */
+    /** Bind the value of item to the SQL parameter given by idx */
     template <typename T>
     typename std::enable_if<std::numeric_limits<T>::is_integer>::type bind(int idx, const T &item);
 
-    /** 将 item 的值绑定至 idx 指定的 SQL 参数中 */
+    /** Bind the value of item to the SQL parameter given by idx */
     template <typename T>
     typename std::enable_if<!std::numeric_limits<T>::is_integer>::type bind(int idx, const T &item);
 
     void bind(int idx, const std::vector<char> &item);
 
-    /** 将 item 的值绑定至 idx 指定的 SQL 参数中 */
+    /** Bind the value of item to the SQL parameter given by idx */
     template <typename T, typename... Args>
     void bind(int idx, const T &, const Args &...rest);
 
-    /** 获取表格列数 */
+    /**
+     * Bind a full set of condition values to the anonymous placeholders of the statement, in order
+     *
+     * It stays synchronous, like the other bind operations, and has to be the only binder of the
+     * statement. @see SQLStatementBase::bind_params
+     */
+    void bind_params(const BoundValues &params);
+
+    /** Get the number of the table columns */
     int getNumColumns() const;
 
     //-------------------------------------------------------------------------
-    // 子类接口 - 异步方法
+    // Subclass interface - the asynchronous methods
     //-------------------------------------------------------------------------
-    virtual net::awaitable<void> sub_exec() = 0;      ///< 子类接口 @see exec
-    virtual net::awaitable<bool> sub_moveNext() = 0;  ///< 子类接口 @see moveNext
+    virtual net::awaitable<void> sub_exec() = 0;      ///< Subclass interface @see exec
+    virtual net::awaitable<bool> sub_moveNext() = 0;  ///< Subclass interface @see moveNext
 
     //-------------------------------------------------------------------------
-    // 子类接口 - 同步方法（bind、getColumn 和 getLastRowid 操作通常是本地的，保持同步）
+    // Subclass interface - the synchronous methods (the bind, getColumn and getLastRowid operations
+    // are usually local, so they stay synchronous)
     //-------------------------------------------------------------------------
-    virtual uint64_t sub_getLastRowid() = 0;                ///< 子类接口 @see getLastRowid
-    virtual void sub_bindNull(int idx) = 0;                 ///< 子类接口 @see bind
-    virtual void sub_bindInt(int idx, int64_t value) = 0;   ///< 子类接口 @see bind
-    virtual void sub_bindDouble(int idx, double item) = 0;  ///< 子类接口 @see bind
-    virtual void sub_bindDatetime(int idx, const Datetime &item) = 0;       ///< 子类接口 @see bind
-    virtual void sub_bindText(int idx, const std::string &item) = 0;        ///< 子类接口 @see bind
-    virtual void sub_bindText(int idx, const char *item, size_t len) = 0;   ///< 子类接口 @see bind
-    virtual void sub_bindBlob(int idx, const std::string &item) = 0;        ///< 子类接口 @see bind
-    virtual void sub_bindBlob(int idx, const std::vector<char> &item) = 0;  ///< 子类接口 @see bind
+    virtual uint64_t sub_getLastRowid() = 0;               ///< Subclass interface @see getLastRowid
+    virtual void sub_bindNull(int idx) = 0;                ///< Subclass interface @see bind
+    virtual void sub_bindInt(int idx, int64_t value) = 0;  ///< Subclass interface @see bind
+    virtual void sub_bindUInt64(int idx, uint64_t value) {
+        if (value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            throw exception("The driver cannot bind uint64 value above INT64_MAX");
+        }
+        sub_bindInt(idx, static_cast<int64_t>(value));
+    }  ///< Subclass interface @see bind. Drivers with a native unsigned binding channel should
+       ///< override it
+    virtual void sub_bindDouble(int idx, double item) = 0;  ///< Subclass interface @see bind
+    virtual void sub_bindDatetime(int idx, const Datetime &item) = 0;       ///< Subclass interface
+                                                                            ///< @see bind
+    virtual void sub_bindText(int idx, const std::string &item) = 0;        ///< Subclass interface
+                                                                            ///< @see bind
+    virtual void sub_bindText(int idx, const char *item, size_t len) = 0;   ///< Subclass interface
+                                                                            ///< @see bind
+    virtual void sub_bindBlob(int idx, const std::string &item) = 0;        ///< Subclass interface
+                                                                            ///< @see bind
+    virtual void sub_bindBlob(int idx, const std::vector<char> &item) = 0;  ///< Subclass interface
+                                                                            ///< @see bind
 
-    virtual int sub_getNumColumns() const = 0;                      ///< 子类接口 @see getNumColumns
-    virtual void sub_getColumnAsInt64(int idx, int64_t &) = 0;      ///< 子类接口 @see getColumn
-    virtual void sub_getColumnAsDouble(int idx, double &) = 0;      ///< 子类接口 @see getColumn
-    virtual void sub_getColumnAsDatetime(int idx, Datetime &) = 0;  ///< 子类接口 @see getColumn
-    virtual void sub_getColumnAsText(int idx, std::string &) = 0;   ///< 子类接口 @see getColumn
-    virtual void sub_getColumnAsBlob(int idx, std::string &) = 0;   ///< 子类接口 @see getColumn
+    virtual int sub_getNumColumns() const = 0;  ///< Subclass interface
+                                                ///< @see getNumColumns
+    virtual void sub_getColumnAsInt64(int idx,
+                                      int64_t &) = 0;  ///< Subclass interface @see getColumn
+    virtual void sub_getColumnAsUInt64(int idx, uint64_t &item) {
+        int64_t temp;
+        sub_getColumnAsInt64(idx, temp);
+        if (temp == Null<int64_t>()) {
+            // A NULL column read back through the signed channel maps to the uint64 Null sentinel
+            item = (std::numeric_limits<uint64_t>::max)();
+            return;
+        }
+        // A negative int64 is the two's complement image of a uint64 bit pattern (drivers like
+        // SQLite store every integer as int64), so reinterpret the bits instead of rejecting
+        item = static_cast<uint64_t>(temp);
+    }  ///< Subclass interface @see getColumn. Drivers that expose an unsigned column flag should
+       ///< override it
+    virtual void sub_getColumnAsDouble(int idx,
+                                       double &) = 0;  ///< Subclass interface @see getColumn
+    virtual void sub_getColumnAsDatetime(int idx,
+                                         Datetime &) = 0;  ///< Subclass interface @see getColumn
+    virtual void sub_getColumnAsText(int idx,
+                                     std::string &) = 0;  ///< Subclass interface @see getColumn
     virtual void sub_getColumnAsBlob(int idx,
-                                     std::vector<char> &) = 0;  ///< 子类接口 @see getColumn
+                                     std::string &) = 0;  ///< Subclass interface @see getColumn
+    virtual void sub_getColumnAsBlob(
+      int idx,
+      std::vector<char> &) = 0;  ///< Subclass interface @see getColumn
 
 private:
     AsyncSQLStatementBase() = delete;
 
 protected:
-    AsyncDBConnectBase *m_driver;  ///< 数据库连接
-    std::string m_sql_string;      ///< 原始 SQL 语句
+    AsyncDBConnectBase *m_driver;  ///< Database connection
+    std::string m_sql_string;      ///< Original SQL statement
 };
 
 /** @ingroup DBConnect */
@@ -199,7 +243,7 @@ inline AsyncDBConnectBase *AsyncSQLStatementBase::getConnect() const {
 }
 
 //-------------------------------------------------------------------------
-// 异步方法实现
+// Implementation of the asynchronous methods
 //-------------------------------------------------------------------------
 
 inline net::awaitable<void> AsyncSQLStatementBase::exec() {
@@ -218,7 +262,8 @@ inline uint64_t AsyncSQLStatementBase::getLastRowid() {
 }
 
 //-------------------------------------------------------------------------
-// 同步方法实现（bind 和 getColumn 操作是本地内存操作，保持同步）
+// Implementation of the synchronous methods (the bind and getColumn operations are local memory
+// operations, they stay synchronous)
 //-------------------------------------------------------------------------
 
 inline void AsyncSQLStatementBase::getColumn(int idx, double &item) {
@@ -246,9 +291,41 @@ inline void AsyncSQLStatementBase::getColumn(int idx, std::vector<char> &item) {
 template <typename T>
 typename std::enable_if<std::numeric_limits<T>::is_integer>::type AsyncSQLStatementBase::getColumn(
   int idx, T &item) {
-    int64_t temp;
-    sub_getColumnAsInt64(idx, temp);
-    item = (T)temp;
+    if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, unsigned long long> ||
+                  (std::is_unsigned_v<T> && sizeof(T) == 8)) {
+        uint64_t temp;
+        sub_getColumnAsUInt64(idx, temp);
+        item = static_cast<T>(temp);
+    } else if constexpr (std::is_signed_v<T> && sizeof(T) < 8) {
+        // Reject silently narrowing an int64 value into a smaller signed type
+        int64_t temp;
+        sub_getColumnAsInt64(idx, temp);
+        if (temp == Null<int64_t>()) {
+            // Map the NULL sentinel onto the target type's own Null sentinel
+            item = (std::numeric_limits<T>::max)();
+            return;
+        }
+        if (temp < static_cast<int64_t>(std::numeric_limits<T>::min()) ||
+            temp > static_cast<int64_t>(std::numeric_limits<T>::max())) {
+            throw exception("Column value overflows the target integer type");
+        }
+        item = static_cast<T>(temp);
+    } else if constexpr (std::is_unsigned_v<T>) {
+        // Smaller unsigned types: reject negative values and values above the target range
+        int64_t temp;
+        sub_getColumnAsInt64(idx, temp);
+        if (temp == Null<int64_t>()) {
+            item = (std::numeric_limits<T>::max)();
+            return;
+        }
+        if (temp < 0 ||
+            static_cast<uint64_t>(temp) > static_cast<uint64_t>(std::numeric_limits<T>::max())) {
+            throw exception("Column value overflows the target unsigned integer type");
+        }
+        item = static_cast<T>(temp);
+    } else {
+        sub_getColumnAsInt64(idx, reinterpret_cast<int64_t &>(item));
+    }
 }
 
 template <typename T>
@@ -272,7 +349,7 @@ void AsyncSQLStatementBase::getColumn(int idx, T &item, Args &...rest) {
 }
 
 //-------------------------------------------------------------------------
-// 同步方法实现（bind 操作保持同步）
+// Implementation of the synchronous methods (the bind operations stay synchronous)
 //-------------------------------------------------------------------------
 
 inline void AsyncSQLStatementBase::bind(int idx, float item) {
@@ -314,7 +391,12 @@ inline void AsyncSQLStatementBase::bind(int idx, const std::vector<char> &item) 
 template <typename T>
 typename std::enable_if<std::numeric_limits<T>::is_integer>::type AsyncSQLStatementBase::bind(
   int idx, const T &item) {
-    sub_bindInt(idx, item);
+    if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, unsigned long long> ||
+                  (std::is_unsigned_v<T> && sizeof(T) == 8)) {
+        sub_bindUInt64(idx, static_cast<uint64_t>(item));
+    } else {
+        sub_bindInt(idx, static_cast<int64_t>(item));
+    }
 }
 
 template <typename T>
@@ -330,6 +412,21 @@ template <typename T, typename... Args>
 void AsyncSQLStatementBase::bind(int idx, const T &item, const Args &...rest) {
     bind(idx, item);
     bind(idx + 1, rest...);
+}
+
+inline void AsyncSQLStatementBase::bind_params(const BoundValues &params) {
+    for (size_t i = 0, len = params.size(); i < len; ++i) {
+        std::visit(
+          [&](const auto &value) {
+              using U = std::decay_t<decltype(value)>;
+              if constexpr (std::is_same_v<U, std::nullptr_t>) {
+                  bind(static_cast<int>(i));
+              } else {
+                  bind(static_cast<int>(i), value);
+              }
+          },
+          params[i]);
+    }
 }
 
 }  // namespace hku

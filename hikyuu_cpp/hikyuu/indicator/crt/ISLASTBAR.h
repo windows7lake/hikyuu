@@ -6,15 +6,15 @@
  */
 
 #pragma once
-#ifndef INDICATOR_CRT_LASTBAR_H_
-#define INDICATOR_CRT_LASTBAR_H_
+#ifndef INDICATOR_CRT_ISLASTBAR_H_
+#define INDICATOR_CRT_ISLASTBAR_H_
 
 #include "../Indicator.h"
 
 namespace hku {
 
 /**
- * 判断当前数据是否为最后一个数据，若为最后一个数据，则返回1，否则返回0.
+ * Judge whether the current data is the last one; it returns 1 if it is the last one, otherwise 0.
  * @ingroup Indicator
  */
 Indicator HKU_API ISLASTBAR();
@@ -26,4 +26,4 @@ inline Indicator ISLASTBAR(const Indicator& ind) {
 
 }  // namespace hku
 
-#endif /* INDICATOR_CRT_LASTBAR_H_ */
+#endif /* INDICATOR_CRT_ISLASTBAR_H_ */

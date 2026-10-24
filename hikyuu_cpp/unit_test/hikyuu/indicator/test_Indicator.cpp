@@ -7,7 +7,9 @@
 
 #include "../test_config.h"
 #include <hikyuu/indicator/build_in.h>
+#include <hikyuu/indicator/IndParam.h>
 #include <hikyuu/StockManager.h>
+#include <sstream>
 
 /**
  * @defgroup test_indicator_Indicator test_indicator_Indicator
@@ -15,22 +17,46 @@
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
+/** @par Test points */
+TEST_CASE("test_indicator_get_result_date_semantics") {
+    PriceList px;
+    DatetimeList dates;
+    Datetime d0(2020, 1, 1);
+    for (size_t i = 0; i < 6; ++i) {
+        px.push_back(10.0 + i);
+        dates.push_back(d0 + Days(i * 2));
+    }
+    Indicator src = PRICELIST(px, dates);
+    REQUIRE_EQ(src.size(), 6);
+    REQUIRE_EQ(src.getByDate(dates[3]), 13.0);
+
+    Indicator snap = src.getResult(0);
+    REQUIRE_EQ(snap.size(), 6);
+
+    /** @arg the snapshot answers by the reference dates of the source, as the source does */
+    CHECK_EQ(snap.getDatetime(0), src.getDatetime(0));
+    CHECK_EQ(snap.getDatetime(5), src.getDatetime(5));
+    CHECK_EQ(snap.getByDate(dates[3]), src.getByDate(dates[3]));
+    /** @arg the snapshot keeps the values of the source */
+    CHECK_EQ(snap[5], src[5]);
+}
+
 TEST_CASE("test_indicator_other") {
     double dx = Null<double>();
     size_t ix = size_t(dx);
-    // 随机值
+    // A random value
     HKU_INFO("double nan to size_t: {}", ix);
 
     float fx = Null<float>();
     ix = size_t(fx);
-    // 随机值
+    // A random value
     HKU_INFO("float nan to size_t: {}", ix);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_indicator_alike") {
-    /** @arg 空 indicator 比较 */
+    /** @arg The empty indicator comparison */
     CHECK_UNARY(Indicator().alike(Indicator()));
 
     PriceList d1, d2;
@@ -82,9 +108,9 @@ TEST_CASE("test_indicator_alike_dynamic_parameters") {
     CHECK_FALSE(DROPNA(CLOSE()).alike(DROPNA(CLOSE())));
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_operator_add") {
-    /** @arg 正常相加*/
+    /** @arg The normal addition */
     PriceList d1, d2;
     for (size_t i = 0; i < 10; ++i) {
         d1.push_back(i);
@@ -102,13 +128,13 @@ TEST_CASE("test_operator_add") {
         CHECK_EQ(result[i], i + i + 1);
     }
 
-    /** @arg 两个待加的ind的size不同，其中一个为0 */
+    /** @arg The two ind to add have different sizes and one of them is 0 */
     Indicator data3;
     result = data1 + data3;
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 两个待加的ind的size不同，其中一个为0 */
+    /** @arg The two ind to add have different sizes and one of them is 0 */
     PriceList d3;
     for (size_t i = 0; i < 20; ++i) {
         d3.push_back(i);
@@ -127,7 +153,7 @@ TEST_CASE("test_operator_add") {
         CHECK_EQ(result[i], i + i - 10);
     }
 
-    /** @arg 两个待加的ind的size相同，但result_number不同 */
+    /** @arg The two ind to add have the same size but a different result_number */
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
     KQuery query(0, 10);
@@ -153,7 +179,7 @@ TEST_CASE("test_operator_add_benchmark") {
     Indicator data1 = PRICELIST(d1);
     Indicator data2 = PRICELIST(d2);
 
-    int cycle = 10000;  // 测试循环次数
+    int cycle = 10000;  // Test loop count
 
     {
         BENCHMARK_TIME_MSG(Indicator_add, cycle, HKU_CSTR(""));
@@ -166,9 +192,9 @@ TEST_CASE("test_operator_add_benchmark") {
 }
 #endif
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_operator_sub") {
-    /** @arg 正常相减*/
+    /** @arg The normal subtraction */
     PriceList d1, d2;
     for (size_t i = 0; i < 10; ++i) {
         d1.push_back(i);
@@ -185,13 +211,13 @@ TEST_CASE("test_operator_sub") {
         CHECK_EQ(result[i], data1[i] - data2[i]);
     }
 
-    /** @arg 两个待减的ind的size不同 */
+    /** @arg The two ind to subtract have different sizes */
     Indicator data3;
     result = data1 - data3;
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 两个待减的ind的size相同，但result_number不同 */
+    /** @arg The two ind to subtract have the same size but a different result_number */
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
     KQuery query(0, 10);
@@ -216,7 +242,7 @@ TEST_CASE("test_operator_sub_benchmark") {
     Indicator data1 = PRICELIST(d1);
     Indicator data2 = PRICELIST(d2);
 
-    int cycle = 10000;  // 测试循环次数
+    int cycle = 10000;  // Test loop count
 
     {
         BENCHMARK_TIME_MSG(Indicator_sub, cycle, HKU_CSTR(""));
@@ -228,9 +254,9 @@ TEST_CASE("test_operator_sub_benchmark") {
 }
 #endif
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_operator_multi") {
-    /** @arg 正常相乘*/
+    /** @arg The normal multiplication */
     PriceList d1, d2;
     for (size_t i = 0; i < 10; ++i) {
         d1.push_back(i);
@@ -247,13 +273,13 @@ TEST_CASE("test_operator_multi") {
         CHECK_EQ(result[i], data1[i] * data2[i]);
     }
 
-    /** @arg 两个待乘的ind的size不同 */
+    /** @arg The two ind to multiply have different sizes */
     Indicator data3;
     result = data1 * data3;
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 两个待乘的ind的size相同，但result_number不同 */
+    /** @arg The two ind to multiply have the same size but a different result_number */
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
     KQuery query(0, 10);
@@ -278,7 +304,7 @@ TEST_CASE("test_operator_multi_benchmark") {
     Indicator data1 = PRICELIST(d1);
     Indicator data2 = PRICELIST(d2);
 
-    int cycle = 10000;  // 测试循环次数
+    int cycle = 10000;  // Test loop count
 
     {
         BENCHMARK_TIME_MSG(Indicator_multi, cycle, HKU_CSTR(""));
@@ -290,9 +316,9 @@ TEST_CASE("test_operator_multi_benchmark") {
 }
 #endif
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_operator_division") {
-    /** @arg 正常相除*/
+    /** @arg The normal division */
     PriceList d1, d2;
     for (size_t i = 0; i < 10; ++i) {
         d1.push_back(i);
@@ -307,19 +333,19 @@ TEST_CASE("test_operator_division") {
     CHECK_EQ(result.discard(), 0);
     for (size_t i = 0; i < 10; ++i) {
         if (data1[i] == 0.0) {
-            CHECK_UNARY((std::isinf(result[i]) || std::isnan(result[i])));
+            CHECK_UNARY(std::isnan(result[i]));
         } else {
             CHECK_EQ(result[i], doctest::Approx(data2[i] / data1[i]));
         }
     }
 
-    /** @arg 两个待除的ind的size不同 */
+    /** @arg The two ind to divide have different sizes */
     Indicator data3;
     result = data1 / data3;
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 两个待除的ind的size相同，但result_number不同 */
+    /** @arg The two ind to divide have the same size but a different result_number */
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
     KQuery query(0, 10);
@@ -330,11 +356,20 @@ TEST_CASE("test_operator_division") {
     CHECK_EQ(result.size(), k.size());
     for (size_t i = 0; i < result.size(); ++i) {
         if (data1[i] == 0.0) {
-            CHECK_UNARY(std::isinf(result[i]) || std::isnan(result[i]));
+            CHECK_UNARY(std::isnan(result[i]));
         } else {
             CHECK_EQ(result[i], doctest::Approx(k[i] / data1[i]));
         }
     }
+
+    /** @arg 0/0 and x/0 yield null, a NaN divisor still propagates NaN */
+    const double nan = Null<double>();
+    Indicator z1 = PRICELIST(PriceList{0.0, 1.0, 2.0});
+    Indicator z2 = PRICELIST(PriceList{0.0, 0.0, nan});
+    Indicator zr = z1 / z2;
+    CHECK_UNARY(std::isnan(zr[0]));
+    CHECK_UNARY(std::isnan(zr[1]));
+    CHECK_UNARY(std::isnan(zr[2]));
 }
 
 #if ENABLE_BENCHMARK_TEST
@@ -348,7 +383,7 @@ TEST_CASE("test_operator_division_benchmark") {
     Indicator data1 = PRICELIST(d1);
     Indicator data2 = PRICELIST(d2);
 
-    int cycle = 10000;  // 测试循环次数
+    int cycle = 10000;  // Test loop count
 
     {
         BENCHMARK_TIME_MSG(Indicator_div, cycle, HKU_CSTR(""));
@@ -360,9 +395,9 @@ TEST_CASE("test_operator_division_benchmark") {
 }
 #endif
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_operator_mod") {
-    /** @arg 正常取模*/
+    /** @arg The normal modulo */
     PriceList d1, d2;
     for (size_t i = 0; i < 10; ++i) {
         d1.push_back(i);
@@ -386,13 +421,13 @@ TEST_CASE("test_operator_mod") {
     CHECK_EQ(result[8], 2);
     CHECK_EQ(result[9], 2);
 
-    /** @arg 两个待除的ind的size不同 */
+    /** @arg The two ind to divide have different sizes */
     Indicator data3;
     result = data1 % data3;
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 两个待除的ind的size相同，但result_number不同 */
+    /** @arg The two ind to divide have the same size but a different result_number */
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
     KQuery query(0, 10);
@@ -424,7 +459,7 @@ TEST_CASE("test_operator_mod_benchmark") {
     Indicator data1 = PRICELIST(d1);
     Indicator data2 = PRICELIST(d2);
 
-    int cycle = 10000;  // 测试循环次数
+    int cycle = 10000;  // Test loop count
 
     {
         BENCHMARK_TIME_MSG(Indicator_mod, cycle, HKU_CSTR(""));
@@ -436,9 +471,9 @@ TEST_CASE("test_operator_mod_benchmark") {
 }
 #endif
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_operator_eq") {
-    /** @arg 正常相等*/
+    /** @arg The normal equality */
     PriceList d1, d2;
     for (size_t i = 0; i < 10; ++i) {
         d1.push_back(i);
@@ -455,13 +490,13 @@ TEST_CASE("test_operator_eq") {
         CHECK_EQ(result[i], true);
     }
 
-    /** @arg 两个ind的size不同 */
+    /** @arg The two ind have different sizes */
     Indicator data3;
     result = (data1 == data3);
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 两个ind的size相同，但result_number不同 */
+    /** @arg The two ind have the same size but a different result_number */
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
     KQuery query(0, 10);
@@ -486,7 +521,7 @@ TEST_CASE("test_operator_eq_benchmark") {
     Indicator data1 = PRICELIST(d1);
     Indicator data2 = PRICELIST(d2);
 
-    int cycle = 10000;  // 测试循环次数
+    int cycle = 10000;  // Test loop count
 
     {
         BENCHMARK_TIME_MSG(Indicator_eq, cycle, HKU_CSTR(""));
@@ -498,9 +533,9 @@ TEST_CASE("test_operator_eq_benchmark") {
 }
 #endif
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_operator_ne") {
-    /** @arg 正常不相等 */
+    /** @arg The normal inequality */
     PriceList d1, d2;
     for (size_t i = 0; i < 10; ++i) {
         d1.push_back(i);
@@ -517,13 +552,13 @@ TEST_CASE("test_operator_ne") {
         CHECK_EQ(result[i], false);
     }
 
-    /** @arg 两个ind的size不同  */
+    /** @arg The two ind have different sizes */
     Indicator data3;
     result = (data1 != data3);
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 两个ind的size相同，但result_number不同 */
+    /** @arg The two ind have the same size but a different result_number */
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
     KQuery query(0, 10);
@@ -537,7 +572,7 @@ TEST_CASE("test_operator_ne") {
     }
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_operator_gt") {
     PriceList d1, d2, d3;
     for (size_t i = 0; i < 10; ++i) {
@@ -571,13 +606,13 @@ TEST_CASE("test_operator_gt") {
         CHECK_EQ(result[i], 0.0);
     }
 
-    /** @arg 两个ind的size不同 */
+    /** @arg The two ind have different sizes */
     Indicator data4;
     result = data1 > data4;
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 两个ind的size相同，但result_number不同 */
+    /** @arg The two ind have the same size but a different result_number */
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
     KQuery query(0, 10);
@@ -591,7 +626,7 @@ TEST_CASE("test_operator_gt") {
     }
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_operator_ge") {
     PriceList d1, d2, d3;
     for (size_t i = 0; i < 10; ++i) {
@@ -625,13 +660,13 @@ TEST_CASE("test_operator_ge") {
         CHECK_EQ(result[i], 1.0);
     }
 
-    /** @arg 两个ind的size不同 */
+    /** @arg The two ind have different sizes */
     Indicator data4;
     result = data1 >= data4;
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 两个ind的size相同，但result_number不同 */
+    /** @arg The two ind have the same size but a different result_number */
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
     KQuery query(0, 10);
@@ -645,7 +680,7 @@ TEST_CASE("test_operator_ge") {
     }
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_operator_lt") {
     PriceList d1, d2, d3;
     for (size_t i = 0; i < 10; ++i) {
@@ -679,13 +714,13 @@ TEST_CASE("test_operator_lt") {
         CHECK_EQ(result[i], 0.0);
     }
 
-    /** @arg 两个ind的size不同 */
+    /** @arg The two ind have different sizes */
     Indicator data4;
     result = data1 < data4;
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 两个ind的size相同，但result_number不同 */
+    /** @arg The two ind have the same size but a different result_number */
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
     KQuery query(0, 10);
@@ -699,7 +734,7 @@ TEST_CASE("test_operator_lt") {
     }
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_operator_le") {
     PriceList d1, d2, d3;
     for (size_t i = 0; i < 10; ++i) {
@@ -733,13 +768,13 @@ TEST_CASE("test_operator_le") {
         CHECK_EQ(result[i], 1.0);
     }
 
-    /** @arg 两个ind的size不同 */
+    /** @arg The two ind have different sizes */
     Indicator data4;
     result = data1 <= data4;
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 
-    /** @arg 两个ind的size相同，但result_number不同 */
+    /** @arg The two ind have the same size but a different result_number */
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
     KQuery query(0, 10);
@@ -753,7 +788,7 @@ TEST_CASE("test_operator_le") {
     }
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_getResult_getResultAsPriceList") {
     StockManager& sm = StockManager::instance();
     Stock stock = sm.getStock("sh600000");
@@ -762,14 +797,14 @@ TEST_CASE("test_getResult_getResultAsPriceList") {
     Indicator ikdata, result1;
     PriceList result2;
 
-    /** @arg 源数据为空 */
+    /** @arg The source data is empty */
     ikdata = KDATA(kdata);
     result1 = ikdata.getResult(0);
     result2 = ikdata.getResultAsPriceList(0);
     CHECK_EQ(result1.size(), 0);
     CHECK_EQ(result2.size(), 0);
 
-    /** @arg result_num参数非法 */
+    /** @arg The invalid result_num parameter */
     query = KQuery(0, 10);
     kdata = stock.getKData(query);
     ikdata = KDATA(kdata);
@@ -779,7 +814,7 @@ TEST_CASE("test_getResult_getResultAsPriceList") {
     CHECK_EQ(result1.size(), 0);
     CHECK_EQ(result2.size(), 0);
 
-    /** @arg 正常获取 */
+    /** @arg The normal getting */
     result1 = ikdata.getResult(0);
     result2 = ikdata.getResultAsPriceList(1);
     CHECK_EQ(result1.size(), 10);
@@ -793,7 +828,7 @@ TEST_CASE("test_getResult_getResultAsPriceList") {
     CHECK_EQ(result2[9], doctest::Approx(26.55));
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_LOGIC_AND") {
     PriceList d1, d2, d3;
     for (size_t i = 0; i < 10; ++i) {
@@ -806,7 +841,7 @@ TEST_CASE("test_LOGIC_AND") {
     Indicator data2 = PRICELIST(d2);
     Indicator data3 = PRICELIST(d3);
 
-    /** @arg ind1为全0， ind2为全1 */
+    /** @arg ind1 is all 0 and ind2 is all 1 */
     Indicator result = data1 & data2;
     CHECK_EQ(result.size(), 10);
     CHECK_EQ(result.getResultNumber(), 1);
@@ -815,7 +850,7 @@ TEST_CASE("test_LOGIC_AND") {
         CHECK_EQ(result[i], 0.0);
     }
 
-    /** @arg ind为全0， val为1 */
+    /** @arg ind is all 0 and val is 1 */
     /*result = IND_AND(data1, 1.0);
     BOOST_CHECK(result.size() == 10);
     BOOST_CHECK(result.getResultNumber() == 1);
@@ -824,7 +859,7 @@ TEST_CASE("test_LOGIC_AND") {
         BOOST_CHECK(result[i] == 0.0);
     }*/
 
-    /** @arg ind1为全0， ind2为从0开始的整数 */
+    /** @arg ind1 is all 0 and ind2 is an integer starting from 0 */
     result = data1 & data3;
     CHECK_EQ(result.size(), 10);
     CHECK_EQ(result.getResultNumber(), 1);
@@ -833,7 +868,7 @@ TEST_CASE("test_LOGIC_AND") {
         CHECK_EQ(result[i], 0.0);
     }
 
-    /** @arg ind1为全1， ind2为从0开始的整数 */
+    /** @arg ind1 is all 1 and ind2 is an integer starting from 0 */
     result = data2 & data3;
     CHECK_EQ(result.size(), 10);
     CHECK_EQ(result.getResultNumber(), 1);
@@ -843,14 +878,14 @@ TEST_CASE("test_LOGIC_AND") {
         CHECK_EQ(result[i], 1.0);
     }
 
-    /** @arg 两个ind的size不同 */
+    /** @arg The two ind have different sizes */
     Indicator data4;
     result = data1 & data4;
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_LOGIC_OR") {
     PriceList d1, d2, d3;
     for (size_t i = 0; i < 10; ++i) {
@@ -863,7 +898,7 @@ TEST_CASE("test_LOGIC_OR") {
     Indicator data2 = PRICELIST(d2);
     Indicator data3 = PRICELIST(d3);
 
-    /** @arg ind1为全0， ind2为全1 */
+    /** @arg ind1 is all 0 and ind2 is all 1 */
     Indicator result = data1 | data2;
     CHECK_EQ(result.size(), 10);
     CHECK_EQ(result.getResultNumber(), 1);
@@ -872,7 +907,7 @@ TEST_CASE("test_LOGIC_OR") {
         CHECK_EQ(result[i], 1.0);
     }
 
-    /** @arg ind1为全0， ind2为从0开始的整数 */
+    /** @arg ind1 is all 0 and ind2 is an integer starting from 0 */
     result = data1 | data3;
     CHECK_EQ(result.size(), 10);
     CHECK_EQ(result.getResultNumber(), 1);
@@ -882,7 +917,7 @@ TEST_CASE("test_LOGIC_OR") {
         CHECK_EQ(result[i], 1.0);
     }
 
-    /** @arg ind1为全1， ind2为从0开始的整数 */
+    /** @arg ind1 is all 1 and ind2 is an integer starting from 0 */
     result = data2 | data3;
     CHECK_EQ(result.size(), 10);
     CHECK_EQ(result.getResultNumber(), 1);
@@ -891,14 +926,14 @@ TEST_CASE("test_LOGIC_OR") {
         CHECK_EQ(result[i], 1.0);
     }
 
-    /** @arg 两个ind的size不同 */
+    /** @arg The two ind have different sizes */
     Indicator data4;
     result = data1 | data4;
     CHECK_UNARY(result.empty());
     CHECK_EQ(result.size(), 0);
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_indicator_increment_calculate") {
     auto VAR1 = LLV(LOW(), 13);
     auto VAR2 = HHV(HIGH(), 13);
@@ -925,79 +960,33 @@ TEST_CASE("test_indicator_increment_calculate") {
     CHECK_EQ(x[159], y[159]);
 }
 
-/** @par 检测点 */
-TEST_CASE("test_combineCalculateIndicators") {
+/** @par Test points */
+TEST_CASE("test_indicator_get_result_snapshot") {
     StockManager& sm = StockManager::instance();
-    Stock stock = sm.getStock("sh600000");
-    KQuery query(0, 20);
-    KData kdata = stock.getKData(query);
+    KData kdata = sm.getStock("sh600000").getKData(KQuery(0, 20));
 
-    /** @arg 空指标列表 */
-    IndicatorList empty_indicators;
-    IndicatorList result = combineCalculateIndicators(empty_indicators, kdata);
-    CHECK_EQ(result.size(), 0);
+    Indicator src = MA(CLOSE(kdata), 5);
+    Indicator snapshot = src.getResult(0);
 
-    /** @arg 单个简单指标 */
-    Indicator close_ind = CLOSE();
-    IndicatorList single_indicator{close_ind};
-    result = combineCalculateIndicators(single_indicator, kdata);
-    check_indicator(result[0], CLOSE(kdata));
+    /** @arg the snapshot carries the source context */
+    CHECK_EQ(snapshot.getContext(), kdata);
+    CHECK_EQ(snapshot.getDatetime(0), kdata[0].datetime);
+    CHECK_EQ(snapshot.getByDate(kdata[kdata.size() - 1].datetime), src[kdata.size() - 1]);
 
-    /** @arg 多个简单指标 */
-    Indicator open_ind = OPEN();
-    Indicator high_ind = HIGH();
-    Indicator low_ind = LOW();
-    IndicatorList multi_indicators{close_ind, open_ind, high_ind, low_ind};
-    result = combineCalculateIndicators(multi_indicators, kdata);
-    CHECK_EQ(result.size(), 4);
-    check_indicator(result[0], CLOSE(kdata));
-    check_indicator(result[1], OPEN(kdata));
-    check_indicator(result[2], HIGH(kdata));
-    check_indicator(result[3], LOW(kdata));
+    /** @arg the snapshot still participates in downstream computation */
+    check_indicator(MA(snapshot, 3), MA(MA(CLOSE(kdata), 5), 3));
+    check_indicator(snapshot + snapshot, src + src);
 
-    /** @arg 包含复合指标 */
-    Indicator ma_close = MA(CLOSE(), 5);
-    Indicator rsi_close = RSI(CLOSE(), 14);
-    IndicatorList complex_indicators{ma_close, rsi_close};
-    result = combineCalculateIndicators(complex_indicators, kdata);
-    check_indicator(result[0], MA(CLOSE(kdata), 5));
-    check_indicator(result[1], RSI(CLOSE(kdata), 14));
-
-    /** @arg 测试 tovalue 参数为 true */
-    result = combineCalculateIndicators(complex_indicators, kdata, true);
-    CHECK_EQ(result.size(), 2);
-    // 当 tovalue 为 true 时，应该只返回第一个结果列
-    CHECK_EQ(result[0].getResultNumber(), 1);
-    CHECK_EQ(result[1].getResultNumber(), 1);
-    CHECK_UNARY(result[0].equal(MA(CLOSE(kdata), 5)));
-    CHECK_UNARY(result[1].equal(RSI(CLOSE(kdata), 14)));
-
-    /** @arg 测试不同的 KData 上下文 */
-    KQuery query2(10, 30);
-    KData kdata2 = stock.getKData(query2);
-    result = combineCalculateIndicators(multi_indicators, kdata2);
-    check_indicator(result[0], CLOSE(kdata2));
-    check_indicator(result[1], OPEN(kdata2));
-    check_indicator(result[2], HIGH(kdata2));
-    check_indicator(result[3], LOW(kdata2));
-
-    /** @arg 测试包含相同子节点的指标（应该去重） */
-    Indicator close1 = CLOSE();
-    Indicator close2 = CLOSE();  // 相同的指标
-    IndicatorList duplicate_indicators{close1, close2};
-    result = combineCalculateIndicators(duplicate_indicators, kdata);
-    CHECK_EQ(result.size(), 2);
-    // 虽然是相同的指标，但是会被克隆成不同的实例
-    CHECK_NE(result[0].getImp().get(), result[1].getImp().get());
-    check_indicator(result[0], CLOSE(kdata));
-    check_indicator(result[1], CLOSE(kdata));
+    /** @arg an out-of-range result index yields an empty indicator */
+    CHECK_UNARY(src.getResult(1).empty());
 }
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_Indicator_operator_alike_non_cval") {
-    // 验证 Indicator::operator() 中 alike 短路修复对非 CVAL 算子同样生效.
-    // PRICELIST 同型同参 leaf, 基类 alike 走 leaf size/data 比较(非 ICval 的 selfAlike)
-    // 两个相同 PRICELIST 嵌套 → alike true → 修复后 return ind(复用入参)
+    // Verify that the alike short-circuit fix in Indicator::operator() also applies to the non-CVAL
+    // operators. For a PRICELIST leaf of the same type and parameters, the base class alike goes
+    // through the leaf size/data comparison (not the selfAlike of ICval) Two identical nested
+    // PRICELIST -> alike true -> after the fix it returns ind (reusing the argument)
 
     PriceList d;
     for (int i = 0; i < 5; i++) {
@@ -1007,16 +996,715 @@ TEST_CASE("test_Indicator_operator_alike_non_cval") {
     Indicator pl2 = PRICELIST(d);
     CHECK_EQ(pl1.size(), 5);
     CHECK_EQ(pl2.size(), 5);
-    CHECK_NE(pl1.getImp().get(), pl2.getImp().get());  // 两个独立实例
+    CHECK_NE(pl1.getImp().get(), pl2.getImp().get());  // Two independent instances
 
-    // pl1(pl2): pl1 作算子, pl2 作被操作数, 两者 alike true → return pl2
+    // pl1(pl2): pl1 is the operator and pl2 the operand, both alike true -> return pl2
     Indicator result = pl1(pl2);
     CHECK_EQ(result.size(), pl2.size());
     for (size_t i = 0; i < pl2.size(); ++i) {
         CHECK_EQ(result[i], pl2[i]);
     }
-    // 白盒断言: 复用 pl2(非克隆 pl1)
+    // A white box assertion: pl2 is reused (pl1 is not cloned)
     CHECK_EQ(result.getImp().get(), pl2.getImp().get());
+}
+
+/** @par Test points */
+TEST_CASE("test_indicator_access_result_num_bound") {
+    PriceList d;
+    for (size_t i = 0; i < 5; ++i) {
+        d.push_back(i + 1);  // [1,2,3,4,5]
+    }
+    Indicator ind = PRICELIST(d);
+    IndicatorImpPtr imp = ind.getImp();
+
+    /** @arg num within [0, MAX_RESULT_NUM) is still accessible */
+    CHECK_EQ(ind.get(0, 0), 1.0);
+    CHECK_EQ(ind.front(0), 1.0);
+    CHECK_EQ(ind.back(0), 5.0);
+
+    /** @arg data with an out-of-bounds result_idx returns nullptr instead of reading OOB */
+    CHECK_UNARY(imp->data(MAX_RESULT_NUM) == nullptr);
+    CHECK_UNARY(imp->data(0) != nullptr);
+
+#if CHECK_ACCESS_BOUND
+    /** @arg num == MAX_RESULT_NUM is an out-of-bounds index and should throw (the throw
+     *  guard of get/front/back is only compiled when CHECK_ACCESS_BOUND is enabled) */
+    CHECK_THROWS_AS(ind.get(0, MAX_RESULT_NUM), std::out_of_range);
+    CHECK_THROWS_AS(ind.front(MAX_RESULT_NUM), std::out_of_range);
+    CHECK_THROWS_AS(ind.back(MAX_RESULT_NUM), std::out_of_range);
+#endif
+}
+
+/** @par Test points */
+TEST_CASE("test_indicator_imp_not_copyable") {
+    /** @arg IndicatorImp owns raw result buffers, so it must not be copy constructible/assignable
+     *  (an implicit copy would be a shallow copy causing a double free) */
+    static_assert(!std::is_copy_constructible<IndicatorImp>::value,
+                  "IndicatorImp must not be copy constructible");
+    static_assert(!std::is_copy_assignable<IndicatorImp>::value,
+                  "IndicatorImp must not be copy assignable");
+
+    /** @arg the supported copy path is clone(), which yields an independent instance */
+    IndicatorImpPtr imp = Indicator().getImp();
+    IndicatorImpPtr cloned = imp->clone();
+    CHECK_UNARY(cloned != nullptr);
+    CHECK_UNARY(cloned.get() != imp.get());
+}
+
+/** @par Test points */
+TEST_CASE("test_indicator_execute_mod") {
+    const double nan = Null<double>();
+    const double inf = std::numeric_limits<double>::infinity();
+    const double i64_min = -9223372036854775808.0;  // -2^63, exactly INT64_MIN
+    const double over = 9223372036854775808.0;      // 2^63, out of int64 range
+
+    PriceList a, b;
+    for (double v : {7.0, 7.0, nan, inf, i64_min, over}) {
+        a.push_back(v);
+    }
+    for (double v : {3.0, 0.0, 2.0, 2.0, -1.0, 2.0}) {
+        b.push_back(v);
+    }
+    Indicator r = PRICELIST(a) % PRICELIST(b);
+    CHECK_EQ(r.size(), 6);
+
+    /** @arg normal integer modulo */
+    CHECK_EQ(r[0], 1.0);
+    /** @arg zero divisor -> null */
+    CHECK_UNARY(std::isnan(r[1]));
+    /** @arg NaN operand -> null instead of UB in double to int64 conversion */
+    CHECK_UNARY(std::isnan(r[2]));
+    /** @arg Inf operand -> null instead of UB */
+    CHECK_UNARY(std::isnan(r[3]));
+    /** @arg INT64_MIN % -1 -> 0 without SIGFPE */
+    CHECK_EQ(r[4], 0.0);
+    /** @arg operand beyond int64 range -> null */
+    CHECK_UNARY(std::isnan(r[5]));
+}
+
+namespace {
+
+/** Compare the result of an incremental context switch with a plain full calculation */
+template <typename Factory>
+void checkIncrementEqualsFull(const Factory& make, const KData& first, const KData& then) {
+    Indicator expect = make();
+    expect.setContext(then);
+
+    Indicator got = make();
+    got.setContext(first);
+    got.setContext(then);
+
+    // One aggregated assertion per call: the runner stops after a few failed asserts, so counting
+    // the mismatched points keeps every scenario observable in a single run
+    bool same_shape =
+      got.size() == expect.size() && got.getResultNumber() == expect.getResultNumber();
+    size_t diff = same_shape ? 0 : expect.size() + 1;
+    if (same_shape) {
+        if (got.discard() != expect.discard()) {
+            ++diff;
+        }
+        for (size_t r = 0; r < expect.getResultNumber(); ++r) {
+            for (size_t i = 0; i < expect.size(); ++i) {
+                double a = expect.get(i, r);
+                double b = got.get(i, r);
+                if (std::isnan(a) && std::isnan(b)) {
+                    continue;
+                }
+                if (!(b == doctest::Approx(a).epsilon(0.0001))) {
+                    ++diff;
+                }
+            }
+        }
+    }
+    CHECK_MESSAGE(diff == 0, "mismatched points " << diff);
+}
+
+}  // namespace
+
+/** @par Test points */
+TEST_CASE("test_indicator_operand_length_must_match_context") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh600000");
+    KData k_full = stock.getKData(KQuery(0, 20));
+    CHECK_EQ(k_full.size(), 20);
+
+    PriceList px;
+    for (size_t i = 0; i < 40; ++i) {
+        px.push_back(double(i + 1));
+    }
+
+    // An indicator carrying its own data length (SLICE, DROPNA) has no value per bar of a context,
+    // so binding it to a context node is rejected instead of being guessed by position
+    auto bind = [&](const Indicator& ind) {
+        Indicator x = ind;
+        x.setContext(k_full);
+        return x[0];
+    };
+
+    /** @arg a binary node rejects an operand of another length */
+    CHECK_THROWS(bind(CLOSE() + SLICE(px, 0, 12)));
+    /** @arg a weave node rejects an operand of another length */
+    CHECK_THROWS(bind(WEAVE(CLOSE(), SLICE(px, 0, 12))));
+    /** @arg a condition node rejects an operand of another length */
+    CHECK_THROWS(bind(IF(CLOSE(), OPEN(), SLICE(px, 0, 12))));
+    /** @arg a unary node rejects an input of another length */
+    CHECK_THROWS(bind(EMA(SLICE(px, 0, 12), 3)));
+
+    // A data only tree has no context to disagree with, so the longest operand stays the anchor and
+    // the others are merged at its right end
+    Indicator data = PRICELIST(px) + SLICE(px, 0, 12);
+
+    /** @arg a data only tree still merges at the right end, with a null leading part */
+    CHECK_EQ(data.size(), 40);
+    CHECK_EQ(data.discard(), 28);
+    CHECK_UNARY(std::isnan(data[0]));
+    CHECK_EQ(data[28], doctest::Approx(px[0] + px[28]));
+    CHECK_EQ(data[39], doctest::Approx(px[11] + px[39]));
+
+    /** @arg a unary node over plain data keeps the length of its input */
+    CHECK_EQ(EMA(SLICE(px, 0, 12), 3).size(), 12);
+}
+/** @par Test points */
+TEST_CASE("test_indicator_cval_if_and_context_padding") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh600000");
+    KData k_full = stock.getKData(KQuery(0, 20));
+    Indicator closes = k_full.close();
+    Indicator opens = k_full.open();
+
+    PriceList px12;
+    for (size_t i = 0; i < 12; ++i) {
+        px12.push_back(double(i + 1));
+    }
+
+    // IF takes a scalar branch by wrapping it into CVAL over the other branch, which follows its
+    // length, so every form keeps the context length
+    Indicator i1 = IF(CLOSE() > OPEN(), HIGH(), LOW());
+    Indicator i2 = IF(CLOSE() > OPEN(), 1.0, 0.0);
+    Indicator i3 = IF(CLOSE() > OPEN(), CLOSE(), 1.0);
+    Indicator i4 = IF(CLOSE() > OPEN(), 1.0, CLOSE());
+    i1.setContext(k_full);
+    i2.setContext(k_full);
+    i3.setContext(k_full);
+    i4.setContext(k_full);
+
+    /** @arg every IF form with scalar branches keeps the context length and its values */
+    for (size_t i = 0; i < 20; ++i) {
+        bool up = closes[i] > opens[i];
+        CHECK_UNARY(!std::isnan(i2[i]));
+        CHECK_EQ(i2[i], up ? 1.0 : 0.0);
+        CHECK_EQ(i3[i], up ? closes[i] : 1.0);
+        CHECK_EQ(i4[i], up ? 1.0 : closes[i]);
+    }
+    CHECK_EQ(i1.size(), 20);
+
+    /** @arg a bare CVAL leaf takes the context length once bound */
+    Indicator c1 = CVAL(2.0);
+    c1.setContext(k_full);
+    CHECK_EQ(c1.size(), 20);
+    CHECK_EQ(c1[0], 2.0);
+
+    // CONTEXT and the two-input indicators pad a dateless reference series with CVAL plus an
+    // addition; the padding subtree is built without a context of its own, so the binding check
+    // does not apply to it and the merged length still matches the context
+    Indicator padded = hku::CONTEXT(PRICELIST(px12));
+    padded.setContext(k_full);
+
+    /** @arg a dateless context reference keeps the context length, its leading part stays null (the
+     *  zero filled CVAL is never written below the discard of the addition) */
+    CHECK_EQ(padded.size(), 20);
+    CHECK_EQ(padded.discard(), 8);
+    CHECK_UNARY(std::isnan(padded[0]));
+    CHECK_EQ(padded[8], doctest::Approx(px12[0]));
+    CHECK_EQ(padded[19], doctest::Approx(px12[11]));
+
+    // An outer addition skips the invalid leading part of its operands
+    Indicator ctx1 = CLOSE() + hku::CONTEXT(PRICELIST(px12));
+    ctx1.setContext(k_full);
+
+    /** @arg the addition of a padded reference keeps the context length from its discard on */
+    CHECK_EQ(ctx1.size(), 20);
+    for (size_t i = ctx1.discard(); i < 20; ++i) {
+        CHECK_EQ(ctx1[i], doctest::Approx(closes[i] + px12[i - 8]));
+    }
+
+    /** @arg a dateless reference of a two-input indicator keeps the context length as well */
+    Indicator corr1 = CORR(CLOSE(), PRICELIST(px12), 5);
+    corr1.setContext(k_full);
+    CHECK_EQ(corr1.size(), 20);
+    Indicator beta1 = BETA(CLOSE(), PRICELIST(px12), 5);
+    beta1.setContext(k_full);
+    CHECK_EQ(beta1.size(), 20);
+
+    /** @arg an independent context of another stock aligns by date and keeps the context length */
+    Indicator cross = CLOSE() + hku::CONTEXT(SMA(CLOSE(), 5), sm.getStock("sh000001"), true);
+    cross.setContext(k_full);
+    CHECK_EQ(cross.size(), 20);
+}
+
+/** @par Test points */
+TEST_CASE("test_indicator_increment_shift_length_match") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh600000");
+    KData k_full = stock.getKData(KQuery(0, 20));
+    KData k_inner = stock.getKData(KQuery(10, 20));
+    KData k_append = stock.getKData(KQuery(0, 30));  // the same start, more bars at the tail
+    KData k_move = stock.getKData(KQuery(10, 30));   // shifted front and extended tail
+
+    // CLOSE() is a context leaf, so every node of these trees is laid out as the context and the
+    // old results may be shifted in place; the guards must not disable the incremental path
+    auto normal_unary = [&]() { return EMA(CLOSE(), 3); };
+    auto normal_binary = [&]() { return CLOSE() + OPEN(); };
+    auto normal_if = [&]() { return IF(CLOSE(), OPEN(), HIGH()); };
+    auto normal_abs = [&]() { return ABS(CLOSE()); };
+    auto normal_weave = [&]() { return WEAVE(CLOSE(), OPEN()); };
+
+    /** @arg a context-length unary node still matches the full result on a tail append */
+    checkIncrementEqualsFull(normal_unary, k_full, k_append);
+
+    /** @arg a context-length binary node still matches the full result on a tail append */
+    checkIncrementEqualsFull(normal_binary, k_full, k_append);
+
+    /** @arg a context-length condition node still matches the full result on a tail append */
+    checkIncrementEqualsFull(normal_if, k_full, k_append);
+
+    // Element-wise nodes do not depend on where the recurrence starts, so they are compared under
+    // a shifted window too. A recursive one is not: a full recalculation seeds the recurrence at
+    // the first bar of the new window while the incremental path continues the previous one, which
+    // is a separate semantic issue, not the buffer length premise
+    /** @arg an element-wise binary node still matches the full result when the window is shifted
+     *  and appended */
+    checkIncrementEqualsFull(normal_binary, k_full, k_move);
+
+    /** @arg an element-wise condition node still matches the full result when the window is
+     *  shifted and appended */
+    checkIncrementEqualsFull(normal_if, k_full, k_move);
+
+    /** @arg the shift path still runs: a recursive node continues its recurrence on a shifted
+     *  window instead of being reseeded, so its incremental result legitimately differs from a
+     *  fresh full calculation. This guards against a too strict guard silently disabling the
+     *  incremental mechanism, which the equality checks above could not detect */
+    Indicator shifted = EMA(CLOSE(), 3);
+    shifted.setContext(k_full);
+    shifted.setContext(k_move);
+    Indicator reseeded = EMA(CLOSE(), 3);
+    reseeded.setContext(k_move);
+    CHECK_EQ(shifted.size(), reseeded.size());
+    size_t recalc_points = 0;
+    for (size_t i = 0; i < reseeded.size(); ++i) {
+        double a = reseeded[i];
+        double b = shifted[i];
+        if (std::isnan(a) && std::isnan(b)) {
+            continue;
+        }
+        if (!(b == doctest::Approx(a).epsilon(0.0001))) {
+            ++recalc_points;
+        }
+    }
+    CHECK_MESSAGE(recalc_points > 0,
+                  "the incremental shift path did not run, every point was recalculated");
+
+    // The renew path (can_inner_calculate) never recalculates the children, so it is only asserted
+    // with an element-wise node
+    /** @arg an element-wise node still matches the full result when the context shrinks into the
+     *  old window (renew fast path) */
+    checkIncrementEqualsFull(normal_abs, k_full, k_inner);
+
+    /** @arg an aligned weave node still matches the full result on a tail append */
+    checkIncrementEqualsFull(normal_weave, k_full, k_append);
+}
+
+/** @par Test points */
+TEST_CASE("test_indicator_is_same") {
+    PriceList d;
+    for (size_t i = 0; i < 5; ++i) {
+        d.push_back(i + 1);
+    }
+    Indicator a = PRICELIST(d);
+
+    /** @arg an indicator is the same as itself */
+    CHECK_UNARY(a.isSame(a));
+
+    /** @arg a copy shares the underlying imp, so it is the same instance */
+    Indicator copy = a;
+    CHECK_UNARY(a.isSame(copy));
+
+    /** @arg two distinct instances with the same formula are not the same instance */
+    Indicator another = PRICELIST(d);
+    CHECK_UNARY(!a.isSame(another));
+
+    /** @arg a null-imp indicator is never the same instance */
+    IndicatorImpPtr null_imp;
+    Indicator empty(null_imp);
+    CHECK_UNARY(!empty.isSame(a));
+    CHECK_UNARY(!a.isSame(empty));
+    CHECK_UNARY(!empty.isSame(empty));
+}
+
+/**
+ * @par Test points
+ * A context driven indicator used as an operation with a non empty input only warns, it must not
+ * die inside the warning itself.
+ *
+ * Background: the warning text of STKTYPE / ISLIMITUP / ISLIMITDOWN read a "kpart" parameter they
+ * never define, so Parameter::get threw out_of_range instead of the intended notice.
+ */
+TEST_CASE("test_context_leaf_warning_with_input") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh600000");
+    REQUIRE_FALSE(stock.isNull());
+    KData k = stock.getKData(KQuery(0, 20));
+
+    // A calculated input, so that the "input is ignored" warning branch is really reached
+    Indicator input = CLOSE();
+    input.setContext(k);
+    REQUIRE_FALSE(input.empty());
+
+    Indicator ctx_leaf = STKTYPE();
+    Indicator limit_up = ISLIMITUP();
+    Indicator limit_down = ISLIMITDOWN();
+
+    /** @arg each of them warns and keeps calculating instead of throwing */
+    CHECK_NOTHROW(ctx_leaf(input));
+    CHECK_NOTHROW(limit_up(input));
+    CHECK_NOTHROW(limit_down(input));
+
+    /** @arg the warning does not stop the indicator from producing the context values */
+    Indicator r = ctx_leaf(k);
+    CHECK_EQ(r.size(), 20);
+}
+
+namespace {
+
+// An indicator which deliberately leaves one of the bars it is asked to compute untouched, to pin
+// the contract of the incremental path: every bar the copy did not cover starts as null, so an
+// implementation may simply skip an invalid point
+class SkipOneBarIndicatorImp : public IndicatorImp {
+public:
+    SkipOneBarIndicatorImp() : IndicatorImp("SKIP_ONE_BAR", 1) {
+        m_need_context = true;
+    }
+
+    void _calculate(const Indicator&) override {
+        const KData& k = getContext();
+        HKU_IF_RETURN(k.empty(), void());
+        _readyBuffer(k.size(), 1);
+        m_discard = 0;
+        auto* dst = data();
+        for (size_t i = 0; i < k.size(); ++i) {
+            dst[i] = value_t(i);
+        }
+    }
+
+    void _increment_calculate(const Indicator&, size_t start_pos) override {
+        size_t total = getContext().size();
+        auto* dst = data();
+        for (size_t i = start_pos; i < total; ++i) {
+            if (i == m_skip_pos) {
+                continue;
+            }
+            dst[i] = value_t(i);
+        }
+    }
+
+    bool supportIncrementCalculate() const override {
+        return true;
+    }
+
+    size_t min_increment_start() const override {
+        return 1;
+    }
+
+    void skipPos(size_t pos) {
+        m_skip_pos = pos;
+    }
+
+    IndicatorImpPtr _clone() override {
+        return make_shared<SkipOneBarIndicatorImp>();
+    }
+
+private:
+    size_t m_skip_pos = std::numeric_limits<size_t>::max();
+};
+
+}  // namespace
+
+/** @par Test points */
+TEST_CASE("test_indicator_increment_clears_unwritten_bars") {
+    StockManager& sm = StockManager::instance();
+    Stock stock = sm.getStock("sh600000");
+    KData k1 = stock.getKData(KQuery(0, 30));
+    KData k2 = stock.getKData(KQuery(10, 40));  // shifted by ten bars and extended
+    CHECK_EQ(k1.size(), 30);
+    CHECK_EQ(k2.size(), 30);
+
+    auto imp = make_shared<SkipOneBarIndicatorImp>();
+    imp->skipPos(25);
+    Indicator ind(imp);
+
+    ind.setContext(k1);
+    /** @arg the full calculation writes every bar */
+    CHECK_EQ(ind[25], 25.0);
+
+    ind.setContext(k2);
+
+    /** @arg the incremental path leaves the skipped bar null instead of a stale value */
+    CHECK_EQ(ind.size(), 30);
+    CHECK_UNARY(std::isnan(ind[25]));
+    /** @arg the bars it does write keep their values */
+    CHECK_EQ(ind[19], 19.0);
+    CHECK_EQ(ind[24], 24.0);
+    CHECK_EQ(ind[26], 26.0);
+    CHECK_EQ(ind[29], 29.0);
+}
+
+/**
+ * @par Test points
+ * Comparing the formula of an indicator without an implementation must answer falsely instead of
+ * crashing.
+ *
+ * Background: alike dereferenced both implementations; an indicator left over after a move keeps no
+ * implementation at all, so any comparison touching it crashed the process.
+ */
+TEST_CASE("test_indicator_alike_null_imp") {
+    PriceList d;
+    for (size_t i = 0; i < 5; ++i) {
+        d.push_back(double(i + 1));
+    }
+
+    Indicator a = PRICELIST(d);
+    Indicator kept = std::move(a);  // a holds no implementation any more
+
+    /** @arg a moved-from indicator is not alike another indicator */
+    CHECK_UNARY(!a.alike(PRICELIST(d)));
+    /** @arg a moved-from indicator at the other side is not alike either */
+    Indicator b = PRICELIST(d);
+    CHECK_UNARY(!b.alike(a));
+    /** @arg a moved-from indicator is not alike itself either, the same rule as isSame */
+    CHECK_UNARY(!a.alike(a));
+    /** @arg two moved-from indicators are not alike */
+    Indicator c = PRICELIST(d);
+    Indicator kept_c = std::move(c);
+    CHECK_UNARY(!a.alike(c));
+    /** @arg the indicator which took over the implementation keeps comparing normally */
+    CHECK_UNARY(kept.alike(kept_c));
+}
+
+/**
+ * @par Test points
+ * Reading a parameter of an indicator without an implementation must not be reported as a missing
+ * parameter.
+ *
+ * Background: both notices were worded the same, so a moved away or explicitly empty indicator made
+ * a reader look for a parameter name which was never the problem.
+ */
+TEST_CASE("test_indicator_get_param_without_imp") {
+    Indicator empty{IndicatorImpPtr{}};
+
+    /** @arg the notice says the indicator has no implementation */
+    string message;
+    try {
+        empty.getParam<double>("n");
+    } catch (const std::exception& e) {
+        message = e.what();
+    }
+    CHECK_FALSE(message.empty());
+    CHECK_UNARY(message.find("no implementation") != string::npos);
+
+    /** @arg a missing parameter of a real indicator keeps the parameter notice */
+    Indicator ind = MA(CLOSE(), 5);
+    string param_message;
+    try {
+        ind.getParam<double>("no_such_param");
+    } catch (const std::out_of_range& e) {
+        param_message = e.what();
+    }
+    CHECK_FALSE(param_message.empty());
+    CHECK_UNARY(param_message.find("out_of_range in Parameter::get") != string::npos);
+}
+
+/**
+ * @par Test points
+ * IndicatorImp::_dyn_calculate maps a per-bar dynamic parameter value whose size_t cast would be
+ * UB or silently truncate (NaN / ±Inf / negative / fractional / oversized) to a Null result slot,
+ * matching the previous NaN behavior; valid integer bars still compute normally.
+ */
+TEST_CASE("test_indicator_dyn_step_invalid_bar") {
+    PriceList src;
+    for (int i = 0; i < 12; ++i) {
+        src.push_back(10.0 + i);
+    }
+    Indicator x = PRICELIST(src);
+    const double inf = std::numeric_limits<double>::infinity();
+
+    auto bad_bar_is_null = [&](const PriceList& n_values, size_t bad_idx, const string& tag) {
+        Indicator r = MA(x, IndParam(PRICELIST(n_values)));
+        INFO(tag);
+        CHECK_EQ(r.size(), src.size());
+        CHECK_UNARY(std::isnan(r[bad_idx]));
+        // a later bar with a full window must still be computed (the bars right after the start
+        // have an incomplete window and stay null by design)
+        CHECK_UNARY(!std::isnan(r[5]));
+    };
+
+    /** @arg negative step yields Null at that bar */
+    bad_bar_is_null(PriceList{5.0, 4.0, -1.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0}, 2,
+                    "negative");
+    /** @arg fractional step yields Null at that bar */
+    bad_bar_is_null(PriceList{5.0, 4.0, 3.5, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0}, 2,
+                    "fractional");
+    /** @arg +Inf step yields Null at that bar */
+    bad_bar_is_null(PriceList{5.0, 4.0, inf, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0}, 2,
+                    "inf");
+    /** @arg NaN step still yields Null at that bar (regression guard for the original behavior) */
+    bad_bar_is_null(
+      PriceList{5.0, 4.0, Null<double>(), 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0}, 2, "nan");
+
+    /** @arg an all-integer series computes normally (no bad bar) */
+    PriceList ok;
+    for (int i = 0; i < 12; ++i) {
+        ok.push_back(3.0);
+    }
+    Indicator r_ok = MA(x, IndParam(PRICELIST(ok)));
+    CHECK_FALSE(r_ok.empty());
+    for (size_t i = r_ok.discard(); i < r_ok.size(); ++i) {
+        CHECK_UNARY(!std::isnan(r_ok[i]));
+    }
+}
+
+/**
+ * @par Test points
+ * equalValue (shared by alike's leaf branch and Indicator::equal): two NaNs match, infinities
+ * match exactly, finite values compare within a relative threshold (absolute below magnitude 1).
+ */
+TEST_CASE("test_indicator_value_equal_threshold") {
+    const double nan = Null<double>();
+    const double inf = std::numeric_limits<double>::infinity();
+
+    /** @arg NaN same-side: equal buffers holding NaN compare equal */
+    Indicator a = PRICELIST(PriceList{nan, 1.0, 2.0});
+    Indicator b = PRICELIST(PriceList{nan, 1.0, 2.0});
+    CHECK_UNARY(a.equal(b));
+
+    /** @arg NaN vs number is not equal */
+    Indicator c = PRICELIST(PriceList{0.0, 1.0, 2.0});
+    CHECK_UNARY(!a.equal(c));
+
+    /** @arg infinities match exactly, opposite signs do not */
+    Indicator i1 = PRICELIST(PriceList{inf, -inf});
+    Indicator i2 = PRICELIST(PriceList{inf, -inf});
+    Indicator i3 = PRICELIST(PriceList{inf, inf});
+    CHECK_UNARY(i1.equal(i2));
+    CHECK_UNARY(!i1.equal(i3));
+
+    /** @arg relative tolerance scales with magnitude */
+    CHECK_UNARY(PRICELIST(PriceList{100000.0}).equal(PRICELIST(PriceList{100000.05})));
+    CHECK_UNARY(!PRICELIST(PriceList{100000.0}).equal(PRICELIST(PriceList{100000.2})));
+
+    /** @arg below magnitude 1 the threshold is absolute (the old hardcoded 1e-4 was looser) */
+    CHECK_UNARY(!PRICELIST(PriceList{0.5}).equal(PRICELIST(PriceList{0.50001})));
+
+    /** @arg alike's leaf branch compares snapshots with NaN / near values */
+    Indicator sn1 = a.getResult(0);
+    CHECK_UNARY(sn1.alike(b.getResult(0)));
+    CHECK_UNARY(sn1.alike(PRICELIST(PriceList{nan, 1.0, 2.0 + 5e-7}).getResult(0)));
+    CHECK_UNARY(!sn1.alike(c.getResult(0)));
+}
+
+/**
+ * @par Test points
+ * A cloned subtree computes independently of its source tree: binding a context to the clone must
+ * not disturb the source, and both must match the direct calculation.
+ */
+TEST_CASE("test_indicator_clone_subtree_isolation") {
+    StockManager& sm = StockManager::instance();
+    KData k = sm.getStock("sh000001").getKData(KQuery(-20));
+
+    Indicator expect = MA(CLOSE(k), 5);
+
+    IndicatorImpPtr subtree;
+    {
+        Indicator formula = MA(CLOSE(), 5) + OPEN();
+        subtree = formula.getImp()->getLeftNode()->clone();
+    }
+    // the source tree is dropped before the clone is used, so a child of the clone that still
+    // points at it is read through a dangling parent link
+    Indicator sub(subtree);
+    sub.setContext(k);
+    check_indicator(sub, expect);
+
+    check_indicator(sub + OPEN(k), expect + OPEN(k));
+}
+
+/**
+ * @par Test points
+ * A child node whose buffer was cleared by the root's setContext cleanup must stay safe to query:
+ * existNan answers false and updateDiscard is a no-op instead of dereferencing a null slot.
+ */
+TEST_CASE("test_indicator_cleared_buffer_accessors") {
+    StockManager& sm = StockManager::instance();
+    KData k1 = sm.getStock("sh000001").getKData(KQuery(-20));
+
+    Indicator f = PRICELIST(PriceList(20, 1.0)) + CLOSE(k1);
+    f.setContext(k1);
+
+    IndicatorImpPtr child = f.getImp()->getLeftNode();
+    REQUIRE_UNARY(child != nullptr);
+    // the root's post-calculation cleanup emptied the data-only child's buffers
+    CHECK_EQ(child->size(), 0u);
+    CHECK_UNARY(!child->existNan(0));
+    child->updateDiscard();
+    child->updateDiscard(true);
+    CHECK_EQ(child->discard(), 0u);
+}
+
+/** @par Test points */
+TEST_CASE("test_indicator_accessors_without_imp") {
+    Indicator empty{IndicatorImpPtr{}};
+
+    /** @arg reading a value of an indicator without an implementation gives null */
+    CHECK_UNARY(std::isnan(empty.get(0, 0)));
+    CHECK_UNARY(std::isnan(empty[0]));
+    CHECK_UNARY(std::isnan(empty.front()));
+    CHECK_UNARY(std::isnan(empty.back()));
+}
+
+/**
+ * @par Test points
+ * getIndParam / getIndParamImp report a missing dynamic parameter through hku::exception with the
+ * parameter name, instead of the bare std::out_of_range thrown by std::map::at.
+ */
+TEST_CASE("test_indicator_dyn_param_accessor_throws") {
+    Indicator ind = MA(CLOSE(), 5);
+    IndicatorImpPtr imp = ind.getImp();
+    REQUIRE_UNARY(imp != nullptr);
+    REQUIRE_UNARY(!imp->haveIndParam("n"));
+
+    /** @arg a missing dynamic parameter name throws hku::exception */
+    CHECK_THROWS_AS(imp->getIndParam("n"), hku::exception);
+    CHECK_THROWS_AS(imp->getIndParamImp("n"), hku::exception);
+
+    /** @arg the notice carries the offending name */
+    string message;
+    try {
+        imp->getIndParamImp("n");
+    } catch (const std::exception& e) {
+        message = e.what();
+    }
+    CHECK_UNARY(message.find("Invalid dynamic parameter name") != string::npos);
+    CHECK_UNARY(message.find("n") != string::npos);
+}
+
+/**
+ * @par Test points
+ * Streaming a default-constructed IndParam (no underlying implementation) must not dereference a
+ * null imp.
+ */
+TEST_CASE("test_indparam_ostream_without_imp") {
+    IndParam p;
+    std::ostringstream oss;
+    oss << p;
+    CHECK_UNARY(oss.str().find("IndParam") != string::npos);
 }
 
 /** @} */

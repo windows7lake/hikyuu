@@ -33,8 +33,12 @@ void ISumBars::_calculate(const Indicator& ind) {
     auto* dst = this->data();
 
     double a = getParam<double>("a");
+    if (!std::isfinite(a)) {
+        m_discard = total;
+        return;
+    }
     if (total == m_discard + 1) {
-        if (src[m_discard] >= a) {
+        if (std::isfinite(src[m_discard]) && src[m_discard] >= a) {
             dst[m_discard] = 0.0;
         } else {
             m_discard = total;
@@ -57,9 +61,24 @@ void ISumBars::_calculate(const Indicator& ind) {
             pos = i;
         }
 
-        if (sum < a) {
-            if (pos >= 1) {
+        // a non-finite current accumulation has no valid result: emit null and let the next
+        // older bar restart the window (older bars never accumulate forward through this bar)
+        if (!std::isfinite(sum)) {
+            pos = null_pos;
+        }
+
+        bool exhausted = false;
+        if (pos != null_pos && sum < a) {
+            if (pos > m_discard) {
                 for (size_t j = pos - 1; j >= m_discard; j--) {
+                    // a non-finite bar blocks the further backward accumulation: emit null and
+                    // keep scanning (not break the outer loop), unlike exhaustion which
+                    // invalidates all older bars
+                    if (!std::isfinite(src[j])) {
+                        pos = null_pos;
+                        break;
+                    }
+
                     sum += src[j];
                     if (sum >= a) {
                         pos = j;
@@ -68,11 +87,13 @@ void ISumBars::_calculate(const Indicator& ind) {
 
                     if (j == m_discard) {
                         pos = null_pos;
+                        exhausted = true;
                         break;
                     }
                 }
             } else {
                 pos = null_pos;
+                exhausted = true;
             }
         }
 
@@ -80,7 +101,7 @@ void ISumBars::_calculate(const Indicator& ind) {
             dst[i] = i - pos;
         }
 
-        if (i == m_discard || pos == null_pos) {
+        if (i == m_discard || exhausted) {
             last_pos = i;
             break;
         }
@@ -101,14 +122,20 @@ void ISumBars::_dyn_calculate(const Indicator& ind) {
         price_t a = ind_param[i];
         price_t sum = 0.0;
         price_t n = Null<price_t>();
-        for (size_t j = i; j >= ind.discard(); j--) {
-            sum += ind[j];
-            if (sum >= a) {
-                n = price_t(i - j);  // 与静态版 dst[i] = i - pos 一致（向前累加的周期数 >= 0）
-                break;
-            }
-            if (j == ind.discard()) {
-                break;
+        if (std::isfinite(a)) {
+            for (size_t j = i; j >= ind.discard(); j--) {
+                sum += ind[j];
+                if (!std::isfinite(sum)) {
+                    break;
+                }
+                if (sum >= a) {
+                    n = price_t(
+                      i - j);  // Same as dst[i] = i - pos of the static version (periods >= 0)
+                    break;
+                }
+                if (j == ind.discard()) {
+                    break;
+                }
             }
         }
         _set(n, i);

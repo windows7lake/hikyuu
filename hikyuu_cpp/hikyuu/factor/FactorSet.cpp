@@ -12,6 +12,7 @@
 #include "hikyuu/indicator/crt/PRICELIST.h"
 #include "hikyuu/plugin/factor.h"
 #include "hikyuu/plugin/device.h"
+#include "hikyuu/lang.h"
 #include "FactorSet.h"
 #include "imp/CompiledFactorPlan.h"
 
@@ -66,6 +67,17 @@ FactorSet::FactorSet(const FactorSet& other) : m_data(other.m_data) {}
 
 FactorSet::FactorSet(FactorSet&& other) : m_data(std::move(other.m_data)) {}
 
+bool FactorSet::hasPythonPart() const {
+    if (m_data) {
+        for (const auto& factor : m_data->factors) {
+            if (factor.formula().hasPythonPart()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 FactorSet& FactorSet::operator=(const FactorSet& other) {
     HKU_IF_RETURN(this == &other, *this);
     m_data = other.m_data;
@@ -85,19 +97,19 @@ void FactorSet::add(const Factor& factor) {
 
     const string& factor_name = factor.name();
 
-    // 检查是否已存在同名因子
+    // Check whether a factor with the same name exists already
     auto it = m_data->nameIndexMap.find(factor_name);
     if (it != m_data->nameIndexMap.end()) {
-        // 存在同名因子，覆盖之
+        // A factor with the same name exists, overwrite it
         size_t index = it->second;
         m_data->factors[index] = factor;
         HKU_WARN("Factor '{}' already exists, it will be overwritten!", factor_name);
 
     } else {
-        // 添加新因子到 vector 末尾
+        // Append the new factor to the end of the vector
         size_t index = m_data->factors.size();
         m_data->factors.push_back(factor);
-        // 在 map 中记录名称到索引的映射
+        // Record the name to index mapping in the map
         m_data->nameIndexMap[factor_name] = index;
     }
 }
@@ -136,24 +148,16 @@ void FactorSet::add(const std::map<string, Indicator>& inds) {
 void FactorSet::remove(const string& name) {
     auto it = m_data->nameIndexMap.find(name);
     if (it == m_data->nameIndexMap.end()) {
-        return;  // 因子不存在
+        return;  // The factor does not exist
     }
 
+    // Keep the insertion order and rebuild the shifted indices
     size_t index_to_remove = it->second;
-    size_t last_index = m_data->factors.size() - 1;
-
-    // 如果要删除的不是最后一个元素，需要调整后续元素的索引
-    if (index_to_remove != last_index) {
-        // 将最后一个元素移动到要删除的位置
-        m_data->factors[index_to_remove] = std::move(m_data->factors[last_index]);
-        // 更新移动元素在 map 中的索引
-        const string& moved_factor_name = m_data->factors[index_to_remove].name();
-        m_data->nameIndexMap[moved_factor_name] = index_to_remove;
-    }
-
-    // 删除最后一个元素和 map 中的条目
-    m_data->factors.pop_back();
+    m_data->factors.erase(m_data->factors.begin() + index_to_remove);
     m_data->nameIndexMap.erase(it);
+    for (size_t i = index_to_remove; i < m_data->factors.size(); ++i) {
+        m_data->nameIndexMap[m_data->factors[i].name()] = i;
+    }
 }
 
 bool FactorSet::have(const string& name) const noexcept {
@@ -167,16 +171,22 @@ const Factor& FactorSet::get(const string& name) const {
 }
 
 void FactorSet::save_to_db() const {
+    HKU_CHECK(isValidFactorName(name()), "{}",
+              htr("When saving factor values, factor names must consist of English letters, "
+                  "numbers and underscores, and cannot start with a number!"));
     saveFactorSet(*this);
 }
 
 void FactorSet::remove_from_db() const {
+    HKU_CHECK(isValidFactorName(name()), "{}",
+              htr("When saving factor values, factor names must consist of English letters, "
+                  "numbers and underscores, and cannot start with a number!"));
     removeFactorSet(name(), ktype());
 }
 
 void FactorSet::load_from_db() {
     FactorSet loaded_set = getFactorSet(name(), ktype());
-    // getFactorSet 返回的对象是 Null, Null为全局
+    // The object returned by getFactorSet is Null, which is global
     if (!loaded_set.isNull()) {
         m_data = std::move(loaded_set.m_data);
     }
@@ -240,11 +250,12 @@ vector<IndicatorList> FactorSet::getValues(const StockList& stocks, const KQuery
                 return executor.executeValues(kdata);
             };
 
-            // 这里直接向全局线程池 submit 范围任务，且有外层调用者自身就在 work 线程里 submit
-            // 本函数时（嵌套调用）的可能。`wait_for_all_non_blocking` 必须支持在等待期间
-            // work-steal 已提交的子任务（否则当池被外层任务占满时会死锁：外层等待本任务、
-            // 本任务等待子任务、却没有空闲 worker 去执行子任务）。修改这一段前请确认
-            // `GlobalStealThreadPool` 的 non_blocking 等待确有 steal 语义。
+            // A range task is submitted to the global thread pool directly here, and an outer
+            // caller may itself submit this function from a work thread (a nested call).
+            // wait_for_all_non_blocking must support work-stealing the submitted subtasks during
+            // the waiting (otherwise, when the pool is filled by the outer tasks, it would
+            // deadlock: the outer waits for this task, this task waits for the subtasks and no idle
+            // worker executes them). Before changing this part,
             auto* task_group = get_global_task_group();
             HKU_ASSERT(task_group);
             auto ranges = parallelIndexRange(0, stk_total, task_group->worker_num());
@@ -266,22 +277,40 @@ vector<IndicatorList> FactorSet::getValues(const StockList& stocks, const KQuery
         }
     }
 
-    // 创建结果容器，每个股票对应一个 IndicatorList
-    size_t stk_total = stocks.size();
-    size_t factor_total = m_data->factors.size();
-    result.resize(stk_total);
-    for (size_t i = 0; i < stk_total; ++i) {
-        result[i].resize(factor_total);
-    }
+    // Create the result container, one IndicatorList per stock
+    const size_t stk_total = stocks.size();
+    const size_t factor_total = m_data->factors.size();
+    result.resize(stk_total, IndicatorList(factor_total));
+    HKU_IF_RETURN(stk_total == 0 || factor_total == 0, result);
 
     const auto& factors = m_data->factors;
-    global_parallel_for_index_void(0, factor_total, [&](size_t i) {
-        IndicatorList factor_values =
-          factors[i].getValues(stocks, query, align, fill_null, tovalue, false, align_dates);
-        for (size_t j = 0; j < stk_total; ++j) {
-            result[j][i] = std::move(factor_values[j]);
-        }
-    });
+    if (align) {
+        DatetimeList dates = align_dates.empty()
+                               ? StockManager::instance().getTradingCalendar(query)
+                               : align_dates;
+        HKU_IF_RETURN(dates.empty(), result);
+        Indicator null_ind = PRICELIST(PriceList(dates.size(), Null<price_t>()), dates);
+        global_parallel_for_index_void(0, stk_total, [&](size_t j) {
+            KData k = stocks[j].getKData(query);
+            for (size_t i = 0; i < factor_total; ++i) {
+                if (k.empty()) {
+                    result[j][i] = null_ind;
+                } else {
+                    result[j][i] =
+                      tovalue ? ALIGN(factors[i].formula(), dates, fill_null)(k).getResult(0)
+                              : ALIGN(factors[i].formula(), dates, fill_null)(k);
+                }
+            }
+        });
+    } else {
+        global_parallel_for_index_void(0, stk_total, [&](size_t j) {
+            KData k = stocks[j].getKData(query);
+            for (size_t i = 0; i < factor_total; ++i) {
+                result[j][i] =
+                  tovalue ? factors[i].formula()(k).getResult(0) : factors[i].formula()(k);
+            }
+        });
+    }
 
     return result;
 }

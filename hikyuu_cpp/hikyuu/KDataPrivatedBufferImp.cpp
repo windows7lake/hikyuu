@@ -34,23 +34,17 @@ DatetimeList KDataPrivatedBufferImp::getDatetimeList() const {
 }
 
 size_t KDataPrivatedBufferImp::startPos() const {
-    if (!m_have_pos_in_stock) {
-        _getPosInStock();
-    }
+    std::call_once(m_pos_once, [this] { _getPosInStock(); });
     return m_start;
 }
 
 size_t KDataPrivatedBufferImp::endPos() const {
-    if (!m_have_pos_in_stock) {
-        _getPosInStock();
-    }
+    std::call_once(m_pos_once, [this] { _getPosInStock(); });
     return m_end;
 }
 
 size_t KDataPrivatedBufferImp::lastPos() const {
-    if (!m_have_pos_in_stock) {
-        _getPosInStock();
-    }
+    std::call_once(m_pos_once, [this] { _getPosInStock(); });
     return m_end == 0 ? 0 : m_end - 1;
 }
 
@@ -60,31 +54,26 @@ void KDataPrivatedBufferImp::_getPosInStock() const {
         m_start = 0;
         m_end = 0;
     }
-    m_have_pos_in_stock = true;
 }
 
 size_t KDataPrivatedBufferImp::getPos(const Datetime& datetime) const noexcept {
-    KRecordList::const_iterator iter;
-    KRecord comp_record;
-    comp_record.datetime = datetime;
-    iter = lower_bound(
-      m_buffer.cbegin(), m_buffer.cend(), comp_record,
-      std::bind(std::less<Datetime>(), std::bind(&KRecord::datetime, std::placeholders::_1),
-                std::bind(&KRecord::datetime, std::placeholders::_2)));
-    if (iter == m_buffer.cend() || iter->datetime != datetime) {
-        return Null<size_t>();
-    }
-
-    return (iter - m_buffer.cbegin());
+    return getKRecordPosByDatetime(m_buffer.data(), m_buffer.size(), datetime);
 }
 
 void KDataPrivatedBufferImp::_recover() {
-    // 不支持复权时，直接返回
+    // Return directly when the adjustment is not supported
     if (m_buffer.empty() || m_query.recoverType() == KQuery::NO_RECOVER)
         return;
 
-    // 日线以上复权处理
+    if (KQuery::isExtraKType(m_query.kType()))
+        return;
+
     int64_t secs = KQuery::getKTypeInSeconds(m_query.kType());
+    HKU_WARN_IF_RETURN(
+      secs <= 0, void(),
+      "Can't get the seconds of the ktype {}, the recovery is skipped and the raw data is kept",
+      m_query.kType());
+
     if (secs > KQuery::getKTypeInSeconds(KQuery::DAY)) {
         _recoverForUpDay();
         return;
@@ -132,6 +121,14 @@ void KDataPrivatedBufferImp::_recoverForUpDay() {
         startOfPhase = &Datetime::startOfYear;
     }
 
+    // An extra ktype above the daily line (e.g. DAY3/DAY7) has no phase start rule; keep the raw
+    // data instead of calling the empty function (std::bad_function_call)
+    HKU_WARN_IF_RETURN(
+      !startOfPhase, void(),
+      "The ktype {} is above the daily line but has no phase start rule, the recovery is skipped "
+      "and the raw data is kept",
+      m_query.kType());
+
     Datetime startDate = startOfPhase(m_buffer.front().datetime);
     Datetime endDate = m_buffer.back().datetime.nextDay();
     KQuery query = KQueryByDate(startDate, endDate, KQuery::DAY, m_query.recoverType());
@@ -148,15 +145,25 @@ void KDataPrivatedBufferImp::_recoverForUpDay() {
         if (day_pos >= day_total)
             break;
 
-        while (day_list[day_pos].datetime < phase_start_date) {
+        while (day_pos < day_total && day_list[day_pos].datetime < phase_start_date) {
             day_pos++;
         }
+        if (day_pos >= day_total)
+            break;
+
+        // The volume and the amount are summed inside the loop below, so the accumulator must not
+        // keep the values of the first day (otherwise it is counted twice)
         KRecord record = day_list[day_pos];
+        record.transCount = 0.0;
+        record.transAmount = 0.0;
         int pre_day_pos = day_pos;
         while (day_pos < day_total && day_list[day_pos].datetime <= phase_end_date) {
+            // The low and the high are updated independently: one day may set both a new low and a
+            // new high of the phase
             if (day_list[day_pos].lowPrice < record.lowPrice) {
                 record.lowPrice = day_list[day_pos].lowPrice;
-            } else if (day_list[day_pos].highPrice > record.highPrice) {
+            }
+            if (day_list[day_pos].highPrice > record.highPrice) {
                 record.highPrice = day_list[day_pos].highPrice;
             }
             record.closePrice = day_list[day_pos].closePrice;
@@ -178,24 +185,33 @@ void KDataPrivatedBufferImp::_recoverForUpDay() {
 }
 
 /******************************************************************************
- * 前复权公式:复权后价格＝[(复权前价格-现金红利)＋配(新)股价格×流通股份变动比例]÷(1＋流通股份变动比例)
- * 向前复权指以除权后的股价为基准（即除权后的股价不变），将除权前的股价降下来。
- * 复权计算时首先从上市日开始，逐日向后判断，遇到除权日，则将上市日到除权日之间（不包括除权日）的
- * 全部股价通过复权计算降下来；然后再继续向后判断，遇到下一个除权日，则再次将上市日到该除权日之间
- * （不包括除权日）的全部股价通过复权计算降下来。
+ * The forward adjustment formula: the adjusted price = [(the pre-adjustment price - the cash
+ * dividend) + the rights (new) share price x the change ratio of the outstanding shares] / (1 + the
+ * change ratio of the outstanding shares) The forward adjustment takes the price after the
+ * ex-rights as the base (i.e. the price after the ex-rights stays unchanged) and lowers the prices
+ * before the ex-rights. In the adjustment calculation it starts from the listing date and goes
+ * forward day by day; when an ex-rights date is met, all the prices between the listing date and
+ * the ex-rights date (excluding the ex-rights date) are lowered by the adjustment calculation; then
+ * it continues forward, and when the next ex-rights date is met, the prices between the listing
+ * date and that ex-rights date (excluding the ex-rights date) are lowered by the adjustment
+ * calculation again.
  *****************************************************************************/
 void KDataPrivatedBufferImp::_recoverForward() {
     size_t total = m_buffer.size();
     HKU_IF_RETURN(total == 0, void());
 
     Datetime start_date(m_buffer.front().datetime.startOfDay());
-    Datetime end_date(m_buffer.back().datetime + m_query.kTypeInSeconds());
+    // Anchor at the stock's last data day (ex-rights not yet reflected by the data are excluded);
+    // weights after this buffer clamp to its end and are applied to it as a whole
+    const Datetime& last = m_stock.lastDatetime();
+    Datetime end_date = last.isNull() ? Null<Datetime>() : last + m_query.kTypeInSeconds();
     StockWeightList weightList = m_stock.getWeight(start_date, end_date);
     StockWeightList::const_iterator weightIter = weightList.begin();
 
     size_t pre_pos = 0;
     for (; weightIter != weightList.end(); ++weightIter) {
-        // 计算流通股份变动比例,但不处理仅仅只有流通股本改变的情况
+        // Calculate the change ratio of the outstanding shares; the case where only the outstanding
+        // share capital changes is not handled
         if ((weightIter->countAsGift() == 0.0 && weightIter->countForSell() == 0.0 &&
              weightIter->priceForSell() == 0.0 && weightIter->bonus() == 0.0 &&
              weightIter->increasement() == 0.0 && weightIter->suogu() == 0.0))
@@ -205,7 +221,7 @@ void KDataPrivatedBufferImp::_recoverForward() {
         while (i < total && m_buffer[i].datetime < weightIter->datetime()) {
             i++;
         }
-        pre_pos = i;  // 除权日
+        pre_pos = i;  // The ex-rights date
 
         price_t denominator = 0.0, temp = 0.0;
         if (weightIter->suogu() != 0.0) {
@@ -213,45 +229,57 @@ void KDataPrivatedBufferImp::_recoverForward() {
         } else {
             price_t change = 0.1 * (weightIter->countAsGift() + weightIter->countForSell() +
                                     weightIter->increasement());
-            // change 小于 0 时为缩股
-            denominator = 1.0 + change;  // 分母 = (1+流通股份变动比例)
+            // A change less than 0 means a share contraction
+            denominator =
+              1.0 + change;  // The denominator = (1 + the change ratio of the outstanding shares)
             temp = weightIter->priceForSell() * change - 0.1 * weightIter->bonus();
         }
+
+        if (denominator == 0.0)
+            continue;
 
         if (denominator == 1.0 && temp == 0.0)
             continue;
 
-        price_t volume_k = 1.0 / denominator;
-
+        // Only the price is adjusted: the volume and the turnover amount are the quantities really
+        // traded that day, so they are kept unchanged (the same convention as the mainstream data
+        // sources, e.g. Wind / JoinQuant: the adjustment applies to the price only)
         for (i = 0; i < pre_pos; ++i) {
             m_buffer[i].openPrice = (m_buffer[i].openPrice + temp) / denominator;
             m_buffer[i].highPrice = (m_buffer[i].highPrice + temp) / denominator;
             m_buffer[i].lowPrice = (m_buffer[i].lowPrice + temp) / denominator;
             m_buffer[i].closePrice = (m_buffer[i].closePrice + temp) / denominator;
-            m_buffer[i].transCount = m_buffer[i].transCount * volume_k;
-            m_buffer[i].transAmount = m_buffer[i].closePrice * m_buffer[i].transCount;
         }
     }
 }
 
 /******************************************************************************
- * 后复权公式:复权后价格＝复权前价格×(1＋流通股份变动比例)-配(新)股价格×流通股份变动比例＋现金红利
- * 向后复权指以除权前的股价为基准（即除权前的股价不变），将除权后的股价升上去。复权计算时首先从最新日开始，
- * 逐日向前判断，遇到除权日，则将除权日到最新日之间（包括除权日）的全部股价通过复权计算升上去；然后再继续
- * 向前判断，遇到下一个除权日，则再次将除权日到最新日之间（包括除权日）的全部股价通过复权计算升上去。
+ * The backward adjustment formula: the adjusted price = the pre-adjustment price x (1 + the change
+ * ratio of the outstanding shares) - the rights (new) share price x the change ratio of the
+ * outstanding shares + the cash dividend The backward adjustment takes the price before the
+ * ex-rights as the base (i.e. the price before the ex-rights stays unchanged) and raises the prices
+ * after the ex-rights. In the adjustment calculation it starts from the latest date and goes
+ * backward day by day; when an ex-rights date is met, all the prices between the ex-rights date and
+ * the latest date (including the ex-rights date) are raised by the adjustment calculation; then it
+ * continues backward, and when the next ex-rights date is met, the prices between that ex-rights
+ * date and the latest date (including the ex-rights date) are raised by the adjustment calculation
+ * again.
  *****************************************************************************/
 void KDataPrivatedBufferImp::_recoverBackward() {
     size_t total = m_buffer.size();
     HKU_IF_RETURN(total == 0, void());
 
-    Datetime start_date(m_buffer.front().datetime.startOfDay());
+    // Anchor at the stock's data start: fetch every ex-right from the beginning so the result does
+    // not depend on this buffer's range; weights before the buffer clamp to its front and are
+    // applied to it as a whole
     Datetime end_date(m_buffer.back().datetime + m_query.kTypeInSeconds());
-    StockWeightList weightList = m_stock.getWeight(start_date, end_date);
+    StockWeightList weightList = m_stock.getWeight(Datetime::min(), end_date);
     StockWeightList::const_reverse_iterator weightIter = weightList.rbegin();
 
     size_t pre_pos = total - 1;
     for (; weightIter != weightList.rend(); ++weightIter) {
-        // 计算流通股份变动比例,但不处理仅仅只有流通股本改变的情况
+        // Calculate the change ratio of the outstanding shares; the case where only the outstanding
+        // share capital changes is not handled
         if ((weightIter->countAsGift() == 0.0 && weightIter->countForSell() == 0.0 &&
              weightIter->priceForSell() == 0.0 && weightIter->bonus() == 0.0 &&
              weightIter->increasement() == 0.0 && weightIter->suogu() == 0.0))
@@ -262,8 +290,11 @@ void KDataPrivatedBufferImp::_recoverBackward() {
             i--;
         }
 
-        // 分钟数据，需要跳过第一个时间点
-        if (i != pre_pos && m_buffer[i].datetime != m_buffer[i].datetime.startOfDay()) {
+        // For the minute data the adjustment starts at the first bar of the ex-rights day: only
+        // skip the bar found here when it belongs to an earlier day (the buffer may already start
+        // on the ex-rights day)
+        if (i != pre_pos &&
+            m_buffer[i].datetime.startOfDay() < weightIter->datetime().startOfDay()) {
             i++;
         }
 
@@ -273,109 +304,93 @@ void KDataPrivatedBufferImp::_recoverBackward() {
         if (weightIter->suogu() != 0.0) {
             denominator = weightIter->suogu();
         } else {
-            // 流通股份变动比例
+            // The change ratio of the outstanding shares
             price_t change = 0.1 * (weightIter->countAsGift() + weightIter->countForSell() +
                                     weightIter->increasement());
-            // change 小于 0 时为缩股
-            denominator = 1.0 + change;  //(1+流通股份变动比例)
+            // A change less than 0 means a share contraction
+            denominator = 1.0 + change;  // (1 + the change ratio of the outstanding shares)
             temp = 0.1 * weightIter->bonus() - weightIter->priceForSell() * change;
         }
+
+        if (denominator == 0.0)
+            continue;
 
         if (denominator == 1.0 && temp == 0.0)
             continue;
 
-        price_t volume_multiplier = 1.0 / denominator;  // 成交量调整倍数
-
+        // Only the price is adjusted, see the note in _recoverForward
         for (i = pre_pos; i < total; ++i) {
             m_buffer[i].openPrice = m_buffer[i].openPrice * denominator + temp;
             m_buffer[i].highPrice = m_buffer[i].highPrice * denominator + temp;
             m_buffer[i].lowPrice = m_buffer[i].lowPrice * denominator + temp;
             m_buffer[i].closePrice = m_buffer[i].closePrice * denominator + temp;
-            m_buffer[i].transCount = m_buffer[i].transCount * volume_multiplier;
-            m_buffer[i].transAmount = m_buffer[i].closePrice * m_buffer[i].transCount;
         }
     }
 }
 
 /******************************************************************************
- * 等比前复权公式:复权后价格＝复权前价格*复权率
- * 复权率＝｛[(股权登记日收盘价-现金红利)＋配(新)股价格×流通股份变动比例]÷(1＋流通股份变动比例)｝÷股权登记日收盘价
- * 向前复权指以除权后的股价为基准（即除权后的股价不变），将除权前的股价降下来。
- * 复权计算时首先从上市日开始，逐日向后判断，遇到除权日，则将上市日到除权日之间（不包括除权日）的
- * 全部股价通过复权计算降下来；然后再继续向后判断，遇到下一个除权日，则再次将上市日到该除权日之间
- * （不包括除权日）的全部股价通过复权计算降下来。
+ * The proportional forward adjustment formula: the adjusted price = the pre-adjustment price * the
+ * adjustment ratio the adjustment ratio = {[(the close price of the record date - the cash
+ * dividend) + the rights (new) share price x the change ratio of the outstanding shares] / (1 + the
+ * change ratio of the outstanding shares)} / the close price of the record date The forward
+ * adjustment takes the price after the ex-rights as the base (i.e. the price after the ex-rights
+ * stays unchanged) and lowers the prices before the ex-rights. In the adjustment calculation it
+ * starts from the listing date and goes forward day by day; when an ex-rights date is met, all the
+ * prices between the listing date and the ex-rights date (excluding the ex-rights date) are lowered
+ * by the adjustment calculation; then it continues forward, and when the next ex-rights date is
+ * met, the prices between the listing date and that ex-rights date (excluding the ex-rights date)
+ * are lowered by the adjustment calculation again.
  *****************************************************************************/
 void KDataPrivatedBufferImp::_recoverEqualForward() {
     size_t total = m_buffer.size();
     HKU_IF_RETURN(total == 0, void());
 
-    Datetime start_date(m_buffer.front().datetime.startOfDay());
     Datetime end_date(m_buffer.back().datetime + m_query.kTypeInSeconds());
-    StockWeightList weightList = m_stock.getWeight(start_date, end_date);
-    if (weightList.empty()) {
-        return;
+
+    // The forward multipliers are the reciprocals of the backward ones: the ex-rights after this
+    // buffer lower every bar, the ones inside it apply to the bars before the ex-rights day. Only
+    // the price is adjusted, see the note in _recoverForward
+    price_t seed_price = 1.0;
+    size_t pos = 0;
+    for (const auto& factor : m_stock.getEqualRecoverFactors()) {
+        const price_t price_k = 1.0 / factor.price_k;
+        if (factor.date >= end_date) {
+            seed_price *= price_k;
+            continue;
+        }
+        while (pos < total && m_buffer[pos].datetime < factor.date) {
+            pos++;
+        }
+        for (size_t i = 0; i < pos; i++) {
+            m_buffer[i].openPrice *= price_k;
+            m_buffer[i].highPrice *= price_k;
+            m_buffer[i].lowPrice *= price_k;
+            m_buffer[i].closePrice *= price_k;
+        }
     }
 
-    KRecordList kdata = m_buffer;  // 防止同一天两条权息记录
-    StockWeightList::const_iterator weightIter = weightList.begin();
-    size_t pre_pos = 0;
-    for (; weightIter != weightList.end(); ++weightIter) {
-        // 计算流通股份变动比例,但不处理仅仅只有流通股本改变的情况
-        if ((weightIter->countAsGift() == 0.0 && weightIter->countForSell() == 0.0 &&
-             weightIter->priceForSell() == 0.0 && weightIter->bonus() == 0.0 &&
-             weightIter->increasement() == 0.0 && weightIter->suogu() == 0.0))
-            continue;
-
-        size_t i = pre_pos;
-        while (i < total && m_buffer[i].datetime < weightIter->datetime()) {
-            i++;
-        }
-        pre_pos = i;  // 除权日
-
-        // 股权登记日（即除权日的前一天数据）收盘价
-        if (pre_pos == 0) {
-            continue;
-        }
-        price_t closePrice = kdata[pre_pos - 1].closePrice;
-        if (closePrice == 0.0) {
-            continue;  // 除零保护
-        }
-
-        price_t denominator = 0.0, temp = 0.0;
-        if (weightIter->suogu() != 0.0) {
-            denominator = weightIter->suogu();
-        } else {
-            // 流通股份变动比例
-            price_t change = 0.1 * (weightIter->countAsGift() + weightIter->countForSell() +
-                                    weightIter->increasement());
-            // change 小于 0 时为缩股
-            denominator = 1.0 + change;  //(1+流通股份变动比例)
-            temp = weightIter->priceForSell() * change - 0.1 * weightIter->bonus();
-        }
-
-        if (denominator == 0.0 || (denominator == 1.0 && temp == 0.0))
-            continue;
-
-        price_t k = (closePrice + temp) / (denominator * closePrice);
-        price_t volume_k = 1.0 / denominator;  // 成交量修正因子（股本变动的倒数）
-
-        for (i = 0; i < pre_pos; ++i) {
-            m_buffer[i].openPrice = k * m_buffer[i].openPrice;
-            m_buffer[i].highPrice = k * m_buffer[i].highPrice;
-            m_buffer[i].lowPrice = k * m_buffer[i].lowPrice;
-            m_buffer[i].closePrice = k * m_buffer[i].closePrice;
-            m_buffer[i].transCount = m_buffer[i].transCount * volume_k;
-            m_buffer[i].transAmount = m_buffer[i].closePrice * m_buffer[i].transCount;
+    if (seed_price != 1.0) {
+        for (auto& record : m_buffer) {
+            record.openPrice *= seed_price;
+            record.highPrice *= seed_price;
+            record.lowPrice *= seed_price;
+            record.closePrice *= seed_price;
         }
     }
 }
 
 /******************************************************************************
- * 等比后复权公式:复权后价格＝复权前价格÷复权率
- * 复权率＝｛[(股权登记日收盘价-现金红利)＋配(新)股价格×流通股份变动比例]÷(1＋流通股份变动比例)｝÷股权登记日收盘价
- * 向后复权指以除权前的股价为基准（即除权前的股价不变），将除权后的股价升上去。复权计算时首先从最新日开始，
- * 逐日向前判断，遇到除权日，则将除权日到最新日之间（包括除权日）的全部股价通过复权计算升上去；然后再继续
- * 向前判断，遇到下一个除权日，则再次将除权日到最新日之间（包括除权日）的全部股价通过复权计算升上去。
+ * The proportional backward adjustment formula: the adjusted price = the pre-adjustment price / the
+ * adjustment ratio the adjustment ratio = {[(the close price of the record date - the cash
+ * dividend) + the rights (new) share price x the change ratio of the outstanding shares] / (1 + the
+ * change ratio of the outstanding shares)} / the close price of the record date The backward
+ * adjustment takes the price before the ex-rights as the base (i.e. the price before the ex-rights
+ * stays unchanged) and raises the prices after the ex-rights. In the adjustment calculation it
+ * starts from the latest date and goes backward day by day; when an ex-rights date is met, all the
+ * prices between the ex-rights date and the latest date (including the ex-rights date) are raised
+ * by the adjustment calculation; then it continues backward, and when the next ex-rights date is
+ * met, the prices between that ex-rights date and the latest date (including the ex-rights date)
+ * are raised by the adjustment calculation again.
  *****************************************************************************/
 void KDataPrivatedBufferImp::_recoverEqualBackward() {
     size_t total = m_buffer.size();
@@ -383,62 +398,44 @@ void KDataPrivatedBufferImp::_recoverEqualBackward() {
 
     Datetime start_date(m_buffer.front().datetime.startOfDay());
     Datetime end_date(m_buffer.back().datetime + m_query.kTypeInSeconds());
-    StockWeightList weightList = m_stock.getWeight(start_date, end_date);
-    StockWeightList::const_reverse_iterator weightIter = weightList.rbegin();
 
-    size_t pre_pos = total - 1;
-    for (; weightIter != weightList.rend(); ++weightIter) {
-        size_t i = pre_pos;
-        while (i > 0 && m_buffer[i].datetime > weightIter->datetime()) {
-            i--;
+    // The equal-ratio multipliers are window independent: the ex-rights before the window scale the
+    // whole buffer (the fixed baseline), the ones inside it apply from the ex-rights day on. Only
+    // the price is adjusted, see the note in _recoverForward
+    price_t seed_price = 1.0;
+    size_t pos = 0;
+    for (const auto& factor : m_stock.getEqualRecoverFactors()) {
+        if (factor.date >= end_date) {
+            break;
         }
-
-        // 分钟数据，需要跳过第一个时间点
-        if (i != pre_pos && m_buffer[i].datetime != m_buffer[i].datetime.startOfDay()) {
-            i++;
-        }
-
-        pre_pos = i;  // 除权日
-
-        // 股权登记日（即除权日的前一天数据）收盘价
-        if (pre_pos == 0) {
+        if (factor.date < start_date) {
+            seed_price *= factor.price_k;
             continue;
         }
-
-        price_t closePrice = m_buffer[pre_pos - 1].closePrice;
-
-        price_t denominator = 0.0, temp = closePrice;
-        if (weightIter->suogu() != 0.0) {
-            denominator = weightIter->suogu();
-        } else {
-            // 流通股份变动比例
-            price_t change = 0.1 * (weightIter->countAsGift() + weightIter->countForSell() +
-                                    weightIter->increasement());
-            // change 小于 0 时为缩股
-            denominator = 1.0 + change;  //(1+流通股份变动比例)
-            temp = closePrice + weightIter->priceForSell() * change - 0.1 * weightIter->bonus();
+        while (pos < total && m_buffer[pos].datetime < factor.date) {
+            pos++;
         }
-
-        if (temp == 0.0 || denominator == 0.0) {
-            continue;
+        for (size_t i = pos; i < total; i++) {
+            m_buffer[i].openPrice *= factor.price_k;
+            m_buffer[i].highPrice *= factor.price_k;
+            m_buffer[i].lowPrice *= factor.price_k;
+            m_buffer[i].closePrice *= factor.price_k;
         }
-        price_t k = (denominator * closePrice) / temp;
-        price_t volume_k = denominator;
+    }
 
-        for (i = pre_pos; i < total; ++i) {
-            m_buffer[i].openPrice = k * m_buffer[i].openPrice;
-            m_buffer[i].highPrice = k * m_buffer[i].highPrice;
-            m_buffer[i].lowPrice = k * m_buffer[i].lowPrice;
-            m_buffer[i].closePrice = k * m_buffer[i].closePrice;
-            m_buffer[i].transCount = m_buffer[i].transCount * volume_k;
-            m_buffer[i].transAmount = m_buffer[i].closePrice * m_buffer[i].transCount;
+    if (seed_price != 1.0) {
+        for (auto& record : m_buffer) {
+            record.openPrice *= seed_price;
+            record.highPrice *= seed_price;
+            record.lowPrice *= seed_price;
+            record.closePrice *= seed_price;
         }
     }
 }
 
 KDataImpPtr KDataPrivatedBufferImp::getOtherFromSelf(const KQuery& query) const {
     KDataImpPtr ret;
-    // 其它限制由上层保护
+    // The other restrictions are guarded by the upper layer
     if (query.queryType() == KQuery::INDEX && m_query.queryType() == KQuery::INDEX) {
         ret = _getOtherFromSelfByIndex(query);
     } else if (query.queryType() == KQuery::DATE) {
@@ -478,31 +475,23 @@ KDataImpPtr KDataPrivatedBufferImp::_getOtherFromSelfByIndex(const KQuery& query
         p->m_buffer.resize(new_len);
         std::copy(m_buffer.begin() + new_start_pos - old_start_pos,
                   m_buffer.begin() + new_last_pos + 1 - old_start_pos, p->m_buffer.begin());
-        if (query.recoverType() != KQuery::NO_RECOVER) {
-            p->_recover();
-        }
+        // The copied slice is already recovered with the same anchor as self, never recover again
         return KDataImpPtr(p);
     }
 
+    // The new range extends beyond the loaded buffer: rebuild from raw data; every type is anchored
+    // at the fixed baseline, so the result stays consistent with the source KData
     auto* p = new KDataPrivatedBufferImp;
     p->m_stock = m_stock;
     p->m_query = query;
-    size_t new_len = new_last_pos + 1 - new_start_pos;
-    p->m_buffer.resize(new_len);
-    std::copy(m_buffer.begin() + new_start_pos - old_start_pos, m_buffer.end(),
-              p->m_buffer.begin());
-    KRecordList klist =
-      m_stock.getKRecordList(KQuery(old_last_pos + 1, new_end_pos, query.kType()));
-    size_t remain_len = new_last_pos - old_last_pos;
-    HKU_ASSERT(klist.size() == remain_len);
-    std::copy(klist.begin(), klist.end(), p->m_buffer.begin() + remain_len);
-    if (query.recoverType() != KQuery::NO_RECOVER) {
-        p->_recover();
-    }
+    p->m_buffer = m_stock.getKRecordList(query);
+    p->_recover();
     return KDataImpPtr(p);
 }
 
 KDataImpPtr KDataPrivatedBufferImp::_getOtherFromSelfByDate(const KQuery& query) const {
+    // Defensive: the upper layer never routes an empty self here; fall back to a full rebuild
+    HKU_IF_RETURN(m_buffer.empty(), std::make_shared<KDataPrivatedBufferImp>(m_stock, query));
     Datetime new_start_date = query.startDatetime();
     Datetime new_end_date = query.endDatetime();
     const auto& old_start_date = m_buffer.front().datetime;
@@ -535,29 +524,19 @@ KDataImpPtr KDataPrivatedBufferImp::_getOtherFromSelfByDate(const KQuery& query)
             p->m_buffer.resize(copy_len);
             std::copy(m_buffer.begin() + new_start_pos_in_old,
                       m_buffer.begin() + new_end_pos_in_old, p->m_buffer.begin());
-            if (query.recoverType() != KQuery::NO_RECOVER) {
-                p->_recover();
-            }
+            // The copied slice is already recovered with the same anchor as self, never recover
+            // again
             return KDataImpPtr(p);
         }
     }
 
-    KRecordList klist = m_stock.getKRecordList(
-      KQueryByDate(old_last_date + Seconds(KQuery::getKTypeInSeconds(query.kType())), new_end_date,
-                   query.kType()));
+    // The new range extends beyond the loaded buffer: rebuild from raw data; every type is anchored
+    // at the fixed baseline, so the result stays consistent with the source KData
     auto* p = new KDataPrivatedBufferImp;
     p->m_stock = m_stock;
     p->m_query = query;
-    size_t copy_len = new_end_pos_in_old - new_start_pos_in_old;
-    size_t new_len = copy_len + klist.size();
-    p->m_buffer.resize(new_len);
-    std::copy(m_buffer.begin() + new_start_pos_in_old, m_buffer.begin() + new_end_pos_in_old,
-              p->m_buffer.begin());
-    std::copy(klist.begin(), klist.end(),
-              p->m_buffer.begin() + m_buffer.size() - new_start_pos_in_old);
-    if (query.recoverType() != KQuery::NO_RECOVER) {
-        p->_recover();
-    }
+    p->m_buffer = m_stock.getKRecordList(query);
+    p->_recover();
     return KDataImpPtr(p);
 }
 

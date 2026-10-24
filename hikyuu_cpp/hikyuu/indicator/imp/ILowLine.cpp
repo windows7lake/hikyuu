@@ -3,10 +3,11 @@
  *
  *  Copyright (c) 2019 hikyuu.org
  *
- *  Created on: 2016年4月2日
+ *  Created on: 2016-4-2
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "ILowLine.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -23,7 +24,7 @@ ILowLine::~ILowLine() {}
 
 void ILowLine::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 0);
+        HKU_ASSERT(getParam<int>("n") >= 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -108,10 +109,9 @@ void ILowLine::_increment_calculate(const Indicator& ind, size_t start_pos) {
     if (n >= total) {
         dst[m_discard] = src[m_discard];
         for (size_t i = m_discard + 1; i < total; i++) {
-            if (src[i] < dst[i - 1]) {
-                dst[i] = src[i];
-            }
+            dst[i] = src[i] < dst[i - 1] ? src[i] : dst[i - 1];
         }
+        return;
     }
 
     price_t min = src[start_pos - n];
@@ -141,7 +141,7 @@ void ILowLine::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t ste
     size_t start = _get_step_start(curPos, step, ind.discard());
     price_t min_val = ind[start];
     for (size_t i = start + 1; i <= curPos; i++) {
-        if (ind[i] < min_val) {
+        if (ind[i] <= min_val) {
             min_val = ind[i];
         }
     }

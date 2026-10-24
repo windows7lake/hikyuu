@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <limits>
+#include <stdexcept>
 #include <string>
 
 #include "osdef.h"
@@ -33,9 +35,9 @@ using boost::any_cast;
 
 //------------------------------------------------------------------------------
 //
-// 常见基本类型包装的 any_t 和 std::string 的互相转换函数
-// any_to_string 要用户自定义类型需包含从 std::string 进行构造的构造函数
-// string_to_any 需要用户自定义实现 std::to_string 特化方法
+// The mutual conversion functions between the any_t wrapping the common basic types and std::string
+// For a user-defined type, any_to_string requires it to have a constructor from std::string
+// string_to_any requires the user to implement the std::to_string specialization method
 //
 //------------------------------------------------------------------------------
 
@@ -111,7 +113,11 @@ inline any_t string_to_any<long long>(const std::string& data) {
 
 template <>
 inline any_t string_to_any<unsigned int>(const std::string& data) {
-    return any_t((unsigned int)(std::stoul(data)));
+    unsigned long v = std::stoul(data);
+    if (v > (std::numeric_limits<unsigned int>::max)()) {
+        throw std::out_of_range("string_to_any<unsigned int>: value out of range: " + data);
+    }
+    return any_t(static_cast<unsigned int>(v));
 }
 
 template <>

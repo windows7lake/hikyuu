@@ -1,7 +1,7 @@
 /*
  * KDataDriver.cpp
  *
- *  Created on: 2014年9月2日
+ *  Created on: 2014-9-2
  *      Author: fasiondog
  */
 
@@ -84,6 +84,13 @@ KRecordList KDataDriver::getKRecordList(const string& market, const string& code
                                         const KQuery& query) {
     HKU_INFO("The getKRecordList method has not been implemented! (KDataDriver: {})", m_name);
     return KRecordList();
+}
+
+bool KDataDriver::tryGetKRecordView(const string& market, const string& code,
+                                    const KQuery::KType& kType, size_t start_ix, size_t end_ix,
+                                    KRecordView& out) {
+    // The zero-copy view is not supported by default
+    return false;
 }
 
 TimeLineList KDataDriver::getTimeLineList(const string& market, const string& code,

@@ -13,10 +13,13 @@
 
 #include <cmath>
 #include <cctype>
+#include <cstdint>
+#include <limits>
 #include <vector>
 #include <string>
 #include <algorithm>
 
+#include "Null.h"
 #include "string_view.h"
 
 #ifndef HKU_UTILS_API
@@ -44,13 +47,15 @@ std::string HKU_UTILS_API gb_to_utf8(const std::string &szinput);
 #define GBToUTF8 hku::gb_to_utf8
 
 /**
- * Windows平台下用于将字符串由UTF8转换为GB2312编码（仅用于打印，如需用于路径，请使用 HKU_PATH），
- * Linux平台下不做任何事
- * @note 目前 Visual Studio 2019 已修正 UTF8 问题，大部分情况下无需使用，HKU_STR/HKU_CSTR，
- *       但windows的路径和文件名仍旧是GB，需要进行转换处理。
+ * Under Windows it is used to convert a string from UTF8 to the GB2312 encoding (for the printing
+ * only; use HKU_PATH if it is needed for a path),
+ * Under Linux it does nothing
+ * @note Currently Visual Studio 2019 has fixed the UTF8 problem, so it is not needed in most cases;
+ * HKU_STR/HKU_CSTR,
+ *       but the paths and file names under Windows are still GB and need the conversion processing.
  */
 #if defined(_MSC_VER) && _MSC_VER < 1928  // 1928 (Visual Studio 2019)
-// 将utf8编码的字符串转换为GB2312编码
+// Convert a UTF8 encoded string to the GB2312 encoding
 #define HKU_STR(s) UTF8ToGB(s)
 #define HKU_CSTR(s) UTF8ToGB(s)
 #else
@@ -59,9 +64,9 @@ std::string HKU_UTILS_API gb_to_utf8(const std::string &szinput);
 #endif
 
 /**
- * 用于处理路径文件名，兼容windows中文平台
- * HKU_PATH 适用于 std::string
- * HKU_CPATH 适用于 char *
+ * Used to process the path file names, compatible with the Chinese Windows platform
+ * HKU_PATH is for std::string
+ * HKU_CPATH is for char *
  */
 #if defined(_MSC_VER)
 #define HKU_PATH(s) UTF8ToGB(s)
@@ -77,14 +82,16 @@ std::string HKU_UTILS_API gb_to_utf8(const std::string &szinput);
 #endif
 
 /**
- * 四舍五入，ROUND_HALF_EVEN 银行家舍入法
- * @param number  待四舍五入的数据
- * @param ndigits 保留小数位数
- * @return 处理过的数据
+ * Round half away from zero (the Chinese traditional 四舍五入) to the given number of decimal
+ * places
+ * @param number  the data to be rounded
+ * @param ndigits the number of decimal places to keep; a negative value rounds to the left of the
+ *                decimal point (e.g. -2 rounds to hundreds)
+ * @return the processed data
  */
 template <typename ValueT>
 ValueT roundEx(ValueT number, int ndigits = 0) {
-    // 切换至：ROUND_HALF_EVEN 银行家舍入法
+    // Switch to: ROUND_HALF_EVEN, the banker's rounding method
     // ValueT pow1, pow2, y, z;
     // ValueT x = number;
     // if (ndigits >= 0) {
@@ -107,17 +114,34 @@ ValueT roundEx(ValueT number, int ndigits = 0) {
     // else
     //     z *= pow1;
 
-    // 国内一般使用传统四舍五入法
-    if (ndigits < 0)
-        return number;  // 无效位数直接返回原值
+    // In China the traditional rounding method is generally used. A negative ndigits rounds to the
+    // left of the decimal point (e.g. ndigits = -2 rounds to hundreds), consistent with
+    // roundUp / roundDown; there the value is scaled by dividing so the result keeps an exact
+    // power-of-ten boundary.
+    //
+    // The magnitude is clamped so that 10^|ndigits| stays representable (max_exponent10 is the
+    // largest decimal exponent within the type's range); this also keeps the negation below free
+    // of the INT_MIN UB
+    const int max_digits = std::numeric_limits<ValueT>::max_exponent10;
+    const int mag = std::min(std::max(ndigits, -max_digits), max_digits);
+    const bool to_integer_place = mag < 0;
+    const double factor = std::pow(10.0, to_integer_place ? -mag : mag);
+    const double scaled = to_integer_place ? static_cast<double>(number) / factor
+                                           : static_cast<double>(number) * factor;
+    // A tiny tolerance that recovers a value a binary representation put a hair below an exact .5
+    // boundary. It must stay negligible against the 1.0 spacing of the scaled grid, and each
+    // branch needs its own scale: the multiply branch loses the decimal tail of the original
+    // number (a fixed 1e-10 offset there, capped, since an uncapped 1e-10 * factor swamps the 0.5
+    // threshold at ndigits >= 10), while the divide branch is exact to within a couple of ULPs of
+    // the quotient
+    const double epsilon =
+      to_integer_place
+        ? std::min(std::fabs(scaled) * std::numeric_limits<double>::epsilon() * 4.0, 0.25)
+        : std::min(1e-10 * factor, 1e-6);
 
-    const double factor = std::pow(10.0, ndigits);
-    const double epsilon = 1e-10 * factor;  // 动态调整epsilon避免精度误差
-
-    if (number >= 0)
-        return static_cast<ValueT>(std::floor(number * factor + 0.5 + epsilon) / factor);
-    else
-        return static_cast<ValueT>(std::ceil(number * factor - 0.5 - epsilon) / factor);
+    const double rounded =
+      scaled >= 0.0 ? std::floor(scaled + 0.5 + epsilon) : std::ceil(scaled - 0.5 - epsilon);
+    return static_cast<ValueT>(to_integer_place ? rounded * factor : rounded / factor);
 }
 
 extern template double HKU_UTILS_API roundEx(double number, int ndigits);
@@ -126,10 +150,10 @@ template <>
 float HKU_UTILS_API roundEx(float number, int ndigits);
 
 /**
- * 向上截取，如10.1截取后为11
- * @param number  待处理数据
- * @param ndigits 保留小数位数
- * @return 处理过的数据
+ * Truncate upward, e.g. 10.1 is truncated to 11
+ * @param number  the data to be processed
+ * @param ndigits the number of the decimal places to keep
+ * @return the processed data
  */
 template <typename ValueT>
 ValueT roundUp(ValueT number, int ndigits = 0) {
@@ -148,9 +172,9 @@ ValueT roundUp(ValueT number, int ndigits = 0) {
     }
 
     if (number >= 0.0) {
-        number = std::floor(number + 1.0);
+        number = std::ceil(number);
     } else {
-        number = std::ceil(number - 1.0);
+        number = std::floor(number);
     }
 
     if (ndigits < 0) {
@@ -163,10 +187,10 @@ ValueT roundUp(ValueT number, int ndigits = 0) {
 }
 
 /**
- * 向下截取，如10.1截取后为10
- * @param number  待处理数据
- * @param ndigits 保留小数位数
- * @return 处理过的数据
+ * Truncate downward, e.g. 10.1 is truncated to 10
+ * @param number  the data to be processed
+ * @param ndigits the number of the decimal places to keep
+ * @return the processed data
  */
 template <typename ValueT>
 ValueT roundDown(ValueT number, int ndigits = 0) {
@@ -208,45 +232,87 @@ extern template float HKU_UTILS_API roundDown(float number, int ndigits);
 #pragma warning(pop)
 #endif
 
-/** ASCII转小写字符串 */
+/**
+ * Compare two floating-point values within a relative tolerance of a few ULPs. An absolute
+ * epsilon is scale-sensitive: it misses equal-by-intent values at large magnitudes (the ULP of
+ * 1e20 is much larger than 1e-9) while falsely matching tiny non-zero values near 0. NaN never
+ * matches; infinities are equal only via ==, otherwise the tolerance band becomes inf.
+ */
+template <typename ValueT>
+inline bool nearly_equal(ValueT a, ValueT b) {
+    static_assert(std::numeric_limits<ValueT>::is_iec559,
+                  "nearly_equal requires a floating-point type");
+    if (a == b)
+        return true;  // bitwise equal, including +0.0 == -0.0
+    if (std::isnan(a) || std::isnan(b) || std::isinf(a) || std::isinf(b))
+        return false;
+    ValueT scale = std::max(std::fabs(a), std::fabs(b));
+    return std::fabs(a - b) <= 8 * std::numeric_limits<ValueT>::epsilon() * scale;
+}
+
+/**
+ * Guard an element-wise math result for math indicators (LN/LOG/SQRT/ACOS/ASIN/EXP/POW, etc.):
+ * a non-finite value (NaN / +-inf) is mapped to the framework null, so that -inf from LN(0)/LOG(0)
+ * or +inf from EXP/POW overflow is not leaked downstream and does not pollute later bars; NaN is
+ * already the framework's null representation.
+ */
+template <typename ValueT>
+inline ValueT safe_math(ValueT v) {
+    static_assert(std::numeric_limits<ValueT>::is_iec559,
+                  "safe_math requires a floating-point type");
+    return std::isfinite(v) ? v : Null<ValueT>();
+}
+
+/**
+ * Truncate a number to an integer multiple of the given unit (toward zero). Returns NaN when the
+ * result is not representable (a NaN input, or the quotient beyond the int64 range); callers must
+ * reject the order then, instead of clamping a garbage number into a max-size trade.
+ */
+inline double truncToMultiple(double number, double unit) {
+    double quotient = number / unit;
+    if (!(quotient < static_cast<double>(std::numeric_limits<int64_t>::max()))) [[unlikely]] {
+        return Null<double>();
+    }
+    return static_cast<int64_t>(quotient) * unit;
+}
+
+/** Convert an ASCII string to lowercase */
 inline void to_lower(std::string &s) noexcept {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
 }
 
-/** 转大写字符串 */
+/** Convert a string to uppercase */
 inline void to_upper(std::string &s) noexcept {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::toupper(c); });
 }
 
-/** UTF-8转小写字符串 */
+/** Convert a UTF-8 string to lowercase */
 std::string HKU_UTILS_API utf8_to_lower(const std::string &s) noexcept;
 
-/** UTF-8转大写字符串 */
+/** Convert a UTF-8 string to uppercase */
 std::string HKU_UTILS_API utf8_to_upper(const std::string &s) noexcept;
 
-/** UTF-8字符串大小写折叠比较 */
+/** Case folding comparison of UTF-8 strings */
 bool HKU_UTILS_API utf8_fold_equal(const std::string &s1, const std::string &s2) noexcept;
 
-/** UTF-8字符串包含子字符串 */
+/** Whether a UTF-8 string contains a substring */
 bool HKU_UTILS_API utf8_contains(const std::string &s, const std::string &sub) noexcept;
 
-/** 删除字符串两端空格 */
+/** Remove the blanks (spaces, tabs and CRLF) at both ends of a string */
 inline void trim(std::string &s) {
     if (s.empty()) {
         return;
     }
 
-    s.erase(0, s.find_first_not_of(" "));
-    s.erase(s.find_last_not_of(" ") + 1);
-    s.erase(s.find_last_not_of("\r") + 1);
-    s.erase(s.find_last_not_of("\n") + 1);
+    s.erase(0, s.find_first_not_of(" \t\r\n"));
+    s.erase(s.find_last_not_of(" \t\r\n") + 1);
 }
 
 #if CPP_STANDARD >= CPP_STANDARD_17
 /**
- * 分割字符串
- * @param str 待封的字符串
- * @param c 分割符
+ * Split a string
+ * @param str the string to be split
+ * @param c the separator
  */
 inline std::vector<std::string_view> split(const std::string &str, char c) {
     std::vector<std::string_view> result;
@@ -264,11 +330,12 @@ inline std::vector<std::string_view> split(const std::string &str, char c) {
 }
 
 /**
- * 分割字符串
- * @param str 待分割的string_view
- * @param c 分割字符
- * @return string_view 组成的 vector
- * @note 注意返回结果的生命周期应小于输入的字符串相同！
+ * Split a string
+ * @param str the string_view to be split
+ * @param c the separator character
+ * @return a vector composed of string_view
+ * @note Note that the lifetime of the returned result should be shorter than that of the input
+ *       string!
  */
 inline std::vector<std::string_view> split(const std::string_view &view, char c) {
     std::vector<std::string_view> result;
@@ -307,9 +374,9 @@ inline std::vector<std::string_view> split(const std::string_view &str,
 
 #else
 /**
- * 分割字符串
- * @param str 待封的字符串
- * @param c 分割符
+ * Split a string
+ * @param str the string to be split
+ * @param c the separator
  */
 inline std::vector<std::string> split(const std::string &str, char c) {
     std::vector<std::string> result;
@@ -347,9 +414,9 @@ inline std::vector<std::string> split(const std::string &str, const std::string 
 #endif /* #if CPP_STANDARD >= CPP_STANDARD_17 */
 
 /**
- * byte 转 16 进制字符串, 如 "abcd" 转换为 "61626364"
- * @param bytes 输入的 byte 数组
- * @param in_len byte 数组长度
+ * Convert bytes to a hexadecimal string, e.g. "abcd" is converted to "61626364"
+ * @param bytes the input byte array
+ * @param in_len the length of the byte array
  */
 inline std::string byteToHexStr(const char *bytes, size_t in_len) {
     std::string hexstr;
@@ -358,84 +425,76 @@ inline std::string byteToHexStr(const char *bytes, size_t in_len) {
         return hexstr;
     }
 
-    char *buf = new char[2 * in_len + 1];
+    // build directly into the returned string instead of a raw new[]/delete[] buffer, whose
+    // std::string copy could throw bad_alloc before the delete and leak it
+    hexstr.resize(2 * in_len);
     size_t buf_ix = 0;
-
     for (size_t i = 0; i < in_len; ++i) {
         unsigned char high = in_byte[i] >> 4;
         unsigned char low = in_byte[i] & 0x0F;
 
-        buf[buf_ix++] = high <= 9 ? high + 0x30 : high + 87;
-        buf[buf_ix++] = low <= 9 ? low + 0x30 : low + 87;
+        hexstr[buf_ix++] = high <= 9 ? high + 0x30 : high + 87;
+        hexstr[buf_ix++] = low <= 9 ? low + 0x30 : low + 87;
     }
-
-    buf[buf_ix++] = '\0';
-    hexstr = std::string(buf);
-    delete[] buf;
     return hexstr;
 }
 
 /**
- * byte 转 16 进制字符串, 如 "abcd" 转换为 "61626364"
- * @param bytes std::string 格式的输入
+ * Convert bytes to a hexadecimal string, e.g. "abcd" is converted to "61626364"
+ * @param bytes the input in the std::string format
  */
 inline std::string byteToHexStr(const std::string &bytes) {
     return byteToHexStr(bytes.c_str(), bytes.size());
 }
 
 /**
- * byte 转 16 进制字符串, 如 "abcd" 转换为 "0x61 0x62 0x63 0x64"
- * @param bytes 输入的 byte 数组
- * @param in_len byte 数组长度
+ * Convert bytes to a hexadecimal string, e.g. "abcd" is converted to "0x61 0x62 0x63 0x64"
+ * @param bytes the input byte array
+ * @param in_len the length of the byte array
  */
 inline std::string byteToHexStrForPrint(const char *bytes, size_t in_len) {
     std::string hexstr;
     const unsigned char *in_byte = (const unsigned char *)bytes;
-    if (in_byte == nullptr) {
+    if (in_byte == nullptr || in_len == 0) {
         return hexstr;
     }
 
-    char *buf = new char[5 * in_len + 1];
-    size_t buf_ix = 0;
-
+    // build directly into the returned string instead of a raw new[]/delete[] buffer, whose
+    // std::string copy could throw bad_alloc before the delete and leak it
+    hexstr.reserve(5 * in_len);
     for (size_t i = 0; i < in_len; ++i) {
-        buf[buf_ix++] = '0';
-        buf[buf_ix++] = 'x';
         unsigned char high = in_byte[i] >> 4;
         unsigned char low = in_byte[i] & 0x0F;
 
-        buf[buf_ix++] = high <= 9 ? high + 0x30 : high + 87;
-        buf[buf_ix++] = low <= 9 ? low + 0x30 : low + 87;
-        buf[buf_ix++] = ' ';
+        hexstr.push_back('0');
+        hexstr.push_back('x');
+        hexstr.push_back(static_cast<char>(high <= 9 ? high + 0x30 : high + 87));
+        hexstr.push_back(static_cast<char>(low <= 9 ? low + 0x30 : low + 87));
+        hexstr.push_back(' ');
     }
 
-    if (buf_ix == 0) {
-        buf[buf_ix] = '\0';
-    } else {
-        buf[--buf_ix] = '\0';
-    }
-    hexstr = std::string(buf);
-    delete[] buf;
+    // drop the separator of the last byte, matching the original trailing-space removal
+    hexstr.pop_back();
     return hexstr;
 }
 
 /**
- * byte 转 16 进制字符串, 如 "abcd" 转换为 "61626364"
- * @param bytes 输入的 byte 数组
+ * Convert bytes to a hexadecimal string, e.g. "abcd" is converted to "61626364"
+ * @param bytes the input byte array
  */
 inline std::string byteToHexStrForPrint(const std::string &bytes) {
     return byteToHexStrForPrint(bytes.c_str(), bytes.size());
 }
 
-/** 判断 double 是否为整数 */
+/** Judge whether a double is an integer */
 bool HKU_UTILS_API isInteger(double num);
 
-/** 判断 float 是否为整数 */
+/** Judge whether a float is an integer */
 bool HKU_UTILS_API isInteger(float num);
 
 /**
- * @brief 获取已排序的向量中指定分位数的值
- * @param vec 已排序的数组
+ * @brief Get the value of the given quantile in a sorted vector
+ * @param vec the sorted array
  * @param quantile
  * @return Indicator::value_t
  */

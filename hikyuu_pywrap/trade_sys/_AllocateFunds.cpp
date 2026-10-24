@@ -1,7 +1,15 @@
 /*
- * _Selector.cpp
+ * _AllocateFunds.cpp
  *
- *  Created on: 2016年3月28日
+ *  Copyright (c) 2025 hikyuu.org
+ *
+ *  The portfolio-level fund allocation (AF) binding. AF carries three replaceable algorithm parts
+ *  L1/L2/L3:
+ *   - L1 _allocate   sub-system context -> weight
+ *   - L2 _to_targets weight -> the executable quantity of the parent account
+ *   - L3 _check_risk portfolio risk control clipping
+ *  MM is restricted to the single system form, it no longer carries the portfolio-level allocation.
+ *  Created on: 2016-03-28
  *      Author: fasiondog
  */
 
@@ -10,10 +18,6 @@
 
 namespace py = pybind11;
 using namespace hku;
-
-#if defined(_MSC_VER)
-#pragma warning(disable : 4267)
-#endif
 
 class PyAllocateFundsBase : public AllocateFundsBase {
     PY_CLONE(PyAllocateFundsBase, AllocateFundsBase)
@@ -35,121 +39,195 @@ public:
         PYBIND11_OVERLOAD(void, AllocateFundsBase, _reset, );
     }
 
-    SystemWeightList _allocateWeight(const Datetime& date,
-                                     const SystemWeightList& se_list) override {
-        PYBIND11_OVERLOAD_PURE_NAME(SystemWeightList, AllocateFundsBase, "_allocate_weight",
-                                    _allocateWeight, date, se_list);
+    // L1: sub-system context -> weight
+    Weights _allocate(const Datetime& date, const TradeManagerPtr& tm,
+                      SubSystemContextList& contexts, const KQuery& query,
+                      const string& mode) override {
+        PYBIND11_OVERLOAD_NAME(Weights, AllocateFundsBase, "_allocate", _allocate, date, tm,
+                               contexts, query, mode);
+    }
+
+    // L2: weight -> the executable quantity of the parent account
+    void _toTargets(const Datetime& date, const TradeManagerPtr& tm,
+                    TradeSuggestionList& suggestions, const Weights& sys_weight,
+                    const KQuery& query, const string& mode) override {
+        PYBIND11_OVERLOAD_NAME(void, AllocateFundsBase, "_to_targets", _toTargets, date, tm,
+                               suggestions, sys_weight, query, mode);
+    }
+
+    // L3: portfolio risk control clipping
+    void _checkRisk(const Datetime& date, const TradeManagerPtr& tm,
+                    TradeSuggestionList& suggestions, const KQuery& query,
+                    const string& mode) override {
+        PYBIND11_OVERLOAD_NAME(void, AllocateFundsBase, "_check_risk", _checkRisk, date, tm,
+                               suggestions, query, mode);
     }
 };
 
 void export_AllocateFunds(py::module& m) {
-    py::class_<AllocateFundsBase, AFPtr, PyAllocateFundsBase>(m, "AllocateFundsBase",
-                                                              py::dynamic_attr(),
-                                                              R"(资产分配算法基类, 子类接口：
+    py::class_<AllocateFundsBase, AllocateFundsPtr, PyAllocateFundsBase>(
+      m, "AllocateFundsBase", py::dynamic_attr(),
+      R"(The portfolio-level fund allocation (AF) base class, used by the aggregate system (MultiSystem) only.
 
-公共参数:
-    
-    - adjust_running_sys (bool|True): 是否调整之前已经持仓策略的持仓。不调整时，仅使用总账户当前剩余资金进行分配，否则将使用总市值进行分配
-        注意: 无论是否调整已持仓策略，权重比例都是相对于总资产，不是针对剩余现金余额
-              仅针对剩余现金比例调整没有意义，即使分配由于交易成本原因可能也无法完成实际交易
-        adjust_running_sys: True - 主动根据资产分配对已持仓策略进行增减仓
-        adjust_running_sys: False - 不会根据当前分配权重对已持仓策略进行强制加减仓
-    
-    - auto_adjust_weight (bool|True): 自动调整权重，此时认为传入的权重为各证券的相互比例（详见ignore_zero_weight说明）。否则，以传入的权重为指定权重不做调整（此时传入的各个权重需要小于1）。
-  
-    - ignore_zero_weight (bool|False): 该参数在 auto_adjust_weight 时生效。是否过滤子类返回的比例权重列表中的 0 值（包含小于0）和 nan 值。
+AF is composed of three replaceable algorithm parts (each of them corresponds to one overload interface),
+executed by allocate() in the L1 -> L2 -> L3 order:
 
-        如：子类返回权重比例列表 [6, 2, 0, 0, 0], 则
-            - 过滤 0 值，则实际调整后的权重为 Xi / sum(Xi)：[6/8, 2/8]
-            - 不过滤，m 设为非零元素个数，n为总元素个数，(Xi / Sum(Xi)) * (m / n)：
-                 [(6/8)*(2/5), (2/8)*(2/5), 0, 0, 0]
-                即，保留分为5份后，仅在2份中保持相对比例
+    - _allocate   [Required] L1 system-level allocation: decide "how much each sub-system may manage".
+                  The input is the sub-system context list, the output is the weight table
+                  {System: weight}; in mode B ("Fund Allocation") it also writes the real cash quota
+                  into contexts[i].quota (the weight x the parent net assets, or the fixed amount).
+                  Examples: AF_EqualWeight (1/N), AF_FixedWeight, AF_MultiFactor (weighted by the SE score).
+    - _to_targets [Optional] L2 behavior-level conversion: convert the sub-system suggestions into the
+                  executable quantity of the parent account (the folding point from the sub-system space
+                  to the individual instrument space). In mode A ("Signal Aggregation") the target
+                  position market value = weight x position ratio x the parent net assets, aggregated
+                  per instrument and rebalanced by the delta against the current position; in mode B
+                  or mode C the real instruction of the sub-system passes through unchanged.
+    - _check_risk [Optional] L3 portfolio risk control: clip the suggestions at the portfolio dimension
+                  (e.g. the single instrument concentration cap max_single_position); mode B and mode C
+                  respect the sub-strategy autonomy and skip the clipping.
 
-    - ignore_se_score_is_null (bool|False): 忽略选中系统列表中的系统得分为 null 的系统. 注意：某些SE（如SE_MultiFactor）本身可能也存在类似控制
-    - ignore_se_score_lt_zero (bool|False): 忽略选中系统列表中的系统得分小于等于 0 的系统
-    - reserve_percent (float|0.0): 保留不参与重分配的资产比例
-    - trace (bool|False): 打印跟踪信息
+The running mode is held by the aggregate system (MultiSystem::set_mode): "A" Signal Aggregation (the
+default) / "B" Fund Allocation / "C" Shared Account Compatibility (the legacy Portfolio behavior, the
+sub-systems trade directly on the real account of the parent); it is passed into every hook as the
+trailing mode argument; see the MultiSystem class docstring for the full description.
 
-子类接口:
+Common parameters:
 
-    - _allocateWeight : 【必须】子类资产分配调整实现
-    - _clone : 【必须】克隆接口
-    - _reset : 【可选】重载私有变量)")
+    - max_single_position=1.0 (float) : the L3 single instrument concentration upper limit (the proportion of the net assets); <=0 means no limit, >1 is clamped to 1
+    - max_total_position=1.0 (float) : the total budget cap; in mode A the aggregated target market value of all instruments <= net assets x this value, in mode B the sum of the sub-system quotas <= net assets x this value. The weight pricing is scaled down proportionally when exceeded, while the fixed_amount pricing is truncated to whole quanta (see below); <=0 disables the cap, >1 allows leverage
+    - fixed_amount=0.0 (float) : the pricing switch; when >0 it takes precedence over the weights -- in mode A it is the target market value of every instrument, in mode B it is the quota of every sub-system. The aggregate is still bounded by max_total_position: being an absolute amount it is never scaled down, instead only whole quanta are funded (mode B in sub-system order, mode A in suggestion order) and the rest gets a zero quota / is driven flat
+    - adjust_running_sys=True (bool) : whether to force-adjust the running sub-systems to the new quota on the rebalancing day; only effective in mode B (mode A always adjusts, mode C never adjusts); when False the running sub-systems keep their holdings and only the new sub-systems get the remaining cash)")
+
       .def(py::init<>())
-      .def(py::init<const string&>())
       .def(py::init<const AllocateFundsBase&>())
+      .def(py::init<const string&>(), R"(The initialization constructor
+
+    :param str name: the name)")
+
       .def("__str__", to_py_str<AllocateFundsBase>)
       .def("__repr__", to_py_str<AllocateFundsBase>)
+
       .def_property("name", py::overload_cast<>(&AllocateFundsBase::name, py::const_),
                     py::overload_cast<const string&>(&AllocateFundsBase::name),
-                    py::return_value_policy::copy, "算法组件名称")
+                    py::return_value_policy::copy, "The algorithm part name")
+      .def_property("tm", &AllocateFundsBase::getTM, &AllocateFundsBase::setTM,
+                    "Set or get the trade management object")
       .def_property("query", py::overload_cast<>(&AllocateFundsBase::getQuery, py::const_),
                     py::overload_cast<const KQuery&>(&AllocateFundsBase::setQuery),
-                    py::return_value_policy::copy, "设置或获取查询条件")
-      .def_property_readonly("tm", py::overload_cast<>(&AllocateFundsBase::getTM, py::const_),
-                             py::return_value_policy::copy)
+                    py::return_value_policy::copy, "Set or get the query condition")
 
       .def("get_param", &AllocateFundsBase::getParam<boost::any>, R"(get_param(self, name)
 
-    获取指定的参数
+    Get the specified parameter
 
-    :param str name: 参数名称
-    :return: 参数值
-    :raises out_of_range: 无此参数)")
+    :param str name: the parameter name
+    :return: the parameter value
+    :raises out_of_range: no such parameter)")
 
       .def("set_param",
            static_cast<void (AllocateFundsBase::*)(const std::string&, const boost::any&)>(
              &AllocateFundsBase::setParam),
            R"(set_param(self, name, value)
 
-    设置参数
+    Set the parameter
 
-    :param str name: 参数名称
-    :param value: 参数值
-    :raises logic_error: Unsupported type! 不支持的参数类型)")
+    :param str name: the parameter name
+    :param value: the parameter value
+    :raises logic_error: Unsupported type! The parameter type is not supported)")
 
-      .def("have_param", &AllocateFundsBase::haveParam, "是否存在指定参数")
+      .def("have_param", &AllocateFundsBase::haveParam, "Whether the specified parameter exists")
+      .def("reset", &AllocateFundsBase::reset, "The reset operation")
+      .def("clone", &AllocateFundsBase::clone, "The clone operation")
 
-      .def("reset", &AllocateFundsBase::reset, "复位操作")
-      .def("clone", &AllocateFundsBase::clone, "克隆操作")
-      .def("_reset", &AllocateFundsBase::_reset, "子类复位操作实现")
-      .def("_allocate_weight", &AllocateFundsBase::_allocateWeight, py::arg("date"),
-           py::arg("se_list"),
-           R"(_allocate_weight(self, date, se_list)
+      .def("allocate", &AllocateFundsBase::allocate, py::arg("date"), py::arg("tm"),
+           py::arg("suggestions"), py::arg("contexts"), py::arg("query"), py::arg("mode"),
+           R"(allocate(self, date, tm, suggestions, contexts, query, mode)
 
-        【重载接口】子类分配权重接口，获取实际分配资产的系统实例及其权重
+    The unified entry of the L1/L2/L3 pipeline (L1 _allocate -> L2 _to_targets -> L3 _check_risk).
 
-        :param Datetime date: 当前时间
-        :param SystemList se_list: 当前选中的系统列表
-        :return: 系统权重分配信息列表
-        :rtype: SystemWeightList)")
+    Internal entry point, not part of the user-facing API: it is called by MultiSystem on the
+    rebalancing day after the sub-system suggestions are collected, and it assumes that contexts /
+    suggestions / mode have been prepared by MultiSystem. Calling it directly with hand-built
+    arguments yields meaningless targets - it places no order and affects no backtest; drive a
+    MultiSystem instead. Custom algorithms normally only override the three hooks.
 
-        DEF_PICKLE(AFPtr);
+    :param Datetime date: the trade date
+    :param TradeManager tm: the real trade account of the parent (aggregate) system
+    :param TradeSuggestionList suggestions: [in/out] the suggestions submitted by every sub-system; L2/L3 rewrite them in place
+    :param SubSystemContextList contexts: the context of every sub-system (the virtual account funds / the mode B quota)
+    :param Query query: the query condition (the k-line type, etc.)
+    :param str mode: the running mode ("A"/"B"/"C") owned by the aggregate system)")
 
+      .def("_allocate", &AllocateFundsBase::_allocate, py::arg("date"), py::arg("tm"),
+           py::arg("contexts"), py::arg("query"), py::arg("mode"),
+           R"(_allocate(self, date, tm, contexts, query, mode)
+
+    [Overload interface] L1 system-level allocation: decide "how much each sub-system may manage" by the
+    sub-system context list. In mode B it also writes the real quota into contexts[i].quota.
+
+    :param Datetime date: the trade date
+    :param TradeManager tm: the real trade account of the parent (aggregate) system
+    :param SubSystemContextList contexts: the context of every sub-system (the virtual account funds / the mode B quota)
+    :param Query query: the query condition (the k-line type, etc.)
+    :param str mode: the running mode ("A"/"B"/"C") owned by the aggregate system
+    :return: the weight table { System: weight })")
+
+      .def("_to_targets", &AllocateFundsBase::_toTargets, py::arg("date"), py::arg("tm"),
+           py::arg("suggestions"), py::arg("sys_weight"), py::arg("query"), py::arg("mode"),
+           R"(_to_targets(self, date, tm, suggestions, sys_weight, query, mode)
+
+    [Overload interface] L2 behavior-level conversion: convert the sub-system suggestions into the
+    executable quantity of the parent account (mode A: target market value = weight x position ratio x
+    the parent net assets, aggregated per instrument and rebalanced by the delta against the current
+    position; mode B: pass the real instruction through), rewrite suggestions in place)")
+
+      .def("_check_risk", &AllocateFundsBase::_checkRisk, py::arg("date"), py::arg("tm"),
+           py::arg("suggestions"), py::arg("query"), py::arg("mode"),
+           R"(_check_risk(self, date, tm, suggestions, query, mode)
+
+    [Overload interface] L3 portfolio risk control: clip the suggestions at the portfolio dimension
+    (e.g. the single instrument concentration cap max_single_position); mode B skips the clipping
+    (the sub-manager autonomy is respected), rewrite the quantity of suggestions in place)")
+
+      .def(
+        "_reset", &AllocateFundsBase::_reset,
+        R"([Overload interface] The subclass reset interface, reset the internal private variables)")
+
+        DEF_PICKLE(AllocateFundsPtr);
+
+    //--------------------------------------------------------------------------------------
+    // The built-in AF algorithms
     m.def("AF_EqualWeight", AF_EqualWeight, R"(AF_EqualWeight()
-    
-    等权重资产分配，对选中的资产进行等比例分配)");
 
-    m.def("AF_FixedAmount", AF_FixedAmount, py::arg("amount") = 20000.0, R"(AF_FixedAmount(amount)
-    
-    等金额资产分配，对选中的资产进行等金额分配
+    The equal weight asset allocation; allocate the selected assets with an equal ratio (L1 equal weight 1/N))");
 
-    :param float amount: 交易最大金额)");
+    m.def("AF_FixedAmount", AF_FixedAmount, py::arg("amount") = 20000.0,
+          R"(AF_FixedAmount(amount=20000.0)
 
-    m.def("AF_FixedWeight", AF_FixedWeight, py::arg("weight") = 0.1, R"(AF_FixedWeight(weight)
-    
-    固定比例资产分配
+    The fixed amount asset allocation (L1 equal weight + L2 fixed amount)
 
-    :param float weight:  指定的资产比例 [0, 1])");
+    :param float amount: the maximum trading amount)");
+
+    m.def("AF_FixedWeight", AF_FixedWeight, py::arg("weight") = 0.1, R"(AF_FixedWeight(weight=0.1)
+
+    The fixed proportion asset allocation (L1 returns the fixed proportion directly, without normalization)
+
+    :param float weight: the specified asset proportion (0, 1])");
 
     m.def("AF_FixedWeightList", AF_FixedWeightList, py::arg("weights"),
           R"(AF_FixedWeightList(weights)
-    
-    固定比例资产分配列表.
 
-    :param float weights:  指定的资产比例列表)");
+    The fixed proportion list asset allocation (L1 takes weights[i] in order, without normalization)
 
-    m.def("AF_MultiFactor", AF_MultiFactor, R"(AF_MultiFactor()
-      
-    创建 MultiFactor 评分权重的资产分配算法实例, 即直接以SE返回的评分作为权重。)");
+    The weights must be finite, non-negative and not all zero (an all-zero list would set every target market value to 0 and drive the parent to actively clear the holdings, so the parameter check throws). An empty list cannot price anything and is rejected as well
+
+    :param list weights: the specified asset proportion list)");
+
+    m.def("AF_MultiFactor", AF_MultiFactor, py::arg("auto_adjust_weight") = true,
+          R"(AF_MultiFactor(auto_adjust_weight=True)
+
+    Create a MultiFactor scoring weight asset allocation algorithm instance. The scores are treated as the mutual ratios of the sub-systems and normalized to sum 1 by default (the parameter auto_adjust_weight=True; a score sum less than 1 also allocates fully), when False the score itself is the final weight. A non-finite score is treated as 0, an all-zero or non-finite sum falls back to the equal weight.
+
+    :param bool auto_adjust_weight: when True the scores are normalized to sum 1; when False the score itself is the final weight)");
 }

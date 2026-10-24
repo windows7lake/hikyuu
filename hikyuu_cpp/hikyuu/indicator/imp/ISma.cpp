@@ -7,8 +7,8 @@
  *      Author: fasiondog
  */
 
-#include "../crt/SLICE.h"
-#include "../crt/SMA.h"
+#include <algorithm>
+#include <climits>
 #include "../crt/CVAL.h"
 #include "ISma.h"
 
@@ -27,7 +27,15 @@ ISma::~ISma() {}
 
 void ISma::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 1);
+        HKU_ASSERT(getParam<int>("n") >= 1 && getParam<int>("n") < INT_MAX);
+    }
+
+    // the recursion is unstable outside 1 <= m <= n, the calculation clamps m into that range
+    if (haveParam("m")) {
+        double m = getParam<double>("m");
+        int n = getParam<int>("n");
+        HKU_WARN_IF(m < 1.0 || m > n,
+                    "SMA: m({}) is outside [1, n({})], clamped in the calculation!", m, n);
     }
 }
 
@@ -51,23 +59,45 @@ void ISma::_increment_calculate(const Indicator& data, size_t start_pos) {
     size_t total = data.size();
     double n = getParam<int>("n");
     double m = getParam<double>("m");
+    if (m < 1.0 || m > n) {
+        HKU_WARN("SMA: m({}) is outside [1, n({})], clamped in the calculation!", m, n);
+        m = std::clamp(m, 1.0, n);
+    }
 
     auto const* src = data.data();
     auto* dst = this->data();
 
     double p = n - m;
-    for (size_t i = m_discard + 1; i < total; i++) {
-        dst[i] = (m * src[i] + p * dst[i - 1]) / n;
+    for (size_t i = start_pos + 1; i < total; i++) {
+        if (!std::isfinite(src[i])) {
+            dst[i] = dst[i - 1];
+        } else if (!std::isfinite(dst[i - 1])) {
+            dst[i] = src[i];
+        } else {
+            dst[i] = (m * src[i] + p * dst[i - 1]) / n;
+        }
     }
 }
 
 void ISma::_dyn_one_circle(const Indicator& ind, size_t curPos, int n, double m) {
     HKU_IF_RETURN(n < 1, void());
-    Indicator slice = SLICE(ind, 0, curPos + 1);
-    Indicator sma = SMA(slice, n, m);
-    if (sma.size() > 0) {
-        _set(sma[sma.size() - 1], curPos);
+    // Intentional: replicate the static SMA recursion on the prefix [0, curPos] with raw scalars,
+    // bitwise identical to SMA(SLICE(ind, 0, curPos + 1)) but without per-bar allocations.
+    auto const* src = ind.data();
+    double dn = n;
+    double dm = std::clamp(m, 1.0, dn);
+    double p = dn - dm;
+    price_t prev = src[ind.discard()];
+    for (size_t i = ind.discard() + 1; i <= curPos; ++i) {
+        if (!std::isfinite(src[i])) {
+            // hold prev
+        } else if (!std::isfinite(prev)) {
+            prev = src[i];
+        } else {
+            prev = (dm * src[i] + p * prev) / dn;
+        }
     }
+    _set(prev, curPos);
 }
 
 void ISma::_dyn_calculate(const Indicator& ind) {
@@ -76,7 +106,7 @@ void ISma::_dyn_calculate(const Indicator& ind) {
       iter != m_ind_params.end() ? Indicator(iter->second) : CVAL(ind, getParam<int>("n"));
     iter = m_ind_params.find("m");
     Indicator m =
-      iter != m_ind_params.end() ? Indicator(iter->second) : CVAL(ind, getParam<int>("m"));
+      iter != m_ind_params.end() ? Indicator(iter->second) : CVAL(ind, getParam<double>("m"));
 
     HKU_CHECK(n.size() == ind.size(), "ind_param(n).size()={}, ind.size()={}!", n.size(),
               ind.size());

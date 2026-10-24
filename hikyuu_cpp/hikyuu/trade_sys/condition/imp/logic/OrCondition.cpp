@@ -5,6 +5,7 @@
  *    1. 20240223 added by fasiondog
  */
 
+#include <cmath>
 #include "OrCondition.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -45,7 +46,7 @@ void OrCondition::_calculate() {
     if (m_cond1 && !m_cond2) {
         auto const* data = m_cond1->data();
         for (size_t i = 0, total = m_cond1->size(); i < total; i++) {
-            if (data[i] > 0.0) {
+            if (std::isfinite(data[i]) && data[i] > 0.0) {
                 m_values[i] = 1.0;
             }
         }
@@ -55,7 +56,7 @@ void OrCondition::_calculate() {
     if (!m_cond1 && m_cond2) {
         auto const* data = m_cond2->data();
         for (size_t i = 0, total = m_cond2->size(); i < total; i++) {
-            if (data[i] > 0.0) {
+            if (std::isfinite(data[i]) && data[i] > 0.0) {
                 m_values[i] = 1.0;
             }
         }
@@ -68,7 +69,8 @@ void OrCondition::_calculate() {
     auto const* data1 = m_cond1->data();
     auto const* data2 = m_cond2->data();
     for (size_t i = 0; i < total; i++) {
-        if (data1[i] > 0. || data2[i] > 0.) {
+        if ((std::isfinite(data1[i]) && data1[i] > 0.) ||
+            (std::isfinite(data2[i]) && data2[i] > 0.)) {
             m_values[i] = 1.0;
         }
     }
@@ -95,6 +97,7 @@ ConditionPtr OrCondition::_clone() {
 }
 
 HKU_API ConditionPtr operator|(const ConditionPtr& cond1, const ConditionPtr& cond2) {
+    HKU_WARN_IF(!cond1 || !cond2, "OrCondition: one side is null, the single-side mode will be used.");
     return make_shared<OrCondition>(cond1, cond2);
 }
 

@@ -13,8 +13,9 @@
 namespace hku {
 
 /**
- * 评分过滤器
- * @note 虽然直接使用 std::function 即可，但如果使用 python 函数会造成并行死锁
+ * Score filter
+ * @note Although std::function could be used directly, using a python function would cause a
+ *       parallel deadlock
  * @ingroup Selector
  */
 class HKU_API ScoresFilterBase {
@@ -53,13 +54,18 @@ public:
         return m_is_python_object;
     }
 
+    /** Whether this filter or the filter it combines is defined in Python */
+    virtual bool hasPythonPart() const noexcept {
+        return m_is_python_object || (m_child && m_child->hasPythonPart());
+    }
+
 protected:
     string m_name;
     ScoresFilterPtr m_child;
     bool m_is_python_object{false};
 
 //============================================
-// 序列化支持
+// Serialization support
 //============================================
 #if HKU_SUPPORT_SERIALIZATION
 private:
@@ -114,6 +120,7 @@ public:                                                                         
 HKU_API std::ostream& operator<<(std::ostream&, const ScoresFilterBase&);
 HKU_API std::ostream& operator<<(std::ostream&, const ScoresFilterPtr&);
 
+/// Combine two filters as a new chain; both operands are cloned and never modified.
 HKU_API ScoresFilterPtr operator|(const ScoresFilterPtr& a, const ScoresFilterPtr& b);
 
 }  // namespace hku

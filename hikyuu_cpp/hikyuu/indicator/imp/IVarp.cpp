@@ -7,6 +7,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IVarp.h"
 #include "../crt/MA.h"
 
@@ -25,7 +26,7 @@ IVarp::~IVarp() {}
 void IVarp::_checkParam(const string& name) const {
     if ("n" == name) {
         int n = getParam<int>(name);
-        HKU_ASSERT(n >= 2 || n == 0);
+        HKU_ASSERT((n == 0 || n >= 2) && n < INT_MAX);
     }
 }
 
@@ -34,8 +35,42 @@ void IVarp::_calculate(const Indicator& data) {
     HKU_IF_RETURN(total == 0, void());
 
     int n = getParam<int>("n");
-    if (n == 0) {
-        n = total;
+
+    auto const* src = data.data();
+    auto* dst = this->data();
+
+    // n == 0: expanding-window population variance over [data.discard(), i], skipping non-finite
+    // points; population size is the running count of finite points, not the raw index distance.
+    if (0 == n) {
+        m_discard = data.discard();
+        if (m_discard >= total) {
+            m_discard = total;
+            return;
+        }
+        size_t start_pos = data.discard();
+        price_t k = std::isfinite(src[start_pos]) ? src[start_pos] : 0.0;
+        price_t ex = 0.0, ex2 = 0.0;
+        size_t valid = 0;
+        price_t d0 = src[start_pos] - k;
+        if (std::isfinite(d0)) {
+            ex += d0;
+            ex2 += d0 * d0;
+            valid++;
+        }
+        dst[start_pos] = valid == 0 ? Null<value_t>() : 0.0;
+        for (size_t i = start_pos + 1; i < total; ++i) {
+            price_t d = src[i] - k;
+            if (std::isfinite(d)) {
+                ex += d;
+                ex2 += d * d;
+                valid++;
+            }
+            if (valid == 0)
+                continue;
+            price_t nv = (price_t)valid;
+            dst[i] = std::max<price_t>(0.0, ex2 / nv - ex * ex / (nv * nv));
+        }
+        return;
     }
 
     m_discard = data.discard() + n - 1;
@@ -44,37 +79,43 @@ void IVarp::_calculate(const Indicator& data) {
         return;
     }
 
-    auto const* src = data.data();
-    auto* dst = this->data();
-
-    vector<price_t> pow_buf(data.size());
-
     size_t start_pos = data.discard();
     size_t first_end = start_pos + n >= total ? total : start_pos + n;
-    value_t ex = 0.0, ex2 = 0.0;
+    price_t k = std::isfinite(src[start_pos]) ? src[start_pos] : 0.0;
+    price_t ex = 0.0, ex2 = 0.0;
+    size_t valid = 0;
 
-    value_t k = src[start_pos];
     for (size_t i = start_pos; i < first_end; i++) {
-        value_t d = src[i] - k;
-        ex += d;
-        value_t d_pow = d * d;
-        pow_buf[i] = d_pow;
-        ex2 += d_pow;
+        price_t d = src[i] - k;
+        if (std::isfinite(d)) {
+            ex += d;
+            ex2 += d * d;
+            valid++;
+        }
     }
 
-    value_t p1 = 1. / n;
-    value_t p2 = 1. / (n * n);
-    dst[first_end - 1] = ex2 * p1 - ex * ex * p2;
+    auto emit = [&](size_t i) {
+        if (valid == 0)
+            return;
+        price_t nv = (price_t)valid;
+        dst[i] = std::max<price_t>(0.0, ex2 / nv - ex * ex / (nv * nv));
+    };
+    emit(first_end - 1);
 
-    for (size_t i = first_end, pre_ix = first_end - n; i < total; i++, pre_ix++) {
-        ex -= src[pre_ix] - k;
-        ex2 -= pow_buf[pre_ix];
-        value_t d = src[i] - k;
-        ex += d;
-        value_t d_pow = d * d;
-        pow_buf[i] = d_pow;
-        ex2 += d_pow;
-        dst[i] = ex2 * p1 - ex * ex * p2;
+    for (size_t i = first_end; i < total; i++) {
+        price_t d_pre = src[i - n] - k;
+        if (std::isfinite(d_pre)) {
+            ex -= d_pre;
+            ex2 -= d_pre * d_pre;
+            valid--;
+        }
+        price_t d = src[i] - k;
+        if (std::isfinite(d)) {
+            ex += d;
+            ex2 += d * d;
+            valid++;
+        }
+        emit(i);
     }
 }
 
@@ -92,31 +133,35 @@ void IVarp::_increment_calculate(const Indicator& data, size_t start_pos) {
     auto const* src = data.data();
     auto* dst = this->data();
 
-    vector<price_t> pow_buf(data.size());
-
-    value_t ex = 0.0, ex2 = 0.0;
-    value_t k = src[start_pos];
+    price_t k = std::isfinite(src[start_pos]) ? src[start_pos] : 0.0;
+    price_t ex = 0.0, ex2 = 0.0;
+    size_t valid = 0;
     for (size_t i = start_pos - n; i < start_pos; i++) {
-        value_t d = src[i] - k;
-        ex += d;
-        value_t d_pow = d * d;
-        pow_buf[i] = d_pow;
-        ex2 += d_pow;
+        price_t d = src[i] - k;
+        if (std::isfinite(d)) {
+            ex += d;
+            ex2 += d * d;
+            valid++;
+        }
     }
 
-    value_t p1 = 1. / n;
-    value_t p2 = 1. / (n * n);
-    // dst[first_end - 1] = ex2 * p1 - ex * ex * p2;
-
-    for (size_t i = start_pos, pre_ix = start_pos - n; i < total; i++, pre_ix++) {
-        ex -= src[pre_ix] - k;
-        ex2 -= pow_buf[pre_ix];
-        value_t d = src[i] - k;
-        ex += d;
-        value_t d_pow = d * d;
-        pow_buf[i] = d_pow;
-        ex2 += d_pow;
-        dst[i] = ex2 * p1 - ex * ex * p2;
+    for (size_t i = start_pos; i < total; i++) {
+        price_t d_pre = src[i - n] - k;
+        if (std::isfinite(d_pre)) {
+            ex -= d_pre;
+            ex2 -= d_pre * d_pre;
+            valid--;
+        }
+        price_t d = src[i] - k;
+        if (std::isfinite(d)) {
+            ex += d;
+            ex2 += d * d;
+            valid++;
+        }
+        if (valid == 0)
+            continue;
+        price_t nv = (price_t)valid;
+        dst[i] = std::max<price_t>(0.0, ex2 / nv - ex * ex / (nv * nv));
     }
 }
 
@@ -126,14 +171,23 @@ void IVarp::_dyn_run_one_step(const Indicator& ind, size_t curPos, size_t step) 
     size_t start = _get_step_start(curPos, step, ind.discard());
     HKU_IF_RETURN(start != curPos + 1 - step, void());
 
+    price_t k = std::isfinite(ind[start]) ? ind[start] : 0.0;
     price_t ex = 0.0, ex2 = 0.0;
-    price_t k = ind[start];
+    size_t valid = 0;
     for (size_t i = start; i <= curPos; i++) {
         price_t d = ind[i] - k;
-        ex += d;
-        ex2 += d * d;
+        if (std::isfinite(d)) {
+            ex += d;
+            ex2 += d * d;
+            valid++;
+        }
     }
-    _set((ex2 - ex * ex / step) / step, curPos);
+    if (valid == 0) {
+        _set(Null<price_t>(), curPos);
+        return;
+    }
+    price_t nv = (price_t)valid;
+    _set(std::max<price_t>(0.0, (ex2 - ex * ex / nv) / nv), curPos);
 }
 
 Indicator HKU_API VARP(int n) {

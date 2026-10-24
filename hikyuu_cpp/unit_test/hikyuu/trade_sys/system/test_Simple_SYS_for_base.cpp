@@ -7,6 +7,7 @@
 
 #include "doctest/doctest.h"
 #include "test_sys.h"
+#include <map>
 #include <hikyuu/StockManager.h>
 #include <hikyuu/indicator/crt/MA.h>
 #include <hikyuu/trade_manage/crt/crtTM.h>
@@ -25,45 +26,45 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点（基本操作）  */
+/** @par Test point (the basic operations) */
 TEST_CASE("test_SYS_Simple_for_base") {
     TradeRecordList tr_list;
     price_t current_cash;
 
     StockManager& sm = StockManager::instance();
 
-    // 初始参数
-    Datetime init_date(199001010000LL);   // 账户初始日期
-    price_t init_cash = 100000;           // 账户初始金额
-    TradeCostPtr costfunc = TC_Zero();    // 零成本函数
-    Stock stk = sm["sh600000"];           // 选定标的
-    Datetime start_date(199911100000LL);  // 测试起始日期
-    Datetime end_date(200002250000LL);    // 测试结束日期
+    // The initial parameters
+    Datetime init_date(199001010000LL);   // Account initial date
+    price_t init_cash = 100000;           // Account initial amount
+    TradeCostPtr costfunc = TC_Zero();    // The zero cost function
+    Stock stk = sm["sh600000"];           // The selected security
+    Datetime start_date(199911100000LL);  // Test start date
+    Datetime end_date(200002250000LL);    // Test end date
 
     KQuery query = KQueryByDate(start_date, end_date, KQuery::DAY);
 
-    // 构建系统部件
+    // Build the system parts
     TMPtr tm = crtTM(init_date, init_cash, costfunc, "TEST_TM");
     SGPtr sg = SG_Cross(MA(CLOSE(), 5), MA(CLOSE(), 10));
     MMPtr mm = MM_FixedCount(100);
     SYSPtr sys;
 
-    /** @arg 未指定账户运行    */
+    /** @arg Run without a given account */
     sys = SYS_Simple();
     CHECK_THROWS_AS(sys->readyForRun(), std::exception);
 
-    /** @arg 指定了账户，但未指定其他策略组件 */
+    /** @arg The account is given but the other strategy components are not */
     sys = SYS_Simple();
     sys->setTM(tm->clone());
     CHECK_THROWS_AS(sys->readyForRun(), std::exception);
 
-    /** @arg 指定了TM和SG，但未指定其他策略组件 */
+    /** @arg TM and SG are given but the other components are not */
     sys = SYS_Simple();
     sys->setTM(tm->clone());
     sys->setSG(sg->clone());
     CHECK_THROWS_AS(sys->readyForRun(), std::exception);
 
-    /** @arg 指定了TM、SG、MM，但未指定其他策略组件，非延迟操作 */
+    /** @arg TM, SG and MM are given but the others are not, a non-delayed operation */
     sys = SYS_Simple();
     sys->setParam("buy_delay", false);
     sys->setParam("sell_delay", false);
@@ -115,7 +116,7 @@ TEST_CASE("test_SYS_Simple_for_base") {
     CHECK_LT(std::fabs(tr_list[3].cash - current_cash), 0.00001);
     CHECK_EQ(tr_list[3].from, PART_SIGNAL);
 
-    /** @arg 指定了TM、SG、MM，但未指定其他策略组件，延迟操作 */
+    /** @arg TM, SG and MM are given but the others are not, a delayed operation */
     sys = SYS_Simple();
     sys->setParam("buy_delay", true);
     sys->setParam("sell_delay", true);
@@ -170,6 +171,53 @@ TEST_CASE("test_SYS_Simple_for_base") {
     /*for (auto iter = tr_list.begin(); iter != tr_list.end(); ++iter) {
         std::cout ,, *iter ,, std::endl;
     }*/
+}
+
+/** @par Test point (the auto_checkin deposits only at the actual trade of a delayed buy) */
+TEST_CASE("test_SYS_Simple_for_base_auto_checkin") {
+    StockManager& sm = StockManager::instance();
+    Stock stk = sm["sh600000"];
+    REQUIRE_UNARY(!stk.isNull());
+    Datetime start_date(199911100000LL);
+    Datetime end_date(200002250000LL);
+    KQuery query = KQueryByDate(start_date, end_date, KQuery::DAY);
+
+    // A quantity far beyond the initial cash forces a top-up on every buy; a deposit on a date
+    // without a trade is the regression signature of the old query-side deposit
+    SYSPtr sys = SYS_Simple();
+    sys->setParam("buy_delay", true);
+    sys->setParam("sell_delay", true);
+    sys->setTM(crtTM(Datetime(199001010000LL), 100000, TC_Zero(), "TEST_TM"));
+    sys->setSG(SG_Cross(MA(CLOSE(), 5), MA(CLOSE(), 10)));
+    MMPtr mm = MM_FixedCount(100000);
+    mm->setParam<bool>("auto_checkin", true);
+    sys->setMM(mm);
+
+    sys->run(stk, query);
+
+    TradeRecordList tr_list = sys->getTM()->getTradeList();
+    std::map<Datetime, size_t> buy_counts, checkin_counts;
+    for (const auto& tr : tr_list) {
+        if (BUSINESS_BUY == tr.business) {
+            buy_counts[tr.datetime]++;
+        } else if (BUSINESS_CHECKIN == tr.business) {
+            checkin_counts[tr.datetime]++;
+        }
+    }
+
+    /** @arg the scenario really exercised the top-up path */
+    CHECK_UNARY(buy_counts.size() >= 1);
+    CHECK_UNARY(!checkin_counts.empty());
+
+    /** @arg every deposit coincides with an actual buy */
+    for (const auto& kv : checkin_counts) {
+        CHECK_UNARY(buy_counts.count(kv.first) > 0);
+    }
+
+    /** @arg at most one deposit per buy */
+    for (const auto& kv : checkin_counts) {
+        CHECK_LE(kv.second, buy_counts[kv.first]);
+    }
 }
 
 /** @} */

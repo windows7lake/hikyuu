@@ -20,7 +20,8 @@ MultiFactorSelector2::MultiFactorSelector2() : SelectorBase("SE_MultiFactor2") {
     setParam<Stock>("ref_stk", Stock());
     setParam<bool>("use_spearman", true);
     setParam<string>("mode", "MF_ICIRWeight");
-    setParam<int>("mf_recover_type", KQuery::INVALID_RECOVER_TYPE);  // 指定MF的计算时的复权方式
+    setParam<int>("mf_recover_type",
+                  KQuery::INVALID_RECOVER_TYPE);  // The MF calculation adjustment type
 }
 
 MultiFactorSelector2::MultiFactorSelector2(const MFPtr& mf) : SelectorBase("SE_MultiFactor2") {
@@ -35,7 +36,8 @@ MultiFactorSelector2::MultiFactorSelector2(const MFPtr& mf) : SelectorBase("SE_M
     }
     setParam<bool>("use_spearman", mf->getParam<bool>("use_spearman"));
     setParam<string>("mode", "CUSTOM");
-    setParam<int>("mf_recover_type", KQuery::INVALID_RECOVER_TYPE);  // 指定MF的计算时的复权方式
+    setParam<int>("mf_recover_type",
+                  KQuery::INVALID_RECOVER_TYPE);  // The MF calculation adjustment type
     // setIndicators(mf->getRefIndicators());
     setFactorSet(mf->getRefFactorSet());
 }
@@ -67,26 +69,35 @@ void MultiFactorSelector2::_reset() {
 
 SelectorPtr MultiFactorSelector2::_clone() {
     auto p = make_shared<MultiFactorSelector2>();
-    p->m_mf = m_mf->clone();
-    p->m_stk_sys_dict = m_stk_sys_dict;
+    if (m_mf) {
+        p->m_mf = m_mf->clone();
+    }
+    // m_stk_sys_dict references the original running systems, do not carry it into the clone;
+    // the clone rebuilds it in _calculate from its own m_real_sys_list
     p->m_factorset = m_factorset;
     return p;
 }
 
-bool MultiFactorSelector2::isMatchAF(const AFPtr& af) {
-    return true;
-}
-
 SystemWeightList MultiFactorSelector2::_getSelected(Datetime date) {
+    HKU_CHECK(m_mf, "MF is not set or the selector has not been calculated!");
+
     ScoreRecordList scores = m_mf->getScores(date, 0, Null<size_t>(), m_sc_filter);
     SystemWeightList ret;
     for (const auto& sc : scores) {
-        ret.emplace_back(m_stk_sys_dict[sc.stock], sc.value);
+        auto iter = m_stk_sys_dict.find(sc.stock);
+        if (iter == m_stk_sys_dict.end() || !iter->second) {
+            continue;
+        }
+        ret.emplace_back(iter->second, sc.value);
     }
     return ret;
 }
 
 void MultiFactorSelector2::_calculate() {
+    // Drop the previous mapping first: a second calculate (a new query, a new stock pool, a
+    // portfolio re-run) must not keep the systems of the earlier run
+    m_stk_sys_dict.clear();
+
     Stock ref_stk = getParam<Stock>("ref_stk");
     StockList stks;
     for (const auto& sys : m_pro_sys_list) {
@@ -128,8 +139,12 @@ void MultiFactorSelector2::_calculate() {
     m_mf->calculate();
 
     for (const auto& sys : m_real_sys_list) {
-        m_stk_sys_dict.insert({sys->getStock(), sys});
+        m_stk_sys_dict.insert_or_assign(sys->getStock(), sys);
     }
+}
+
+SelectorPtr HKU_API SE_MultiFactor2() {
+    return make_shared<MultiFactorSelector2>();
 }
 
 SelectorPtr HKU_API SE_MultiFactor2(const MFPtr& mf, const ScoresFilterPtr& filter) {

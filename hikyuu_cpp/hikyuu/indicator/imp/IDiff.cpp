@@ -5,6 +5,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "IDiff.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -21,7 +22,7 @@ IDiff::~IDiff() {}
 
 void IDiff::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") > 0);
+        HKU_ASSERT(getParam<int>("n") > 0 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -36,6 +37,11 @@ void IDiff::_calculate(const Indicator& data) {
     }
 
     _increment_calculate(data, m_discard);
+}
+
+size_t IDiff::min_increment_start() const {
+    // src[i - n] is read starting at i == start_pos.
+    return getParam<int>("n");
 }
 
 void IDiff::_increment_calculate(const Indicator& data, size_t start_pos) {

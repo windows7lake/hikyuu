@@ -99,7 +99,7 @@ bool Parameter::support(const boost::any& value) {
 string Parameter::type(const string& name) const {
     auto iter = m_params.find(name);
     HKU_CHECK_THROW(iter != m_params.end(), std::out_of_range,
-                    "out_of_range in Parameter::get : {}", name);
+                    "out_of_range in Parameter::type : {}", name);
     HKU_IF_RETURN(iter->second.type() == typeid(int), "int");
     HKU_IF_RETURN(iter->second.type() == typeid(int64_t), "int64");
     HKU_IF_RETURN(iter->second.type() == typeid(bool), "bool");
@@ -164,7 +164,7 @@ string Parameter::getNameValueList() const {
         }
 
         ++next_iter;
-        if (next_iter != m_params.end() && iter->second.type() != typeid(KData)) {
+        if (next_iter != m_params.end()) {
             os << ",";
         }
     }
@@ -172,7 +172,7 @@ string Parameter::getNameValueList() const {
 }
 
 HKU_API bool operator==(const Parameter& p1, const Parameter& p2) {
-    // 注意：参数大小写敏感
+    // Note: the parameter is case sensitive
     HKU_IF_RETURN(p1.size() != p2.size(), false);
 
     auto iter1 = p1.begin();
@@ -253,6 +253,7 @@ HKU_API bool operator==(const Parameter& p1, const Parameter& p2) {
             }
         } catch (...) {
             HKU_ERROR("failed conversion iter1 key: {}, iter2 key: {}", iter1->first, iter2->first);
+            return false;
         }
     }
 
@@ -260,7 +261,7 @@ HKU_API bool operator==(const Parameter& p1, const Parameter& p2) {
 }
 
 HKU_API bool operator!=(const Parameter& p1, const Parameter& p2) {
-    // 注意：参数大小写敏感
+    // Note: the parameter is case sensitive
     return !(p1 == p2);
 }
 

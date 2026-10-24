@@ -16,8 +16,9 @@
 namespace hku {
 
 /**
- * 计算N周期内总体样本方差
- * @param n N日时间窗口
+ * Calculate the population sample variance within N periods
+ * @param n N-day time window (>= 2); when it is 0 an expanding window is used, i.e. dst[i] is
+ *          the population var over [discard(), i] (discard stays at discard(); var of one = 0).
  * @ingroup Indicator
  */
 Indicator HKU_API VARP(int n = 10);

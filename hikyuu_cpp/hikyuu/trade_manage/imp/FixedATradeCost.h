@@ -9,79 +9,57 @@
 #ifndef FIXEDATRADECOST_H_
 #define FIXEDATRADECOST_H_
 
-#include "../TradeCostBase.h"
+#include "FixedATradeCostBase.h"
 
 namespace hku {
 
 /**
- * 沪深A股交易成本算法,计算每次买入或卖出的成本
+ * Trade cost algorithm for the Shanghai, Shenzhen and Beijing A-share at the current rates; it is
+ * the rolling default and always reflects the latest regime
  * @details
  * <pre>
- * 计算规则为：
- *   1）上证交易所
- *      买入：佣金＋过户费
- *      卖出：佣金＋过户费＋印花税
- *   2）深证交易所：
- *      买入：佣金
- *      卖出：佣金＋印花税
- *   其中：佣金和过户费均有最低值，当前佣金比例为千分之1.8（最低5元），印花税为千分之一
- *         上证过户费为交易数量的千分之一，不足1元，按一元计
+ * It is kept in sync with the latest regulatory rates; when the fees are cut again, update this
+ * model's defaults (the year-named models such as TC_FixedA2015/2017 stay frozen for historical
+ * backtests). Current rules:
+ *   1) transfer fee: since 2022-04-29, 0.01 per mille of the turnover amount, charged in both
+ *      directions on all markets (Shanghai, Shenzhen and Beijing)
+ *   2) stamp duty: since 2023-08-28, 0.5 per mille, charged on sells only
+ *   3) commission: charged in both directions, 5 yuan minimum
  * </pre>
+ * @ingroup TradeCost
  */
-class HKU_API FixedATradeCost : public TradeCostBase {
-    TRADE_COST_NO_PRIVATE_MEMBER_SERIALIZATION
+class HKU_API FixedATradeCost : public FixedATradeCostBase {
+    TRADE_COST_FIXEDA_SERIALIZATION
 
 public:
     /**
-     * 默认构造函数，同时设置默认参数值
+     * Default constructor, it also sets the default parameter values (current rates)
      * @details
      * <pre>
-     * 佣金比例，默认千分之1.8，即0.0018
-     * 最低佣金值，默认5元
-     * 印花税，默认千分之一，即0.001
-     * 过户费，默认每股千分之一，即0.001
-     * 最低过户费，默认1元
+     * Commission ratio, 1.8 per mille by default, i.e. 0.0018
+     * Minimum commission value, 5 yuan by default
+     * Stamp duty, 0.5 per mille by default, i.e. 0.0005
+     * Transfer fee, 0.01 per mille of turnover by default, i.e. 0.00001
      * </pre>
      */
     FixedATradeCost();
 
     /**
-     * @param commission 佣金比例
-     * @param lowestCommission 最低佣金值
-     * @param stamptax 印花税
-     * @param transferfee 过户费
-     * @param lowestTransferfee 最低过户费
+     * @param commission commission ratio
+     * @param lowestCommission minimum commission value
+     * @param stamptax stamp duty
+     * @param transferfee transfer fee
      */
     FixedATradeCost(price_t commission, price_t lowestCommission, price_t stamptax,
-                    price_t transferfee, price_t lowestTransferfee);
+                    price_t transferfee);
     virtual ~FixedATradeCost();
 
-    virtual void _checkParam(const string& name) const override;
-
-    /**
-     * 计算买入成本
-     * @param datetime 交易日期
-     * @param stock 交易的证券对象
-     * @param price 买入价格
-     * @param num 买入数量
-     * @return CostRecord 交易成本记录
-     */
-    virtual CostRecord getBuyCost(const Datetime& datetime, const Stock& stock, price_t price,
-                                  double num) const override;
-
-    /**
-     * 计算卖出成本
-     * @param datetime 交易日期
-     * @param stock 交易的证券对象
-     * @param price 卖出价格
-     * @param num 卖出数量
-     * @return CostRecord 交易成本记录
-     */
-    virtual CostRecord getSellCost(const Datetime& datetime, const Stock& stock, price_t price,
-                                   double num) const override;
-
-    /** 子类私有变量克隆接口 */
+    /** Clone interface of the private variables of the subclass */
     virtual TradeCostPtr _clone() override;
+
+protected:
+    /** Transfer fee by turnover value, charged on all markets */
+    virtual price_t _calcTransferFee(const Stock& stock, price_t value, double num) const override;
 };
 
 } /* namespace hku */

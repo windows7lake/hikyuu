@@ -1,7 +1,7 @@
 /*
  * NoGoalProfitGoal.cpp
  *
- *  Created on: 2016年5月6日
+ *  Created on: 2016-5-6
  *      Author: Administrator
  */
 
@@ -17,7 +17,7 @@ NoGoalProfitGoal::NoGoalProfitGoal() : ProfitGoalBase("PG_NoGoal") {}
 
 NoGoalProfitGoal::~NoGoalProfitGoal() {}
 
-price_t NoGoalProfitGoal::getGoal(const Datetime& datetime, price_t price) {
+price_t NoGoalProfitGoal::_getGoal(const Datetime& datetime, price_t price) {
     return Null<price_t>();
 }
 

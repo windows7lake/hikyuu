@@ -1,7 +1,7 @@
 /*
  * SelectorBase.cpp
  *
- *  Created on: 2016年2月21日
+ *  Created on: 2016-2-21
  *      Author: fasiondog
  */
 
@@ -24,6 +24,24 @@ HKU_API std::ostream& operator<<(std::ostream& os, const SelectorPtr& st) {
     return os;
 }
 
+bool SelectorBase::hasPythonPart() const noexcept {
+    if (m_is_python_object || (m_sc_filter && m_sc_filter->hasPythonPart()) ||
+        (m_mf && m_mf->hasPythonPart())) {
+        return true;
+    }
+    for (const auto& sys : m_pro_sys_list) {
+        if (sys && sys->hasPythonPart()) {
+            return true;
+        }
+    }
+    for (const auto& sys : m_real_sys_list) {
+        if (sys && sys->hasPythonPart()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 string SelectorBase::str() const {
     std::ostringstream buf;
     buf << "Selector(" << name() << ", " << getParameter() << ", " << m_sc_filter << ")";
@@ -41,13 +59,14 @@ SelectorBase::SelectorBase(const string& name) : m_name(name) {
 SelectorBase::~SelectorBase() {}
 
 void SelectorBase::initParam() {
-    // 通常原型系统不参与计算，但某些特殊的场景，需要依赖于伴生系统策略，
-    // 此时可以认为实际执行的系统行为跟随伴生系统的买卖交易，如依赖于SG进行选择
-    // (不过由于仅依赖SG的场景不严谨，因为原型和实际系统的SG是一样的)
-    // 此时，需要在自身计算之前执行原型系统，然后SE自行时可以使用。
-    // 而对于实际系统和被跟随的系统完全不一样的情况，可以自行设计特殊的SE。
-    setParam<bool>("depend_on_proto_sys", false);  // 此种情况，需要原型系统可独立运行
-    setParam<int>("get_n", 0);                     // getSelected时只取前面多少个
+    // Usually the prototype system does not participate in the calculation, but in some special
+    // scenarios it needs to rely on the companion system strategy; in that case the behavior of the
+    // actually executed system can be considered to follow the buys and sells of the companion
+    // system, such as a selection relying on the SG (however relying on the SG only is not
+    // rigorous, because the SG of the prototype and of the actual system are the same). In this
+    // case the prototype
+    setParam<bool>("depend_on_proto_sys", false);  // The prototype system must be able to run alone
+    setParam<int>("get_n", 0);                     // How many leading items getSelected returns
 }
 
 void SelectorBase::baseCheckParam(const string& name) const {}
@@ -76,6 +95,11 @@ void SelectorBase::reset() {
     m_proto_calculated = false;
 }
 
+void SelectorBase::invalidateCache() {
+    m_real_sys_list.clear();
+    m_calculated = false;
+}
+
 SelectorPtr SelectorBase::clone() {
     SelectorPtr p = _clone();
     p->m_params = m_params;
@@ -83,24 +107,28 @@ SelectorPtr SelectorBase::clone() {
     p->m_is_python_object = m_is_python_object;
     p->m_query = m_query;
     p->m_proto_query = m_proto_query;
-    p->m_calculated = m_calculated;
-    p->m_proto_calculated = m_proto_calculated;
+    // The clone's internal systems are new instances, the cached calculation results reference
+    // the original ones, the clone must recalculate
+    p->m_calculated = false;
+    p->m_proto_calculated = false;
 
-    p->m_real_sys_list.reserve(m_real_sys_list.size());
-    for (const auto& sys : m_real_sys_list) {
-        p->m_real_sys_list.emplace_back(sys->clone());
-    }
+    // Runtime cache, rebuilt by calculate
+    p->m_real_sys_list.clear();
 
-    p->m_pro_sys_list.reserve(m_pro_sys_list.size());
-    for (const auto& sys : m_pro_sys_list) {
-        p->m_pro_sys_list.emplace_back(sys->clone());
+    // A subclass may have already filled the prototype list in _clone (sharing its inner
+    // selector's instances); only clone the prototypes here when the list is still empty
+    if (p->m_pro_sys_list.empty()) {
+        p->m_pro_sys_list.reserve(m_pro_sys_list.size());
+        for (const auto& sys : m_pro_sys_list) {
+            p->m_pro_sys_list.emplace_back(sys->clone());
+        }
     }
 
     if (m_sc_filter) {
         p->m_sc_filter = m_sc_filter->clone();
     }
 
-    p->m_pf = m_pf;  // 仅为PF的引用，不clone
+    p->m_pf = m_pf;  // A reference to PF only, not cloned
 
     return p;
 }
@@ -111,7 +139,7 @@ void SelectorBase::calculate(const SystemList& pf_realSysList, const KQuery& que
     m_query = query;
     m_real_sys_list = pf_realSysList;
 
-    // 需要依赖于运行系统，在自身运算之前完成计算
+    // It depends on the running system and must be calculated before its own calculation
     if (getParam<bool>("depend_on_proto_sys")) {
         calculate_proto(query);
     }
@@ -121,7 +149,7 @@ void SelectorBase::calculate(const SystemList& pf_realSysList, const KQuery& que
 }
 
 void SelectorBase::calculate_proto(const KQuery& query) {
-    if (m_proto_query != query && !m_proto_calculated) {
+    if (m_proto_query != query || !m_proto_calculated) {
         HKU_WARN_IF_RETURN(m_pro_sys_list.empty(), void(), "m_pro_sys_list is empty!");
         for (auto& sys : m_pro_sys_list) {
             sys->run(query);
@@ -165,9 +193,10 @@ void SelectorBase::addStock(const Stock& stock, const SystemPtr& protoSys) {
                   "Scenarios that depend on prototype systems need to specify a TM!");
     }
 
-    auto proto = protoSys;
-    proto->forceResetAll();
-    SYSPtr sys = proto->clone();
+    // Reset a clone instead of the caller's prototype, so that reusing the same protoSys does not
+    // silently drop the state of the caller's object
+    SYSPtr sys = protoSys->clone();
+    sys->forceResetAll();
     sys->reset();
     sys->setStock(stock);
     _addSystem(sys);
@@ -184,13 +213,14 @@ void SelectorBase::addStockList(const StockList& stkList, const SystemPtr& proto
 }
 
 SystemWeightList SelectorBase::getSelected(Datetime date) {
-    if (getParam<int>("get_n") <= 0) {
+    int n = getParam<int>("get_n");
+    if (n <= 0) {
         return _getSelected(date);
     }
 
     SystemWeightList ret = _getSelected(date);
-    if (ret.size() > getParam<int>("get_n")) {
-        ret.resize(getParam<int>("get_n"));
+    if (ret.size() > static_cast<size_t>(n)) {
+        ret.resize(static_cast<size_t>(n));
     }
     return ret;
 }

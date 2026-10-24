@@ -14,7 +14,8 @@
 namespace hku {
 
 /**
- * 不做资金管理，有多少钱买多少
+ * No money management is done: it buys as much as the available cash allows and opens a short as
+ * much as the net assets allow
  * @ingroup MoneyManager
  */
 MoneyManagerPtr HKU_API MM_Nothing();

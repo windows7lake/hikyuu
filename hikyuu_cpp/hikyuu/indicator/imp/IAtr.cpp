@@ -1,10 +1,11 @@
 /*
  * IAtr.cpp
  *
- *  Created on: 2016年5月4日
+ *  Created on: 2016-5-4
  *      Author: Administrator
  */
 
+#include <climits>
 #include "../crt/ATR.h"
 #include "IAtr.h"
 
@@ -23,7 +24,7 @@ IAtr::~IAtr() {}
 
 void IAtr::_checkParam(const string& name) const {
     if ("n" == name) {
-        HKU_ASSERT(getParam<int>("n") >= 1);
+        HKU_ASSERT(getParam<int>("n") >= 1 && getParam<int>("n") < INT_MAX);
     }
 }
 
@@ -39,8 +40,7 @@ void IAtr::_calculate(const Indicator& data) {
 
     int n = getParam<int>("n");
 
-    // 不使用n, 而是使用 n+1, 避免 MA(TR) 和 ATR 首值不一致
-    m_discard = n + 1;
+    m_discard = n;
     if (m_discard >= total) {
         m_discard = total;
         return;
@@ -69,11 +69,18 @@ void IAtr::_calculate(const Indicator& data) {
     }
 }
 
+size_t IAtr::min_increment_start() const {
+    // dst[start_pos - 1] must hold a computed ATR, and the TR seed looks back one more bar.
+    return getParam<int>("n") + 1;
+}
+
 void IAtr::_increment_calculate(const Indicator& data, size_t start_pos) {
     const KData& kdata = getContext();
     size_t total = kdata.size();
 
     int n = getParam<int>("n");
+
+    m_discard = n;
 
     auto* k = kdata.data();
     vector<value_t> buf(total);

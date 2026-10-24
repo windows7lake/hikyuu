@@ -31,14 +31,14 @@ NormQuantile::~NormQuantile() {}
 void NormQuantile::_checkParam(const string &name) const {
     if ("quantile_min" == name) {
         double quantile_min = getParam<double>("quantile_min");
-        HKU_ASSERT(quantile_min > 0.0 && quantile_min < 1.0);
+        HKU_ASSERT(quantile_min >= 0.0 && quantile_min <= 1.0);
         if (haveParam("quantile_max")) {
             double quantile_max = getParam<double>("quantile_max");
             HKU_ASSERT(quantile_min < quantile_max);
         }
     } else if ("quantile_max" == name) {
         double quantile_max = getParam<double>("quantile_max");
-        HKU_ASSERT(quantile_max > 0.0 && quantile_max < 1.0);
+        HKU_ASSERT(quantile_max >= 0.0 && quantile_max <= 1.0);
         if (haveParam("quantile_min")) {
             double quantile_min = getParam<double>("quantile_min");
             HKU_ASSERT(quantile_min < quantile_max);
@@ -47,7 +47,9 @@ void NormQuantile::_checkParam(const string &name) const {
 }
 
 PriceList NormQuantile::normalize(const PriceList &src) {
-    PriceList result(src.size());
+    // The positions without value remain nan, consistent with NormMinMax and NormZScore, so that
+    // the downstream can ignore them via the nan check
+    PriceList result(src.size(), Null<price_t>());
     HKU_IF_RETURN(src.empty(), result);
 
     auto data =
@@ -62,62 +64,71 @@ PriceList NormQuantile::normalize(const PriceList &src) {
         }
     }
 
-    // 按值排序（升序）
+    // Sort by value (ascending)
     std::sort(valueIndices.begin(), valueIndices.end());
+
+    // A zero-dispersion cross-section has no ranks to spread; return the neutral 0 for the valid
+    // positions, consistent with NormZScore and NormMinMax (the shared zero-variance convention)
+    if (!valueIndices.empty() && valueIndices.front().first == valueIndices.back().first) {
+        for (const auto &item : valueIndices) {
+            result[item.second] = 0.0;
+        }
+        return result;
+    }
 
     boost::math::normal_distribution<> stdNormal(0.0, 1.0);
 
-    // 计算平均排名（处理重复值）
+    // Calculate the average rank (handling the duplicate values)
     int64_t i = 0;
     int64_t n = static_cast<int64_t>(valueIndices.size());
     if (n >= 50) {
-        // 大样本使用 (k - 0.5) / n
+        // For a large sample use (k - 0.5) / n
         while (i < n) {
             double currentValue = valueIndices[i].first;
-            size_t start = i;
+            int64_t start = i;
 
-            // 找到所有相同值的范围
+            // Find the range of all the equal values
             while (i < n && valueIndices[i].first == currentValue) {
                 ++i;
             }
-            int end = i - 1;  // 相同值的最后一个索引
+            int64_t end = i - 1;  // The last index of the equal values
 
-            // 计算平均排名：(start+1 + end+1) / 2 （排名从1开始）
+            // Calculate the average rank: (start+1 + end+1) / 2 (the rank starts from 1)
             double avgRank = (start + 1 + end + 1) / 2.0;
 
-            // 计算分位数百分比：(平均排名 - 0.5) / n
+            // Calculate the quantile percentage: (the average rank - 0.5) / n
             double quantile = (avgRank - 0.5) / n;
 
             double z = boost::math::quantile(stdNormal, quantile);
 
-            // 为所有相同值的原始位置赋值
+            // Assign to the original positions of all the equal values
             for (int64_t j = start; j <= end; ++j) {
                 int originalIndex = valueIndices[j].second;
                 result[originalIndex] = z;
             }
         }
     } else {
-        // 小样本使用 (k) / (n+1)
+        // For a small sample use (k) / (n+1)
         double denominator = n + 1.0;
         while (i < n) {
             double currentValue = valueIndices[i].first;
-            size_t start = i;
+            int64_t start = i;
 
-            // 找到所有相同值的范围
+            // Find the range of all the equal values
             while (i < n && valueIndices[i].first == currentValue) {
                 ++i;
             }
-            int end = i - 1;  // 相同值的最后一个索引
+            int64_t end = i - 1;  // The last index of the equal values
 
-            // 计算平均排名：(start+1 + end+1) / 2 （排名从1开始）
+            // Calculate the average rank: (start+1 + end+1) / 2 (the rank starts from 1)
             double avgRank = (start + 1 + end + 1) / 2.0;
 
-            // 计算分位数百分比：(平均排名) / (n+1)
+            // Calculate the quantile percentage: (the average rank) / (n+1)
             double quantile = avgRank / denominator;
 
             double z = boost::math::quantile(stdNormal, quantile);
 
-            // 为所有相同值的原始位置赋值
+            // Assign to the original positions of all the equal values
             for (int64_t j = start; j <= end; ++j) {
                 int originalIndex = valueIndices[j].second;
                 result[originalIndex] = z;

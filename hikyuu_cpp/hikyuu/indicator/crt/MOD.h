@@ -6,21 +6,22 @@
  */
 
 #pragma once
-#ifndef INDICATOR_IMP_MOD_H_
-#define INDICATOR_IMP_MOD_H_
+#ifndef INDICATOR_CRT_MOD_H_
+#define INDICATOR_CRT_MOD_H_
 
 #include "CVAL.h"
 
 namespace hku {
 
 /**
- * 取整后求模
+ * Modulo after rounding
  * @details
  * <pre>
- * 该函数仅为兼容通达信。实际上，指标求模可直接使用 % 操作符
+ * This function exists only for the TDX compatibility. In fact, the modulo of the indicators can be
+ * done directly with the % operator
  * </pre>
- * @param ind1 指标1，将取整
- * @param ind2 指标2，将取整
+ * @param ind1 indicator 1, it is rounded
+ * @param ind2 indicator 2, it is rounded
  * @ingroup Indicator
  */
 
@@ -42,4 +43,4 @@ inline Indicator MOD(Indicator::value_t ind1, Indicator::value_t ind2) {
 
 }  // namespace hku
 
-#endif /* INDICATOR_IMP_MOD_H_ */
+#endif /* INDICATOR_CRT_MOD_H_ */

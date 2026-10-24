@@ -20,7 +20,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_ROUNDUP") {
     Indicator result;
 
@@ -43,6 +43,12 @@ TEST_CASE("test_ROUNDUP") {
     CHECK_EQ(result.size(), 1);
     CHECK_EQ(result.discard(), 0);
     CHECK_EQ(result[0], doctest::Approx(-11.2));
+
+    /** @arg negative ndigits rounds away from zero at the 10^|ndigits| place */
+    result = ROUNDUP(1234.0, -2);
+    CHECK_EQ(result[0], doctest::Approx(1300));
+    result = ROUNDUP(-1234.0, -2);
+    CHECK_EQ(result[0], doctest::Approx(-1300));
 }
 
 //-----------------------------------------------------------------------------
@@ -50,7 +56,7 @@ TEST_CASE("test_ROUNDUP") {
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_ROUNDUP_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

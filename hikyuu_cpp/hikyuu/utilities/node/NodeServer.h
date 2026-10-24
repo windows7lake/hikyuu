@@ -58,7 +58,7 @@ public:
     void start(size_t max_parrel = 128) {
         CLS_CHECK(!m_addr.empty(), "You must set NodeServer's addr first!");
 
-        // 启动 node server
+        // Start the node server
         int rv = nng_rep0_open(&m_socket);
         CLS_CHECK(0 == rv, "Failed open server socket! {}", nng_strerror(rv));
         rv = nng_listen(m_socket, m_addr.c_str(), &m_listener, 0);
@@ -101,7 +101,7 @@ public:
             }
         }
 
-        // 关闭 socket 服务节点
+        // Close the socket service node
         nng_listener_close(m_listener);
         nng_close(m_socket);
         m_works.clear();
@@ -154,22 +154,31 @@ private:
         nng_msg* msg = nullptr;
         json res;
 
-        try {
-            int rv = nng_aio_result(work->aio);
-            HKU_CHECK(rv == 0, "Failed nng_aio_result!");
+        // A failed receive carries no message: an error reply built below would call encodeMsg
+        // with a null msg, whose HKU_ASSERT rethrows from inside the catch handler and escapes
+        // into the nng C callback (std::terminate). Re-arm the receive on the context and keep this
+        // work slot alive instead, so only a fully received request reaches the try block
+        int rv = nng_aio_result(work->aio);
+        if (rv != 0) {
+            CLS_WARN("Failed to receive a request! {}", nng_strerror(rv));
+            work->state = Work::RECV;
+            nng_ctx_recv(work->ctx, work->aio);
+            return;
+        }
 
-            msg = nng_aio_get_msg(work->aio);
+        msg = nng_aio_get_msg(work->aio);
+        try {
             json req = decodeMsg(msg);
             NODE_CHECK(req.contains("cmd"), NodeErrorCode::MISSING_CMD, "Missing command!");
 
-            // 兼容老版本数字cmd
+            // Compatible with the old version numeric cmd
             std::string cmd = req["cmd"].is_number() ? fmt::format("{}", req["cmd"].get<int>())
                                                      : req["cmd"].get<std::string>();
             auto iter = server->m_handles.find(cmd);
             NODE_CHECK(iter != server->m_handles.end(), NodeErrorCode::INVALID_CMD,
                        "The server does not know how to process the message: {}", cmd);
 
-            // tcp 连接尝试获取客户端地址和端口加入 req 中
+            // For a tcp connection it tries to get the client address and port into req
             req["remote_host"] = "";
             req["remote_port"] = 0;
             nng_pipe p = nng_msg_get_pipe(msg);
@@ -229,6 +238,7 @@ private:
             CLS_ERROR("{}", errmsg);
             res["ret"] = NodeErrorCode::UNKNOWN_ERROR;
             res["msg"] = errmsg;
+            encodeMsg(msg, res);
             nng_aio_set_msg(work->aio, msg);
             work->state = Work::SEND;
             nng_ctx_send(work->ctx, work->aio);

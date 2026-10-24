@@ -1,7 +1,7 @@
 /*
  * ConstantValue.cpp
  *
- *  Created on: 2017年6月25日
+ *  Created on: 2017-6-25
  *      Author: Administrator
  */
 
@@ -44,7 +44,7 @@ void ICval::_calculate(const Indicator& data) {
 
     size_t total = 0;
     if (isLeaf()) {
-        // 叶子节点
+        // Leaf node
         const KData& k = getContext();
         if (k.getStock().isNull()) {
             _readyBuffer(1, 1);
@@ -58,19 +58,17 @@ void ICval::_calculate(const Indicator& data) {
         }
 
         total = k.size();
-        if (0 == total) {
-            return;
-        }
-
+        m_discard = (size_t)discard > total ? total : (size_t)discard;
         _readyBuffer(total, 1);
+        HKU_IF_RETURN(0 == total, void());
         auto* dst = this->data(0);
-        for (size_t i = 0; i < total; ++i) {
+        for (size_t i = m_discard; i < total; ++i) {
             dst[i] = value;
         }
         return;
 
     } else {
-        // 非叶子节点
+        // Non-leaf node
         total = data.size();
         discard = data.discard() > discard ? data.discard() : discard;
     }
@@ -81,6 +79,7 @@ void ICval::_calculate(const Indicator& data) {
     if (ret_num == 0) {
         ret_num = 1;
     }
+    m_result_num = ret_num;
     _readyBuffer(total, ret_num);
 
     for (size_t r = 0; r < ret_num; ++r) {
@@ -96,7 +95,7 @@ void ICval::_increment_calculate(const Indicator& data, size_t start_pos) {
 
     size_t total = 0;
     if (isLeaf()) {
-        // 叶子节点
+        // Leaf node
         const KData& k = getContext();
         total = k.size();
         if (0 == total) {
@@ -104,7 +103,7 @@ void ICval::_increment_calculate(const Indicator& data, size_t start_pos) {
         }
 
     } else {
-        // 非叶子节点
+        // Non-leaf node
         total = data.size();
     }
 
@@ -123,8 +122,9 @@ Indicator HKU_API CVAL(double value, size_t discard) {
 Indicator HKU_API CVAL(const Indicator& ind, double value, int discard) {
     auto p = make_shared<ICval>(value, discard);
     if (ind.getContext() == Null<KData>()) {
-        // 传入的ind没有上下文时，如果忽略的数据长度和输入数据长度一致，则直接作为叶子节点
-        // 因为 ind 底层可能包含了其他CVAL，但CVAL没有上下文时，size为1，类似的还有 PRICELIST
+        // When the passed ind has no context and the ignored data length equals the input data
+        // length, it is treated as a leaf node directly because the underlying ind may contain
+        // other CVAL, but a CVAL without a context has the size 1; PRICELIST is similar
         return ind.discard() == ind.size() ? Indicator(p) : Indicator(p)(ind);
     }
 

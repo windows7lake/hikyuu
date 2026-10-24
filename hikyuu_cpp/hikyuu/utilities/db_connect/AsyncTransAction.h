@@ -16,9 +16,16 @@
 namespace hku {
 
 /**
- * 异步自动事务处理，在代码块中自动启动事务，并在代码块退出后自动提交
- * @note 当有多个数据更改时，如果在程序处理中间发送异常时，可能导致数据被部分提交
- * @details commit() 失败时会自动回滚，析构函数中如果未提交则自动回滚（使用 detached 协程）
+ * Asynchronous automatic transaction handling: it starts a transaction automatically in the code
+ * block and commits it automatically after the code block exits
+ * @note When there are multiple data changes, an exception thrown in the middle of the program
+ *       processing may cause the data to be partially committed
+ * @details The commit is performed in the destructor (using a detached coroutine); it rolls back
+ *          automatically when the commit fails
+ * @note The io_context that runs the create() coroutine must outlive this object, for the
+ *       destructor spawns the commit coroutine on it. If the io_context has been stopped before
+ *       the destruction, the commit cannot be performed anymore and is skipped with a warning
+ *       logged; the transaction is then rolled back when the connection is closed.
  * @ingroup DBConnect
  */
 class AsyncAutoTransAction final {
@@ -30,9 +37,9 @@ public:
     AsyncAutoTransAction& operator=(AsyncAutoTransAction&&) = delete;
 
     /**
-     * 工厂方法：创建实例并自动启动事务
-     * @param driver 数据库连接指针
-     * @return 异步事务对象
+     * Factory method: create an instance and start the transaction automatically
+     * @param driver the database connection pointer
+     * @return asynchronous transaction object
      */
     static net::awaitable<std::shared_ptr<AsyncAutoTransAction>> create(
       const AsyncDBConnectPtr& driver) {
@@ -41,65 +48,79 @@ public:
         co_return action;
     }
 
-    /** 获取数据库连接 */
+    /** Get the database connection */
     const AsyncDBConnectPtr& connect() const {
         return m_driver;
     }
 
-    /** 析构函数：如果未提交则自动回滚 */
+    /** Destructor: it commits the transaction automatically (rolls back if the commit fails) */
     ~AsyncAutoTransAction() {
-        if (!m_committed && m_driver && m_io_context) {
-            // 启动一个 detached 协程来回滚（即发即忘）
-            net::asio::co_spawn(
-              *m_io_context,
-              [driver = m_driver]() -> net::awaitable<void> {
-                  try {
-                      co_await driver->commit();
-                      co_return;
-                  } catch (const std::exception& e) {
-                      HKU_ERROR("Failed to commit transaction! {}", e.what());
-                  } catch (...) {
-                      HKU_ERROR("Failed to commit! Unknown exception!");
-                  }
-                  try {
-                      co_await driver->rollback();
-                      HKU_INFO("Transaction rolled back successfully!");
-                  } catch (...) {
-                      HKU_ERROR("Failed to rollback transaction! Unknown exception!");
-                  }
-              },
-              net::asio::detached);
+        if (!m_started || !m_driver || !m_io_context) {
+            return;
         }
+
+        if (m_io_context->stopped()) {
+            HKU_WARN(
+              "AsyncAutoTransAction: io_context stopped, the transaction cannot be committed "
+              "and will be rolled back when the connection is closed!");
+            return;
+        }
+
+        // Start a detached coroutine to commit (fire and forget); it rolls back automatically
+        // when the commit fails
+        net::asio::co_spawn(
+          *m_io_context,
+          [driver = m_driver]() -> net::awaitable<void> {
+              try {
+                  co_await driver->commit();
+                  co_return;
+              } catch (const std::exception& e) {
+                  HKU_ERROR("Failed to commit transaction! {}", e.what());
+              } catch (...) {
+                  HKU_ERROR("Failed to commit! Unknown exception!");
+              }
+              try {
+                  co_await driver->rollback();
+                  HKU_INFO("Transaction rolled back successfully!");
+              } catch (...) {
+                  HKU_ERROR("Failed to rollback transaction! Unknown exception!");
+              }
+          },
+          net::asio::detached);
     }
 
 private:
-    /* 私有构造函数 */
+    /* Private constructor */
     explicit AsyncAutoTransAction(const AsyncDBConnectPtr& driver)
-    : m_driver(driver), m_io_context(nullptr), m_committed(false) {
+    : m_driver(driver), m_io_context(nullptr), m_started(false) {
         HKU_CHECK(m_driver, "Null AsyncDBConnectPtr!");
     }
 
-    /* 内部方法：启动事务 */
+    /* Internal method: start the transaction */
     net::awaitable<void> startTransaction() {
-        // 获取当前协程环境的 io_context
+        // Get the io_context of the current coroutine environment
         auto exec = co_await net::this_coro::executor;
         m_io_context = &static_cast<boost::asio::io_context&>(exec.context());
 
-        // 启动事务
+        // Start the transaction
         co_await m_driver->transaction();
+        m_started = true;
     }
 
 private:
     AsyncDBConnectPtr m_driver;
     boost::asio::io_context* m_io_context = nullptr;
-    bool m_committed = false;
+    bool m_started = false;
 };
 
 /**
- * 异步手动事务处理，允许嵌套启动事务，必须手工启动和提交事务
- * @details 必须有一次有效的手工启动事务，多次嵌套启动事务将被视为一次事务处理。
- *          手工提交一次事务后，如有新的事务处理，须再次手工启动事务。
- * @note 析构时如果已启动但未提交，则自动回滚（使用 detached 协程）
+ * Asynchronous manual transaction handling; it allows the nested starting of the transaction and
+ * requires a manual start and commit
+ * @details There must be one effective manual transaction start; multiple nested starts are
+ * regarded as one transaction handling. After a manual commit, the transaction must be started
+ * manually again if there is new transaction handling.
+ * @note If it has been started but not committed at the destruction, it rolls back automatically
+ *       (using a detached coroutine)
  * @ingroup DBConnect
  */
 class AsyncTransAction final {
@@ -111,9 +132,9 @@ public:
     AsyncTransAction& operator=(AsyncTransAction&&) = delete;
 
     /**
-     * 工厂方法：创建实例并自动启动事务
-     * @param driver 数据库连接指针
-     * @return 异步事务对象
+     * Factory method: create an instance and start the transaction automatically
+     * @param driver the database connection pointer
+     * @return asynchronous transaction object
      */
     static net::awaitable<std::shared_ptr<AsyncTransAction>> create(
       const AsyncDBConnectPtr& driver) {
@@ -122,22 +143,22 @@ public:
         co_return action;
     }
 
-    /** 获取数据库连接 */
+    /** Get the database connection */
     const AsyncDBConnectPtr& connect() const {
         return m_driver;
     }
 
     /**
-     * 启动事务（支持嵌套）
-     * @note 如果已经启动，则不重复启动
+     * Start the transaction (the nesting is supported)
+     * @note It is not started repeatedly if it has already been started
      */
     net::awaitable<void> begin() {
         if (!m_started) {
-            // 获取当前协程环境的 io_context
+            // Get the io_context of the current coroutine environment
             auto exec = co_await net::this_coro::executor;
             m_io_context = &static_cast<boost::asio::io_context&>(exec.context());
 
-            // 启动事务
+            // Start the transaction
             co_await m_driver->transaction();
             m_started = true;
             m_committed = false;
@@ -146,8 +167,8 @@ public:
     }
 
     /**
-     * 结束并提交事务
-     * @note 必须先调用 begin() 启动事务
+     * End and commit the transaction
+     * @note begin() must be called first to start the transaction
      */
     net::awaitable<void> end() {
         HKU_CHECK(m_started, "No transaction has started!");
@@ -159,7 +180,7 @@ public:
         co_return;
     }
 
-    /** 回滚事务 */
+    /** Roll back the transaction */
     net::awaitable<void> rollback() {
         if (m_started && !m_committed) {
             co_await m_driver->rollback();
@@ -169,13 +190,13 @@ public:
         co_return;
     }
 
-    /** 析构函数：如果已启动但未提交，则自动回滚 */
+    /** Destructor: it rolls back automatically if it has been started but not committed */
     ~AsyncTransAction() {
-        // 如果没有主动提交事务，视为需要回滚
+        // If the transaction has not been committed actively it is regarded as needing a rollback
         if (m_started && !m_committed && m_driver && m_io_context) {
             HKU_WARN("AsyncTransAction: The transaction is rolled back in destructor!");
 
-            // 启动一个 detached 协程来回滚（即发即忘）
+            // Start a detached coroutine to roll back (fire and forget)
             boost::asio::co_spawn(
               *m_io_context,
               [driver = m_driver]() -> net::awaitable<void> {
@@ -192,7 +213,7 @@ public:
     }
 
 private:
-    /** 私有构造函数 */
+    /** Private constructor */
     explicit AsyncTransAction(const AsyncDBConnectPtr& driver)
     : m_driver(driver), m_io_context(nullptr), m_committed(false), m_started(false) {
         HKU_CHECK(m_driver, "Null AsyncDBConnectPtr!");

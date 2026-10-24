@@ -7,22 +7,25 @@
 
 #pragma once
 
+#include <random>
 #include "../SlippageBase.h"
 
 namespace hku {
 
 class LogNormalSlippage : public SlippageBase {
-    SLIPPAGE_IMP(LogNormalSlippage)
+    SLIPPAGE_IMP_RNG(LogNormalSlippage)
     SLIPPAGE_NO_PRIVATE_MEMBER_SERIALIZATION
 
 public:
     LogNormalSlippage();
     virtual ~LogNormalSlippage();
     virtual void _checkParam(const string& name) const override;
+    virtual void _reset() override;
+    virtual price_t _getRealBuyShortPrice(const Datetime&, price_t) override;
+    virtual price_t _getRealSellShortPrice(const Datetime&, price_t) override;
 
 private:
-    static std::random_device ms_rd;
-    static std::mt19937 ms_gen;
+    std::mt19937 m_gen;
 };
 
 } /* namespace hku */

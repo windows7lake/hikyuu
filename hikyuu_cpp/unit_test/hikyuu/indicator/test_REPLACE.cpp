@@ -6,7 +6,9 @@
  */
 
 #include "../test_config.h"
+#include <cmath>
 #include <fstream>
+#include <limits>
 #include <hikyuu/StockManager.h>
 #include <hikyuu/indicator/crt/KDATA.h>
 #include <hikyuu/indicator/crt/REPLACE.h>
@@ -20,11 +22,11 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_REPLACE") {
     double nan = Null<double>();
 
-    /** @arg 替换非 nan 值, 不忽略 discard */
+    /** @arg Replace a non-nan value, the discard is not ignored */
     Indicator input = PRICELIST(PriceList{nan, nan, 3, 4.3, 5, 4.3, 7, 8, 9, 10}, 2);
     Indicator expect = PRICELIST(PriceList{nan, nan, 3, 4, 5, 4, 7, 8, 9, 10}, 2);
     Indicator result = REPLACE(input, 4.3, 4);
@@ -38,7 +40,7 @@ TEST_CASE("test_REPLACE") {
         CHECK_EQ(result[i], expect[i]);
     }
 
-    /** @arg 替换非 Nan值为 nan 值，忽略 discard */
+    /** @arg Replace a non-Nan value with nan, the discard is ignored */
     input = PRICELIST(PriceList{nan, nan, 3, 4.3, 5, 4.3, 7, 8, 9, 10}, 2);
     expect = PRICELIST(PriceList{nan, nan, nan, 4.3, 5, 4.3, 7, 8, 9, 10}, 3);
     result = REPLACE(input, 3, nan, true);
@@ -51,7 +53,7 @@ TEST_CASE("test_REPLACE") {
         CHECK_EQ(result[i], expect[i]);
     }
 
-    /** @arg 替换 Nan值为 0，不忽略 discard */
+    /** @arg Replace the Nan values with 0, the discard is not ignored */
     input = PRICELIST(PriceList{nan, nan, 3, nan, 5, 4.3, 7, 8, 9, 10}, 2);
     expect = PRICELIST(PriceList{nan, nan, 3, 0.0, 5, 4.3, 7, 8, 9, 10}, 2);
     result = REPLACE(input, nan, 0.0);
@@ -64,7 +66,7 @@ TEST_CASE("test_REPLACE") {
         CHECK_EQ(result[i], expect[i]);
     }
 
-    /** @arg 替换 Nan值为 0，忽略 discard */
+    /** @arg Replace the Nan values with 0, the discard is ignored */
     input = PRICELIST(PriceList{nan, nan, 3, nan, 5, 4.3, 7, 8, 9, 10}, 2);
     expect = PRICELIST(PriceList{1., 1., 3, 1.0, 5, 4.3, 7, 8, 9, 10});
     result = REPLACE(input, nan, 1.0, true);
@@ -78,12 +80,47 @@ TEST_CASE("test_REPLACE") {
     }
 }
 
+// The relative ULP tolerance is resolved at the storage precision: with the float indicator
+// buffer 100.0000001 == 100.0f and 1e308 overflows to inf, so none of these values stay distinct
+// and the expected literals cannot be represented either
+#if !HKU_USE_LOW_PRECISION
+
+/** @par Test points */
+TEST_CASE("test_REPLACE_nearly_equal") {
+    /** @arg a value one ULP away at price magnitude is replaced (an absolute epsilon missed it) */
+    Indicator input = PRICELIST(PriceList{std::nextafter(100.0, 101.0), 100.0, 100.0000001});
+    Indicator result = REPLACE(input, 100.0, 1.0);
+    CHECK_EQ(result[0], 1.0);
+    CHECK_EQ(result[1], 1.0);
+    CHECK_EQ(result[2], 100.0000001);
+
+    /** @arg values differing only by decimal representation error are replaced */
+    input = PRICELIST(PriceList{0.3 - 0.2, 0.10000001});
+    result = REPLACE(input, 0.1, 2.0);
+    CHECK_EQ(result[0], 2.0);
+    CHECK_EQ(result[1], 0.10000001);
+
+    /** @arg tiny non-zero values are no longer falsely matched against 0 (old epsilon bug) */
+    input = PRICELIST(PriceList{1e-17, 0.0});
+    result = REPLACE(input, 0.0, 5.0);
+    CHECK_EQ(result[0], 1e-17);
+    CHECK_EQ(result[1], 5.0);
+
+    /** @arg infinity matches only via equality; huge finite values are kept */
+    input = PRICELIST(PriceList{1e308, std::numeric_limits<double>::infinity()});
+    result = REPLACE(input, std::numeric_limits<double>::infinity(), 6.0);
+    CHECK_EQ(result[0], 1e308);
+    CHECK_EQ(result[1], 6.0);
+}
+
+#endif  // #if !HKU_USE_LOW_PRECISION
+
 //-----------------------------------------------------------------------------
 // test export
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_REPLACE_export") {
     StockManager& sm = StockManager::instance();
     string filename(sm.tmpdir());

@@ -16,8 +16,9 @@
 namespace hku {
 
 /**
- * 计算N周期内未调整的总体偏度
- * @param n N日时间窗口（大于等于3或等于0），等于0时使用输入的ind实际长度
+ * Calculate the unadjusted population skewness within N periods
+ * @param n N-day time window (>= 3); when it is 0 an expanding window is used, i.e. dst[i] is the
+ *          skewness over [discard(), i] (discard becomes discard()+2, the first two bars are nan)
  * @ingroup Indicator
  */
 Indicator HKU_API SKEW(int n = 10);

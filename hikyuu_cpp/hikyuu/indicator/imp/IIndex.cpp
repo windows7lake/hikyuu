@@ -17,12 +17,14 @@ BOOST_CLASS_EXPORT(hku::IIndex)
 namespace hku {
 
 IIndex::IIndex() : IndicatorImp("INDEX", 1) {
+    m_need_context = true;
     setParam<bool>("fill_null", true);
     setParam<string>("kpart", "CLOSE");
     setParam<string>("market_code", "SH000001");
 }
 
 IIndex::IIndex(const string& kpart, bool fill_null) : IndicatorImp("INDEX", 1) {
+    m_need_context = true;
     setParam<bool>("fill_null", fill_null);
     string part_name(kpart);
     to_upper(part_name);
@@ -67,13 +69,9 @@ void IIndex::_calculate(const Indicator& ind) {
         HKU_WARN("Not known the index code, will use {} as default.", market_code);
     }
 
-    // 调整 market_code 参数为当前指数 market_code
-    setParam<string>("market_code", market_code);
-
     KQuery query = k.getQuery();
-    auto secs = KQuery::getKTypeInSeconds(query.kType());
-    query = KQueryByDate(k[0].datetime, k[total - 1].datetime + Seconds(secs), query.kType(),
-                         query.recoverType());
+    query = KQueryByDate(k[0].datetime, k[total - 1].datetime + query.kTypeInSeconds(),
+                         query.kType(), query.recoverType());
 
     KData index_k = getKData(market_code, query);
     Indicator index =

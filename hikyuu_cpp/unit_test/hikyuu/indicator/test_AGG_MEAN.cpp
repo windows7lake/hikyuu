@@ -8,6 +8,9 @@
 #include "../test_config.h"
 #include <hikyuu/StockManager.h>
 #include <hikyuu/indicator/crt/KDATA.h>
+#include <hikyuu/indicator/crt/CVAL.h>
+#include <cmath>
+#include <limits>
 #include <hikyuu/plugin/interface/plugins.h>
 #include <hikyuu/plugin/extind.h>
 #include <hikyuu/plugin/device.h>
@@ -21,7 +24,7 @@ using namespace hku;
  * @{
  */
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_AGG_MEAN") {
     HKU_IF_RETURN(!pluginValid(), void());
 
@@ -29,7 +32,7 @@ TEST_CASE("test_AGG_MEAN") {
     auto mink =
       getKData("sh000001", KQueryByDate(Datetime(20111115), Null<Datetime>(), KQuery::MIN));
 
-    /** @arg 单日分钟线聚合 */
+    /** @arg The single day minute line aggregation */
     auto ind = AGG_MEAN(CLOSE(), KQuery::MIN);
     auto result = ind(k);
     CHECK_EQ(result.size(), k.size());
@@ -59,12 +62,27 @@ TEST_CASE("test_AGG_MEAN") {
     CHECK_EQ(result[3], doctest::Approx(sum / mink2.size()));
 }
 
+/** @par Test points */
+TEST_CASE("test_AGG_MEAN_inf_as_missing") {
+    HKU_IF_RETURN(!pluginValid(), void());
+
+    auto k = getKData("sh000001", KQueryByDate(Datetime(20111115)));
+
+    // Inf is not valid data, so an all-Inf group has no mean and must be Null
+    Indicator::value_t inf = std::numeric_limits<Indicator::value_t>::infinity();
+    Indicator result = AGG_MEAN(CVAL(inf)(k), KQuery::MIN)(k);
+    CHECK_EQ(result.size(), k.size());
+    for (size_t i = 0; i < result.size(); ++i) {
+        CHECK_UNARY(!std::isfinite(result[i]));
+    }
+}
+
 //-----------------------------------------------------------------------------
 // test export
 //-----------------------------------------------------------------------------
 #if HKU_SUPPORT_SERIALIZATION
 
-/** @par 检测点 */
+/** @par Test points */
 TEST_CASE("test_AGG_MEAN_export") {
     HKU_IF_RETURN(!pluginValid(), void());
 

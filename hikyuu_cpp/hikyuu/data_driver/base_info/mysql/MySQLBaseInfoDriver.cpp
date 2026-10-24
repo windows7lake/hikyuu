@@ -1,15 +1,17 @@
 /*
  * MySQLBaseInfoDriver.cpp
  *
- *  Created on: 2014年8月27日
+ *  Created on: 2014-8-27
  *      Author: fasiondog
  */
 
 #include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string.hpp>
+#include <fmt/format.h>
 #include "MySQLBaseInfoDriver.h"
 
 #include "hikyuu/utilities/Log.h"
+#include "hikyuu/utilities/db_connect/DBCondition.h"
 #include "../../../StockManager.h"
 #include "../table/MarketInfoTable.h"
 #include "../table/StockTypeInfoTable.h"
@@ -108,12 +110,13 @@ StockWeightList MySQLBaseInfoDriver::getStockWeightList(const string &market, co
         vector<StockWeightTable> table;
         Datetime new_start = start.isNull() ? Datetime::min() : start;
         Datetime new_end = end.isNull() ? Datetime::max() : end;
-        con->batchLoad(
-          table,
-          format(
-            "stockid=(select stockid from stock where marketid=(select marketid from "
-            "market where market='{}') and code='{}') and date>={} and date<{} order by date asc",
-            market, code, new_start.ymd(), new_end.ymd()));
+        con->batchLoad(table,
+                       DBCondition::fromFragment(
+                         "stockid=(select stockid from stock where marketid=(select marketid from "
+                         "market where market=?1) and code=?2) and date>=?3 and date<?4",
+                         {market, code, static_cast<int64_t>(new_start.ymd()),
+                          static_cast<int64_t>(new_end.ymd())}) +
+                         ASC("date"));
 
         for (auto &w : table) {
             try {
@@ -196,18 +199,16 @@ vector<StockInfo> MySQLBaseInfoDriver::getAllStockInfo() {
 }
 
 StockInfo MySQLBaseInfoDriver::getStockInfo(string market, const string &code) {
-    HKU_ASSERT(m_pool);
     StockInfo result;
+    HKU_ERROR_IF_RETURN(!m_pool, result, "Connect pool ptr is null!");
     try {
         to_upper(market);
+        // getSelectSQL() already carries the join conditions: the generic load() would append a
+        // second "where" to it, so the filters are appended with "and" directly
         auto con = m_pool->get();
-        string sql =
-          format("{} and a.code='{}' and c.market='{}'", StockInfo::getSelectSQL(), code, market);
-        SQLStatementPtr st = con->getStatement(sql);
-        st->exec();
-        if (st->moveNext()) {
-            result.load(st);
-        }
+        con->loadView(result,
+                      fmt::format("{} and a.code=?1 and c.market=?2", StockInfo::getSelectSQL()),
+                      {code, market});
     } catch (...) {
     }
     return result;
@@ -221,7 +222,7 @@ MarketInfo MySQLBaseInfoDriver::getMarketInfo(const string &market) {
         MarketInfoTable info;
         string new_market(market);
         to_upper(new_market);
-        con->load(info, format("market=\"{}\"", new_market));
+        con->load(info, Field("market") == new_market);
         if (!info.market().empty()) {
             result = MarketInfo(info.market(), info.name(), info.description(), info.code(),
                                 info.lastDate(), info.openTime1(), info.closeTime1(),
@@ -282,13 +283,14 @@ Parameter MySQLBaseInfoDriver::getFinanceInfo(const string &market, const string
         << "f.zhuyinglirun, f.yingshouzhangkuan, f.yingyelirun, f.touzishouyu,"
         << "f.jingyingxianjinliu, f.zongxianjinliu, f.cunhuo, f.lirunzonghe,"
         << "f.shuihoulirun, f.jinglirun, f.weifenpeilirun, f.meigujingzichan,"
-        << "f.baoliu2 from stkfinance f, stock s, market m " << "where m.market='" << market << "'"
-        << " and s.code = '" << code << "'" << " and s.marketid = m.marketid"
+        << "f.baoliu2 from stkfinance f, stock s, market m " << "where m.market=?"
+        << " and s.code = ?" << " and s.marketid = m.marketid"
         << " and f.stockid = s.stockid" << " order by updated_date DESC limit 1";
 
     auto con = m_pool->get();
 
     auto st = con->getStatement(buf.str());
+    st->bind(0, market, code);
     st->exec();
     if (!st->moveNext()) {
         return result;

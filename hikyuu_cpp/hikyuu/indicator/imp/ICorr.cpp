@@ -5,6 +5,7 @@
  *      Author: fasiondog
  */
 
+#include <climits>
 #include "ICorr.h"
 
 #if HKU_SUPPORT_SERIALIZATION
@@ -27,7 +28,7 @@ ICorr::~ICorr() {}
 void ICorr::_checkParam(const string& name) const {
     if ("n" == name) {
         int n = getParam<int>("n");
-        HKU_ASSERT(n == 0 || n >= 2);
+        HKU_ASSERT(n == 0 || (n >= 2 && n < INT_MAX));
     }
 }
 
@@ -38,11 +39,57 @@ void ICorr::_calculate(const Indicator& ind) {
     Indicator ref = prepare(ind);
 
     int n = getParam<int>("n");
-    if (n == 0) {
-        n = total;
+    size_t startPos = std::max(ind.discard(), ref.discard());
+    value_t null_price = Null<price_t>();
+
+    // n == 0: expanding-window Pearson corr & sample cov over [startPos, i]; pairs with any
+    // non-finite value are excluded from both the sums and the running denominator.
+    if (0 == n) {
+        m_discard = startPos + 1;
+        if (m_discard >= total) {
+            m_discard = total;
+            return;
+        }
+        auto const* datax = ind.data();
+        auto const* datay = ref.data();
+        value_t kx = datax[startPos];
+        value_t ky = datay[startPos];
+        if (!std::isfinite(kx))
+            kx = 0.0;
+        if (!std::isfinite(ky))
+            ky = 0.0;
+        value_t ex = 0.0, ey = 0.0, ex2 = 0.0, ey2 = 0.0, exy = 0.0;
+        size_t valid = 0;
+        if (std::isfinite(datax[startPos]) && std::isfinite(datay[startPos]))
+            valid = 1;
+        auto* dst0 = this->data(0);
+        auto* dst1 = this->data(1);
+        for (size_t i = startPos + 1; i < total; ++i) {
+            if (std::isfinite(datax[i]) && std::isfinite(datay[i])) {
+                value_t ix = datax[i] - kx;
+                value_t iy = datay[i] - ky;
+                ex += ix;
+                ey += iy;
+                ex2 += ix * ix;
+                ey2 += iy * iy;
+                exy += ix * iy;
+                valid++;
+            }
+            if (valid < 2)
+                continue;
+            value_t nv = (value_t)valid;
+            value_t varx = ex2 - ex * ex / nv;
+            value_t vary = ey2 - ey * ey / nv;
+            value_t cov = exy - ex * ey / nv;
+            dst0[i] = !(varx > 0.0 && vary > 0.0 && std::isfinite(varx) && std::isfinite(vary) &&
+                        std::isfinite(cov))
+                        ? null_price
+                        : cov / std::sqrt(varx * vary);
+            dst1[i] = (exy - ex * ey / nv) / (nv - 1);
+        }
+        return;
     }
 
-    size_t startPos = std::max(ind.discard(), ref.discard());
     m_discard = startPos + n - 1;
     if (m_discard >= total) {
         m_discard = total;
@@ -55,43 +102,67 @@ void ICorr::_calculate(const Indicator& ind) {
     auto const* datay = ref.data();
     value_t kx = datax[startPos];
     value_t ky = datay[startPos];
-    value_t ex = 0.0, ey = 0.0, exy = 0.0, varx = 0.0, vary = 0.0, cov = 0.0;
-    value_t ex2 = 0.0, ey2 = 0.0;
-    value_t ix, iy;
+    if (!std::isfinite(kx))
+        kx = 0.0;
+    if (!std::isfinite(ky))
+        ky = 0.0;
+    value_t ex = 0.0, ey = 0.0, ex2 = 0.0, ey2 = 0.0, exy = 0.0;
+    size_t valid = 0;
+    if (std::isfinite(datax[startPos]) && std::isfinite(datay[startPos]))
+        valid = 1;
 
     auto* dst0 = this->data(0);
     auto* dst1 = this->data(1);
     for (size_t i = startPos + 1; i < first_end; i++) {
-        ix = datax[i] - kx;
-        iy = datay[i] - ky;
-        ex += ix;
-        ey += iy;
-        ex2 += ix * ix;
-        ey2 += iy * iy;
-        exy += ix * iy;
+        if (std::isfinite(datax[i]) && std::isfinite(datay[i])) {
+            value_t ix = datax[i] - kx;
+            value_t iy = datay[i] - ky;
+            ex += ix;
+            ey += iy;
+            ex2 += ix * ix;
+            ey2 += iy * iy;
+            exy += ix * iy;
+            valid++;
+        }
     }
 
-    varx = ex2 - ex * ex / n;
-    vary = ey2 - ey * ey / n;
-    cov = exy - ex * ey / n;
-    dst0[first_end - 1] = cov / std::sqrt(varx * vary);
-    dst1[first_end - 1] = cov / (n - 1);
+    auto emit = [&](size_t i) {
+        if (valid < 2)
+            return;
+        value_t nv = (value_t)valid;
+        value_t varx = ex2 - ex * ex / nv;
+        value_t vary = ey2 - ey * ey / nv;
+        value_t cov = exy - ex * ey / nv;
+        dst0[i] = !(varx > 0.0 && vary > 0.0 && std::isfinite(varx) && std::isfinite(vary) &&
+                    std::isfinite(cov))
+                    ? null_price
+                    : cov / std::sqrt(varx * vary);
+        dst1[i] = cov / (nv - 1);
+    };
+    emit(first_end - 1);
 
     for (size_t i = first_end; i < total; i++) {
-        ix = datax[i] - kx;
-        iy = datay[i] - ky;
-        ex += datax[i] - datax[i - n];
-        ey += datay[i] - datay[i - n];
-        value_t preix = datax[i - n] - kx;
-        value_t preiy = datay[i - n] - ky;
-        ex2 += ix * ix - preix * preix;
-        ey2 += iy * iy - preiy * preiy;
-        exy += ix * iy - preix * preiy;
-        varx = (ex2 - ex * ex / n);
-        vary = (ey2 - ey * ey / n);
-        cov = (exy - ex * ey / n);
-        dst0[i] = cov / std::sqrt(varx * vary);
-        dst1[i] = cov / (n - 1);
+        if (std::isfinite(datax[i - n]) && std::isfinite(datay[i - n])) {
+            value_t preix = datax[i - n] - kx;
+            value_t preiy = datay[i - n] - ky;
+            ex -= preix;
+            ey -= preiy;
+            ex2 -= preix * preix;
+            ey2 -= preiy * preiy;
+            exy -= preix * preiy;
+            valid--;
+        }
+        if (std::isfinite(datax[i]) && std::isfinite(datay[i])) {
+            value_t ix = datax[i] - kx;
+            value_t iy = datay[i] - ky;
+            ex += ix;
+            ey += iy;
+            ex2 += ix * ix;
+            ey2 += iy * iy;
+            exy += ix * iy;
+            valid++;
+        }
+        emit(i);
     }
 }
 
@@ -111,50 +182,69 @@ void ICorr::_increment_calculate(const Indicator& ind, size_t start_pos) {
 
     int n = getParam<int>("n");
     size_t startPos = start_pos - n;
-
-    size_t first_end = start_pos;  // startPos + n >= total ? total : startPos + n;
+    size_t first_end = start_pos;
+    value_t null_price = Null<price_t>();
 
     auto const* datax = ind.data();
     auto const* datay = ref.data();
     value_t kx = datax[startPos];
     value_t ky = datay[startPos];
-    value_t ex = 0.0, ey = 0.0, exy = 0.0, varx = 0.0, vary = 0.0, cov = 0.0;
-    value_t ex2 = 0.0, ey2 = 0.0;
-    value_t ix, iy;
+    if (!std::isfinite(kx))
+        kx = 0.0;
+    if (!std::isfinite(ky))
+        ky = 0.0;
+    value_t ex = 0.0, ey = 0.0, ex2 = 0.0, ey2 = 0.0, exy = 0.0;
+    size_t valid = 0;
+    if (std::isfinite(datax[startPos]) && std::isfinite(datay[startPos]))
+        valid = 1;
 
     auto* dst0 = this->data(0);
     auto* dst1 = this->data(1);
     for (size_t i = startPos + 1; i < first_end; i++) {
-        ix = datax[i] - kx;
-        iy = datay[i] - ky;
-        ex += ix;
-        ey += iy;
-        ex2 += ix * ix;
-        ey2 += iy * iy;
-        exy += ix * iy;
+        if (std::isfinite(datax[i]) && std::isfinite(datay[i])) {
+            value_t ix = datax[i] - kx;
+            value_t iy = datay[i] - ky;
+            ex += ix;
+            ey += iy;
+            ex2 += ix * ix;
+            ey2 += iy * iy;
+            exy += ix * iy;
+            valid++;
+        }
     }
 
-    varx = ex2 - ex * ex / n;
-    vary = ey2 - ey * ey / n;
-    cov = exy - ex * ey / n;
-    // dst0[first_end - 1] = cov / std::sqrt(varx * vary);
-    // dst1[first_end - 1] = cov / (n - 1);
-
     for (size_t i = first_end; i < total; i++) {
-        ix = datax[i] - kx;
-        iy = datay[i] - ky;
-        ex += datax[i] - datax[i - n];
-        ey += datay[i] - datay[i - n];
-        value_t preix = datax[i - n] - kx;
-        value_t preiy = datay[i - n] - ky;
-        ex2 += ix * ix - preix * preix;
-        ey2 += iy * iy - preiy * preiy;
-        exy += ix * iy - preix * preiy;
-        varx = (ex2 - ex * ex / n);
-        vary = (ey2 - ey * ey / n);
-        cov = (exy - ex * ey / n);
-        dst0[i] = cov / std::sqrt(varx * vary);
-        dst1[i] = cov / (n - 1);
+        if (std::isfinite(datax[i - n]) && std::isfinite(datay[i - n])) {
+            value_t preix = datax[i - n] - kx;
+            value_t preiy = datay[i - n] - ky;
+            ex -= preix;
+            ey -= preiy;
+            ex2 -= preix * preix;
+            ey2 -= preiy * preiy;
+            exy -= preix * preiy;
+            valid--;
+        }
+        if (std::isfinite(datax[i]) && std::isfinite(datay[i])) {
+            value_t ix = datax[i] - kx;
+            value_t iy = datay[i] - ky;
+            ex += ix;
+            ey += iy;
+            ex2 += ix * ix;
+            ey2 += iy * iy;
+            exy += ix * iy;
+            valid++;
+        }
+        if (valid < 2)
+            continue;
+        value_t nv = (value_t)valid;
+        value_t varx = ex2 - ex * ex / nv;
+        value_t vary = ey2 - ey * ey / nv;
+        value_t cov = exy - ex * ey / nv;
+        dst0[i] = !(varx > 0.0 && vary > 0.0 && std::isfinite(varx) && std::isfinite(vary) &&
+                    std::isfinite(cov))
+                    ? null_price
+                    : cov / std::sqrt(varx * vary);
+        dst1[i] = cov / (nv - 1);
     }
 }
 
